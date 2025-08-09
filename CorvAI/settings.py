@@ -38,7 +38,8 @@ INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.staticfiles',
     'Corv.apps.CorvConfig',
-    'user_interaction'
+    'input',
+    'api'
 ]
 
 MIDDLEWARE = [
