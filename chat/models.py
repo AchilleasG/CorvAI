@@ -2,8 +2,9 @@ from django.db import models
 import uuid
 
 class Chat(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.TextField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    nickname = models.TextField(max_length=255, blank=True, null=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -19,6 +20,7 @@ class ChatMessage(models.Model):
         ("system", "System"),
         ("tool", "Tool"),
     ]
+    id = models.TextField(primary_key=True, default=uuid.uuid4, editable=False)
     chat = models.ForeignKey(Chat, on_delete=models.CASCADE, related_name="messages")
     text = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
