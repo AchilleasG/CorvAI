@@ -2,6 +2,7 @@ from typing import List
 from ninja import Router
 from ninja.errors import HttpError
 from django.db import transaction
+from django.db.models import Max
 
 from chat.models import Chat
 from chat.schemas import ChatListItem, CreateChatIn, CreateChatOut, DeleteChatOut, RenameChatIn, RenameChatOut
@@ -12,8 +13,12 @@ router = Router(tags=["chat"])
 
 @router.get("/", response=List[ChatListItem])
 def list_chats(request):
-    qs = Chat.objects.only("id", "nickname").order_by("-id")
-    return [{"chat_id": c.id, "chat_nickname": c.nickname or None} for c in qs]
+    chats = (
+    Chat.objects
+    .annotate(last_message_time=Max("messages__created_at"))
+    .order_by("-last_message_time")
+    )  
+    return [{"chat_id": c.id, "chat_nickname": c.nickname or None} for c in chats]
 
 @router.post("/", response=CreateChatOut)
 @transaction.atomic

@@ -1,12 +1,16 @@
 # services/chat_ai.py
 from __future__ import annotations
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Sequence, Union
 from django.db import transaction
 from openai import OpenAI
 
 from chat.models import ChatMessage  # adjust if your app label differs
 from Corv.config import settings     # your Pydantic Settings (with openai_key)
+from openai_integration.personality import (
+    build_personality_system_message,
+    build_user_profile_message,
+)
 
 
 class ChatAIService:
@@ -28,15 +32,22 @@ class ChatAIService:
 
     @staticmethod
     
-    def _messages_to_openai_input(messages):
+    def _messages_to_openai_input(messages: Sequence[Union[ChatMessage, Dict[str, str]]]):
         out = []
         for m in messages:
-            role = ChatAIService.ROLE_MAP.get(m.role, "user")
+            if isinstance(m, dict):
+                raw_role = m.get("role", "user")
+                text_value = m.get("text", "")
+            else:
+                raw_role = getattr(m, "role", "user")
+                text_value = getattr(m, "text", "")
+
+            role = ChatAIService.ROLE_MAP.get(raw_role, "user")
             # Assistant turns must be output_text; everything else you send in is input_text.
             content_type = "output_text" if role == "assistant" else "input_text"
             out.append({
                 "role": role,
-                "content": [{"type": content_type, "text": m.text}],
+                "content": [{"type": content_type, "text": text_value}],
             })
         return out
 
@@ -56,14 +67,27 @@ class ChatAIService:
             raise ValueError("Invalid context: expected keys 'chat' and 'messages'.")
 
         history: List[ChatMessage] = context["messages"]
+        dynamic_context: List[Dict[str, str]] = context.get("dynamic_context", [])
+        user_profile_id = context.get("user_profile_id")
+        system_message = {
+            "role": "system",
+            "text": build_personality_system_message(),
+        }
+        user_profile_message = build_user_profile_message(user_profile_id)
+        profile_messages = (
+            [{"role": "system", "text": user_profile_message}]
+            if user_profile_message
+            else []
+        )
 
-        input_seq = ChatAIService._messages_to_openai_input(history)
+        combined_context = [system_message, *profile_messages, *dynamic_context, *history]
+        input_seq = ChatAIService._messages_to_openai_input(combined_context)
         print(f"Input sequence for OpenAI: {input_seq}")
         resp = ChatAIService.client.responses.create(
             model=model,
             input=input_seq,
             text={"format": {"type": "text"}, "verbosity": "medium"},
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "minimal"},
             tools=[],    # add tool specs here if/when you support tool calls
             store=True,  # optional
         )

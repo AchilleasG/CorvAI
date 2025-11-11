@@ -5,12 +5,12 @@ class Chat(models.Model):
     id = models.TextField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     nickname = models.TextField(max_length=255, blank=True, null=True)
-
+    updated_at = models.DateTimeField(auto_now=True)
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["-updated_at"]
 
     def __str__(self):
-        return f"Chat {self.id} ({self.created_at})"
+        return f"Chat {self.id} ({self.updated_at})"
 
 
 class ChatMessage(models.Model):
@@ -25,6 +25,7 @@ class ChatMessage(models.Model):
     text = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    tags = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ["created_at"]
