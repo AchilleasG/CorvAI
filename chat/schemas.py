@@ -25,6 +25,11 @@ class RenameChatOut(Schema):
     chat_nickname: Optional[str] = None
 class MessageOut(Schema):
     id: UUID
-    role: Literal["user", "assistant", "system"]
+    role: Literal["user", "assistant", "system", "tool"]
     text: str
     created_at: Optional[str] = None
+    message_type: Optional[Literal["user_visible", "tool_only", "system_note", "error"]] = None
+    audience: Optional[Literal["user", "ai_stack"]] = None
+    trace_id: Optional[str] = None
+    call_id: Optional[str] = None
+    job_id: Optional[UUID] = None

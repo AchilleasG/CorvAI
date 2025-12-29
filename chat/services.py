@@ -1,5 +1,17 @@
+import json
+from typing import Optional, Dict, Any, List
+
 from chat.models import Chat, ChatMessage
 from openai_integration.services import ChatAIService
+from orchestration.schemas import MessageEnvelope, FunctionCallPayload
+from orchestration.services import (
+    JobService,
+)
+from orchestration.message_router import MessageRouter
+from orchestration.models import Job
+from orchestration.function_caller import FunctionCallOrchestrator
+
+
 class ChatService:
     @staticmethod
     def get_chat_by_id(chat_id: int):
@@ -35,14 +47,51 @@ class ChatService:
         }
 
     @staticmethod
-    def add_message_to_chat(chat_id: int, text: str, role: str = "user"):
+    def add_message_to_chat(
+        chat_id: int,
+        text: str,
+        role: str = "user",
+        message_type: str = "user_visible",
+        audience: str = "user",
+        trace_id: str = "",
+        call_id: str = "",
+        job=None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         chat = ChatService.get_chat_by_id(chat_id)
         if not chat:
             return None
-        
-        message = ChatMessage(chat=chat, text=text, role=role)
+
+        message = ChatMessage(
+            chat=chat,
+            text=text,
+            role=role,
+            message_type=message_type,
+            audience=audience,
+            trace_id=trace_id,
+            call_id=call_id,
+            job=job,
+            metadata=metadata or {},
+        )
         message.save()
         return message
+
+    @staticmethod
+    def add_envelope_to_chat(chat_id: int, envelope: MessageEnvelope, job=None):
+        """
+        Persist a MessageEnvelope into ChatMessage storage so the AI stack has full context.
+        """
+        return ChatService.add_message_to_chat(
+            chat_id=chat_id,
+            text=envelope.content,
+            role=envelope.role if envelope.role != "frontman" else "assistant",
+            message_type=envelope.type,
+            audience=envelope.audience,
+            trace_id=envelope.trace_id,
+            call_id=envelope.call_id or "",
+            job=job,
+            metadata=envelope.metadata,
+        )
 
     @staticmethod
     def get_chat_next_message(chat_id: int):
@@ -50,11 +99,40 @@ class ChatService:
         print(f"Chat context for chat {chat_id}: {chat_context}")
         if not chat_context:
             return {"success": False, "message": "Chat not found"}
-        response = ChatAIService.generate_reply_from_context(chat_context)
-        print(f"Generated response: {response}")
+        response = ChatAIService.frontman_decision(chat_context)
+        print(f"Frontman decision raw: {response}")
         if not response:
             return {"success": False, "message": "Failed to generate response"}
-        return response
+
+        decision = ChatService._parse_decision(response)
+        if not decision:
+            # Fallback: treat as plain assistant reply
+            return response
+
+        if not decision.get("handoff"):
+            return decision.get("reply", "")
+
+        # Handoff path: create a job and run calls via Function Caller
+        module_hint = decision.get("module_hint")
+        job = JobService.create_job(
+            chat=chat_context["chat"],
+            session_id="",
+            trace_id="",
+            module=None,
+            user_visible_summary=decision.get("reason", "Running requested action"),
+        )
+        JobService.mark_status(job, Job.STATUS_RUNNING)
+
+        MessageRouter.frontman_update(
+            chat_id=chat_context["chat"].id,
+            content="Got it. I'll run this and report back.",
+            job=job,
+            message_type="user_visible",
+        )
+
+        summary_text = FunctionCallOrchestrator.run(chat_context, job)
+        JobService.mark_status(job, Job.STATUS_COMPLETED)
+        return summary_text
 
     @staticmethod
     def handle_user_input(chat_id: int, user_text: str):
@@ -62,12 +140,36 @@ class ChatService:
         chat = ChatService.get_or_create_chat(chat_id)
         chat_id = chat.id
         print(f"Chat {chat_id} exists or created.")
+        # Before logging, check for a waiting job to resume
+        from orchestration.models import Job  # local import to avoid circulars
+        waiting_job = Job.objects.filter(chat_id=chat_id, status=Job.STATUS_WAITING_USER).order_by("-created_at").first()
+
         message = ChatService.add_message_to_chat(chat_id, user_text, role="user")
         print(f"Message saved: {message}")
         if message is None:
             return {"success": False, "message": "Failed to save message"}
+        if waiting_job:
+            # Resume the pending job with the new user input
+            waiting_job.refresh_from_db()
+            waiting_job.status = Job.STATUS_RUNNING
+            waiting_job.save(update_fields=["status", "updated_at"])
+            chat_context = ChatService.construct_chat_context(chat_id)
+            summary_text = FunctionCallOrchestrator.resume(chat_context, waiting_job, user_text)
+            waiting_job.refresh_from_db()
+            if waiting_job.status != Job.STATUS_WAITING_USER:
+                JobService.mark_status(waiting_job, Job.STATUS_COMPLETED)
+            ChatService.add_message_to_chat(chat_id, summary_text, role="assistant")
+            return {"success": True, "message": summary_text, "chat_id": str(chat_id)}
+
         response = ChatService.get_chat_next_message(chat_id)
         print(f"Response from chat service: {response}")
         # Assuming response contains the assistant's reply
         ChatService.add_message_to_chat(chat_id, response, role="assistant")
         return {"success": True, "message": response, "chat_id": str(chat_id)}
+
+    @staticmethod
+    def _parse_decision(raw: str) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None

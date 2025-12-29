@@ -1,15 +1,6 @@
 version: "3.9"
 
 services:
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: mydb
-      POSTGRES_USER: myuser
-      POSTGRES_PASSWORD: mypassword
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
   web:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
@@ -17,11 +8,18 @@ services:
       - .:/app
     ports:
       - "8000:8000"
-    depends_on:
-      - db
     environment:
       - DEBUG=True
-      - DATABASE_URL=postgres://myuser:mypassword@db:5432/mydb
+      - DATABASE_URL=${DATABASE_URL}
 
-volumes:
-  postgres_data:
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_BACKEND_URL=http://web:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - web
