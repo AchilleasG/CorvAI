@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -45,6 +46,7 @@ INSTALLED_APPS = [
     'input',
     'api',
     'chat',
+    'orchestration',
     'openai_integration',
 ]
 
@@ -82,11 +84,44 @@ WSGI_APPLICATION = 'CorvAI.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
+def _database_settings():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+
+    parsed = urlparse(db_url)
+    scheme = (parsed.scheme or "").lower()
+
+    if scheme in ("postgres", "postgresql"):
+        return {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': parsed.path.lstrip("/") or "",
+            'USER': parsed.username or "",
+            'PASSWORD': parsed.password or "",
+            'HOST': parsed.hostname or "",
+            'PORT': str(parsed.port or ""),
+        }
+
+    if scheme in ("sqlite", "sqlite3"):
+        # Allow sqlite:///relative/path.db or sqlite:////abs/path.db
+        name = parsed.path or (BASE_DIR / 'db.sqlite3')
+        return {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': name,
+        }
+
+    # Fallback to default sqlite if scheme is unrecognized
+    return {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
+
+
+DATABASES = {
+    'default': _database_settings()
 }
 
 
