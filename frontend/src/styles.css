@@ -25,8 +25,9 @@ body {
 .page {
   display: grid;
   grid-template-columns: 280px 1fr;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
+  height: auto;
+  overflow-x: hidden;
 }
 
 .sidebar {
@@ -75,8 +76,11 @@ body {
   padding: 0.75rem 0.85rem;
   border-radius: 12px;
   text-align: left;
-  cursor: pointer;
   transition: border-color 0.15s ease, transform 0.15s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  position: relative;
 }
 
 .chat-pill:hover {
@@ -87,6 +91,55 @@ body {
 .chat-pill.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgba(42, 209, 163, 0.4);
+}
+
+.chat-select {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 0;
+  text-align: left;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-actions {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.chat-actions-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pill-action {
+  padding: 0.35rem 0.55rem;
+  font-size: 0.85rem;
+  line-height: 1.2;
+}
+
+.pill-action.danger {
+  border-color: rgba(255, 99, 99, 0.6);
+  color: #ffb4b4;
+}
+
+.chat-actions-menu {
+  position: absolute;
+  right: 0.65rem;
+  top: 2.5rem;
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  z-index: 5;
 }
 
 .main {

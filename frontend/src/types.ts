@@ -1,6 +1,8 @@
 export type ChatListItem = {
   chat_id: string;
   chat_nickname?: string | null;
+  last_activity_at?: string | null;
+  archived?: boolean;
 };
 
 export type Message = {

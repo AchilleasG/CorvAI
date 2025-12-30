@@ -36,12 +36,17 @@ export function createChat(chat_nickname?: string | null) {
   });
 }
 
-export function renameChat(chat_id: string, nickname: string) {
-  return request<{ chat_id: string; chat_nickname?: string | null }>(
+type UpdateChatPayload = {
+  nickname?: string | null;
+  archived?: boolean;
+};
+
+export function renameChat(chat_id: string, payload: UpdateChatPayload) {
+  return request<{ chat_id: string; chat_nickname?: string | null; archived?: boolean }>(
     `/chats/${chat_id}`,
     {
       method: "PATCH",
-      body: JSON.stringify({ nickname }),
+      body: JSON.stringify(payload),
     },
   );
 }
