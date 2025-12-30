@@ -62,6 +62,15 @@ export function fetchMessages(chat_id: string, visible_only: boolean = true) {
   return request<Message[]>(`/chats/${chat_id}/messages${suffix}`);
 }
 
+export function fetchJobMessages(chat_id: string, job_id: string) {
+  const qs = `?visible_only=false&job_id=${encodeURIComponent(job_id)}`;
+  return request<Message[]>(`/chats/${chat_id}/messages${qs}`);
+}
+
+export function fetchJobMessagesDirect(job_id: string) {
+  return request<Message[]>(`/orchestration/jobs/${job_id}/messages`);
+}
+
 export function sendText(chat_id: string, text: string) {
   return request<SendTextResponse>("/input/text/", {
     method: "POST",
@@ -90,4 +99,10 @@ export async function sendVoice(chat_id: string, file: Blob) {
 export function fetchJobs(chat_id?: string) {
   const qs = chat_id ? `?chat_id=${encodeURIComponent(chat_id)}` : "";
   return request<Job[]>(`/orchestration/jobs${qs}`);
+}
+
+export function cancelJob(job_id: string) {
+  return request<Job>(`/orchestration/jobs/${job_id}/cancel`, {
+    method: "POST",
+  });
 }

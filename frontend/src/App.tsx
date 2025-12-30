@@ -8,6 +8,8 @@ import {
   sendVoice,
   renameChat,
   deleteChat,
+  cancelJob,
+  fetchJobMessagesDirect,
 } from "./api";
 import { ChatListItem, Message, Job } from "./types";
 
@@ -23,14 +25,77 @@ function RoleBadge({ role }: { role: Message["role"] }) {
   return <span className={`badge badge-${role}`}>{label}</span>;
 }
 
-function MessageBubble({ msg }: { msg: Message }) {
+type MessageBubbleProps = {
+  msg: Message;
+  jobLogMessages: Message[];
+  jobLogAnchorId: string | null;
+  showJobLog: boolean;
+  onShowJobLog: (jobId: string) => void;
+  onHideJobLog: () => void;
+  isLastJobMessage: boolean;
+};
+
+function MessageBubble({
+  msg,
+  jobLogMessages,
+  jobLogAnchorId,
+  showJobLog,
+  onShowJobLog,
+  onHideJobLog,
+  isLastJobMessage,
+}: MessageBubbleProps) {
+  const isAnchor = showJobLog && jobLogAnchorId === msg.job_id;
   return (
-    <div className={`message ${msg.role}`}>
+    <div className={`message ${msg.role}`} style={{ position: "relative" }}>
       <div className="message-meta">
         <RoleBadge role={msg.role} />
         {msg.created_at && <span className="timestamp">{new Date(msg.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</span>}
       </div>
       <div className="message-text">{msg.text}</div>
+      {msg.job_id && isLastJobMessage && (
+        <div className="job-log-inline">
+          <button
+            type="button"
+            className="ghost pill-action"
+            onClick={() => onShowJobLog(msg.job_id!)}
+          >
+            View job log
+          </button>
+          {isAnchor && (
+            <div className="job-log-popover">
+              <div className="job-log-title">Job log</div>
+              {jobLogMessages.length > 0 ? (
+                <div className="job-log-entries">
+                  {jobLogMessages.map((m) => (
+                    <div key={m.id} className="job-log-row">
+                      <div className="job-log-meta">
+                        <span className={`badge badge-${m.role}`}>{m.role}</span>
+                        {m.created_at && (
+                          <span className="timestamp">
+                            {new Date(m.created_at).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                        )}
+                        {m.message_type && <span className="tag">{m.message_type}</span>}
+                      </div>
+                      <div className="job-log-text">{m.text}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="job-log-empty muted">No log entries yet.</div>
+              )}
+              <div style={{ textAlign: "right", marginTop: "0.35rem" }}>
+                <button type="button" className="ghost pill-action" onClick={onHideJobLog}>
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -51,6 +116,9 @@ export default function App() {
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState<string>("");
   const [openChatActionsId, setOpenChatActionsId] = useState<string | null>(null);
+  const [jobLogMessages, setJobLogMessages] = useState<Message[]>([]);
+  const [showJobLog, setShowJobLog] = useState(false);
+  const [jobLogAnchorId, setJobLogAnchorId] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
@@ -84,6 +152,41 @@ export default function App() {
     }, 5000);
     return () => clearInterval(id);
   }, [activeChatId]);
+
+  // Poll messages periodically so background job updates appear without reload.
+  useEffect(() => {
+    if (!activeChatId) return;
+    const id = setInterval(() => {
+      fetchMessages(activeChatId, true)
+        .then((msgs) => setMessages(msgs))
+        .catch(() => {});
+    }, 3000);
+    return () => clearInterval(id);
+  }, [activeChatId]);
+
+  async function loadJobLog(jobId: string) {
+    try {
+      const log = await fetchJobMessagesDirect(jobId);
+      setJobLogMessages(log);
+      setJobLogAnchorId(jobId);
+    } catch {
+      // swallow errors in hover log fetch
+    }
+  }
+
+  async function handleCancelJob(jobId: string) {
+    try {
+      await cancelJob(jobId);
+      const jobsData = await fetchJobs(activeChatId || undefined);
+      setJobs(jobsData);
+      if (activeChatId) {
+        const msgs = await fetchMessages(activeChatId, false);
+        setMessages(msgs);
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to cancel job");
+    }
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -432,10 +535,68 @@ export default function App() {
           <div>
             <p className="eyebrow">Chat</p>
             <h2>{activeChat ? formatChatLabel(activeChat) : "Start a chat"}</h2>
-            {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user") && (
-              <div className="job-indicator" style={{ marginTop: "0.4rem" }}>
+            {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user" || j.cancel_requested) && (
+              <div
+                className="job-indicator"
+                style={{ marginTop: "0.4rem", position: "relative" }}
+              >
                 <span className="pulse" aria-hidden />
-                <span>Job in progress…</span>
+                {(() => {
+                  const latestJob = [...jobs].sort((a, b) => {
+                    const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                    const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                    return bt - at;
+                  })[0];
+                  const statusText =
+                    latestJob?.status === "completed"
+                      ? "Last job completed"
+                      : latestJob?.status === "failed"
+                        ? "Last job failed"
+                        : latestJob?.status === "waiting_on_user"
+                          ? "Job waiting on you…"
+                          : "Job in progress…";
+                  return <span>{statusText}</span>;
+                })()}
+                {(() => {
+                  const latestJob = [...jobs]
+                    .sort((a, b) => {
+                      const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                      const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                      return bt - at;
+                    })[0];
+                  if (!latestJob) return null;
+                  return (
+                    <button
+                      type="button"
+                      className="ghost pill-action"
+                      style={{ marginLeft: "0.5rem" }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCancelJob(latestJob.id);
+                      }}
+                      disabled={
+                        latestJob.cancel_requested ||
+                        latestJob.status === "completed" ||
+                        latestJob.status === "failed"
+                      }
+                      title={
+                        latestJob.cancel_requested
+                          ? "Cancel requested"
+                          : latestJob.status === "completed" || latestJob.status === "failed"
+                            ? "Job finished"
+                            : "Cancel job"
+                      }
+                    >
+                      {latestJob.cancel_requested
+                        ? "Canceling…"
+                        : latestJob.status === "completed"
+                          ? "Done"
+                          : latestJob.status === "failed"
+                            ? "Failed"
+                            : "Cancel job"}
+                    </button>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -452,11 +613,39 @@ export default function App() {
             <div className="muted">Loading messages…</div>
           ) : (
             <div className="messages">
-              {messages
-                .filter((m) => m.message_type === undefined || m.message_type === "user_visible")
-                .map((m) => (
-                  <MessageBubble key={m.id} msg={m} />
-                ))}
+              {(() => {
+                const visibleMessages = messages.filter(
+                  (m) => m.message_type === undefined || m.message_type === "user_visible",
+                );
+                const lastJobIndex: Record<string, number> = {};
+                visibleMessages.forEach((m, idx) => {
+                  if (m.job_id) {
+                    lastJobIndex[m.job_id] = idx;
+                  }
+                });
+                return visibleMessages.map((m, idx) => {
+                  const isLastJobMessage = m.job_id ? lastJobIndex[m.job_id] === idx : false;
+                  return (
+                  <MessageBubble
+                    key={m.id}
+                    msg={m}
+                    jobLogMessages={jobLogMessages}
+                    jobLogAnchorId={jobLogAnchorId}
+                    showJobLog={showJobLog}
+                    isLastJobMessage={isLastJobMessage}
+                    onShowJobLog={(jobId) => {
+                      setShowJobLog(true);
+                      setJobLogAnchorId(jobId);
+                      loadJobLog(jobId);
+                    }}
+                    onHideJobLog={() => {
+                      setShowJobLog(false);
+                      setJobLogAnchorId(null);
+                    }}
+                  />
+                  );
+                });
+              })()}
               <div ref={messagesEndRef} />
               {!messages.length && (
                 <div className="muted empty">

@@ -268,6 +268,7 @@ class ModuleDirectory:
                     "name": func.name,
                     "description": func.description,
                     "params_schema": func.params_schema or {},
+                    "module_caller_instructions": func.module.caller_instructions or "",
                 }
             )
         return out
@@ -307,7 +308,7 @@ class PersonaService:
                 return qs.get(slug=slug)
             except FrontmanPersona.DoesNotExist:
                 return None
-        return qs.order_by("created_at").first()
+        return qs.order_by("-created_at").first()
 
     @staticmethod
     def build_persona_prompt(slug: Optional[str] = None) -> str:

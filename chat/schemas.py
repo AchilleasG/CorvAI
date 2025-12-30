@@ -29,7 +29,7 @@ class RenameChatOut(Schema):
     archived: bool = False
 class MessageOut(Schema):
     id: UUID
-    role: Literal["user", "assistant", "system", "tool"]
+    role: Literal["user", "assistant", "system", "tool", "caller", "runner"]
     text: str
     created_at: Optional[str] = None
     message_type: Optional[Literal["user_visible", "tool_only", "system_note", "error"]] = None

@@ -15,6 +15,7 @@ class JobOut(Schema):
     active_function: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    cancel_requested: Optional[bool] = None
 
     @staticmethod
     def from_model(job: Job) -> "JobOut":
@@ -27,4 +28,5 @@ class JobOut(Schema):
             active_function=job.active_function.manifest_id if job.active_function else None,
             created_at=job.created_at.isoformat() if job.created_at else None,
             updated_at=job.updated_at.isoformat() if job.updated_at else None,
+            cancel_requested=job.cancel_requested,
         )

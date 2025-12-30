@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from json import JSONDecoder
+import re
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -25,18 +27,45 @@ class FunctionCallOrchestrator:
         user_request: str,
         tool_catalog: List[Dict[str, Any]],
         prior_results: List[Dict[str, Any]],
-        model: str = "gpt-5",
+        model: str = "gpt-5.2",
+        job: Optional[Job] = None,
+        chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Ask the model to decide the next function call (or finish/ask user) with strict JSON.
         """
+        module_hints = {}
+        for t in tool_catalog:
+            hint = t.get("module_caller_instructions")
+            if hint:
+                module_hints.setdefault(t["module"], hint)
+
+        # Calendar defaults to reduce redundant asks.
+        calendar_defaults = []
+        if settings.google_calendar_default_id:
+            calendar_defaults.append(f"Use calendar_id='{settings.google_calendar_default_id}' if none provided.")
+        if settings.google_calendar_default_timezone:
+            calendar_defaults.append(
+                f"Use timezone '{settings.google_calendar_default_timezone}' if none provided; do not ask for it when listing events."
+            )
+
         tools_text = "\n".join(
             f"- {t['manifest_id']} (module: {t['module']}): {t['description']} | params: {list((t.get('params_schema') or {}).get('properties', {}).keys())}"
             for t in tool_catalog
         )
+        module_hints_text = (
+            "\n".join(f"- {mod}: {hint}" for mod, hint in module_hints.items())
+            if module_hints
+            else "None"
+        )
+        defaults_text = "\n".join(calendar_defaults) if calendar_defaults else "None"
         results_text = json.dumps(prior_results, ensure_ascii=False)
         instructions = (
             "You are the Function Caller. Decide one step at a time whether to call a function, ask the user, or finish.\n"
+            "Module hints to respect when planning:\n"
+            f"{module_hints_text}\n"
+            "Module defaults:\n"
+            f"{defaults_text}\n"
             "Functions available:\n"
             f"{tools_text}\n\n"
             "Always return JSON: "
@@ -48,6 +77,8 @@ class FunctionCallOrchestrator:
             "- Only use function_ids from the catalog.\n"
             "- If you need output from a previous call, it is in prior_results.\n"
             "- If you need user input, set ask_user and done=true.\n"
+            "- Do NOT fabricate data; only summarize actual function results in prior_results.\n"
+            "- If you lack the data, propose the function call to get it (do not mark done with a fabricated summary).\n"
             "- If no function needed, set done=true and summary."
         )
 
@@ -70,17 +101,69 @@ class FunctionCallOrchestrator:
             model=model,
             input=input_seq,
             tools=[],  # planning only
-            text={"format": {"type": "text"}},
+            text={"format": {"type": "json_object"}},
+            reasoning={"effort": "low"},
         )
-        return json.loads(getattr(resp, "output_text", "{}"))
+        raw = getattr(resp, "output_text", "{}") or "{}"
+        decision = FunctionCallOrchestrator._safe_json_load(raw)
+        if not decision:
+            decision = {"done": True, "summary": "Planner output could not be parsed."}
+        if job:
+            MessageRouter.tool_only_note(
+                chat_id=chat_id,
+                content=f"Planner raw: {raw}\nParsed: {decision}",
+                role="caller",
+                job=job,
+            )
+        return decision
+
+    @staticmethod
+    def _safe_json_load(text: str) -> Dict[str, Any]:
+        decoder = JSONDecoder()
+        idx = 0
+        first_obj = None
+        text_len = len(text)
+        while idx < text_len:
+            # Skip whitespace
+            while idx < text_len and text[idx].isspace():
+                idx += 1
+            if idx >= text_len:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, idx)
+                if first_obj is None:
+                    first_obj = obj  # prefer the first well-formed JSON object (the decision)
+                idx = end
+            except json.JSONDecodeError:
+                # Move forward to next brace and try again
+                next_brace = text.find("{", idx + 1)
+                if next_brace == -1:
+                    break
+                idx = next_brace
+                continue
+        if isinstance(first_obj, dict):
+            return first_obj
+        # Fallback: try first balanced braces
+        match = re.search(r"\{.*\}", text, re.S)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                pass
+        return {"done": True, "summary": "Planner output could not be parsed."}
 
     @staticmethod
     def run(chat_context: Dict[str, Any], job: Job, max_steps: int = 5) -> str:
         tool_catalog = ModuleDirectory.function_catalog()
-        # Use the latest user message as the request.
+        # Build a brief recent-context string (last 10 messages).
         messages = chat_context.get("messages") or []
-        user_msgs = [m for m in messages if m.role == "user"]
-        user_request = user_msgs[-1].text if user_msgs else ""
+        recent = messages[-10:] if len(messages) > 10 else messages
+        ctx_lines = []
+        for m in recent:
+            prefix = "User" if m.role == "user" else "Assistant" if m.role == "assistant" else "Tool"
+            ts = f"[{m.created_at.isoformat()}] " if getattr(m, "created_at", None) else ""
+            ctx_lines.append(f"{prefix}: {ts}{m.text}")
+        user_request = "\n".join(ctx_lines) if ctx_lines else ""
 
         prior_results: List[Dict[str, Any]] = []
 
@@ -89,6 +172,8 @@ class FunctionCallOrchestrator:
                 user_request=user_request,
                 tool_catalog=tool_catalog,
                 prior_results=prior_results,
+                job=job,
+                chat_id=job.chat.id if job and job.chat else None,
             )
 
             if decision.get("ask_user"):
@@ -99,6 +184,12 @@ class FunctionCallOrchestrator:
                     content=decision["ask_user"],
                     job=job,
                     message_type="user_visible",
+                )
+                MessageRouter.tool_only_note(
+                    chat_id=job.chat.id if job.chat else None,
+                    content=f"Planner asked user: {decision['ask_user']}",
+                    role="caller",
+                    job=job,
                 )
                 # Stash state so we can resume later.
                 job.metadata = job.metadata or {}
@@ -116,6 +207,12 @@ class FunctionCallOrchestrator:
                     function_id=call["function_id"],
                     params=call.get("params") or {},
                     job_id=str(job.id),
+                )
+                MessageRouter.tool_only_note(
+                    chat_id=job.chat.id if job.chat else None,
+                    content=f"Calling {payload.function_id} with params: {payload.params}",
+                    role="caller",
+                    job=job,
                 )
                 result = FunctionRunnerService.run_function_call(payload, job=job)
                 prior_results.append(
@@ -163,7 +260,16 @@ class FunctionCallOrchestrator:
         state = (job.metadata or {}).get("pending_state") or {}
         prior_results = state.get("prior_results") or []
         base_request = state.get("user_request") or ""
-        user_request = f"{base_request}\nAdditional user info: {user_response}"
+        # Rebuild recent context for better continuity.
+        messages = chat_context.get("messages") or []
+        recent = messages[-10:] if len(messages) > 10 else messages
+        ctx_lines = []
+        for m in recent:
+            prefix = "User" if m.role == "user" else "Assistant" if m.role == "assistant" else "Tool"
+            ts = f"[{m.created_at.isoformat()}] " if getattr(m, "created_at", None) else ""
+            ctx_lines.append(f"{prefix}: {ts}{m.text}")
+        ctx_lines.append(f"User (new): {user_response}")
+        user_request = "\n".join(ctx_lines)
         tool_catalog = ModuleDirectory.function_catalog()
 
         for step in range(max_steps):
@@ -171,6 +277,8 @@ class FunctionCallOrchestrator:
                 user_request=user_request,
                 tool_catalog=tool_catalog,
                 prior_results=prior_results,
+                job=job,
+                chat_id=job.chat.id if job and job.chat else None,
             )
 
             if decision.get("ask_user"):
@@ -179,6 +287,12 @@ class FunctionCallOrchestrator:
                     content=decision["ask_user"],
                     job=job,
                     message_type="user_visible",
+                )
+                MessageRouter.tool_only_note(
+                    chat_id=job.chat.id if job.chat else None,
+                    content=f"Planner asked user: {decision['ask_user']}",
+                    role="caller",
+                    job=job,
                 )
                 job.metadata = job.metadata or {}
                 job.metadata["pending_state"] = {
@@ -196,6 +310,12 @@ class FunctionCallOrchestrator:
                     function_id=call["function_id"],
                     params=call.get("params") or {},
                     job_id=str(job.id),
+                )
+                MessageRouter.tool_only_note(
+                    chat_id=job.chat.id if job.chat else None,
+                    content=f"Calling {payload.function_id} with params: {payload.params}",
+                    role="caller",
+                    job=job,
                 )
                 result = FunctionRunnerService.run_function_call(payload, job=job)
                 prior_results.append(

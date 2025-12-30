@@ -32,4 +32,5 @@ export type Job = {
   active_function?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  cancel_requested?: boolean | null;
 };

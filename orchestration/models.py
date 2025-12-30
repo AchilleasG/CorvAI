@@ -16,6 +16,11 @@ class ToolModule(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     tags = models.JSONField(default=list, blank=True)
+    caller_instructions = models.TextField(
+        blank=True,
+        default="",
+        help_text="Hints for the Function Caller when planning tool use.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
