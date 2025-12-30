@@ -190,7 +190,7 @@ export default function App() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages.length]);
 
   const activeChat = useMemo(
     () => chats.find((c) => c.chat_id === activeChatId) || null,
