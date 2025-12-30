@@ -42,9 +42,12 @@ class ChatAIService:
             role = ChatAIService.ROLE_MAP.get(m.role, "user")
             # Assistant turns must be output_text; everything else you send in is input_text.
             content_type = "output_text" if role == "assistant" else "input_text"
+            ts = ""
+            if getattr(m, "created_at", None):
+                ts = f"[{m.created_at.isoformat()}] "
             out.append({
                 "role": role,
-                "content": [{"type": content_type, "text": m.text}],
+                "content": [{"type": content_type, "text": f"{ts}{m.text}"}],
             })
         return out
 
@@ -52,7 +55,7 @@ class ChatAIService:
     @transaction.atomic
     def generate_reply_from_context(
         context: Dict[str, Any],
-        model: str = "gpt-5",
+        model: str = "gpt-5.2",
     ) -> ChatMessage:
         """
         Given the dict returned by `construct_chat_context`, generate the next assistant
@@ -83,7 +86,7 @@ class ChatAIService:
             model=model,
             input=input_seq,
             text={"format": {"type": "text"}, "verbosity": "medium"},
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "low"},
             tools=ModuleDirectory.function_tool_specs(),    # centrally expose tools
             store=True,  # optional
         )
@@ -95,7 +98,7 @@ class ChatAIService:
     @staticmethod
     def frontman_decision(
         context: Dict[str, Any],
-        model: str = "gpt-5",
+        model: str = "gpt-5.2",
     ) -> str:
         """
         First-pass call: Front Man either responds normally or signals a handoff.
@@ -131,7 +134,7 @@ class ChatAIService:
             model=model,
             input=input_seq,
             text={"format": {"type": "text"}, "verbosity": "medium"},
-            reasoning={"effort": "medium"},
+            reasoning={"effort": "low"},
             tools=[],    # no tools in first pass; decision only
             store=True,
         )

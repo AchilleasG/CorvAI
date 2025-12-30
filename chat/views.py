@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 from ninja import Router
 from ninja.errors import HttpError
 from django.db import transaction
@@ -52,13 +52,15 @@ def delete_chat(request, chat_id: UUID):
     return {"deleted": chat_id}
 
 @router.get("/{chat_id}/messages", response=List[MessageOut])
-def get_chat_messages(request, chat_id: UUID, visible_only: bool = False):
+def get_chat_messages(request, chat_id: UUID, visible_only: bool = False, job_id: Optional[UUID] = None):
     try:
         chat = Chat.objects.get(id=chat_id)
     except Chat.DoesNotExist:
         raise HttpError(404, "Chat not found")
 
     messages = chat.messages.order_by("created_at")
+    if job_id:
+        messages = messages.filter(job_id=job_id)
     if visible_only:
         messages = messages.filter(message_type="user_visible", audience="user")
     return [

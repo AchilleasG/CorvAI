@@ -8,6 +8,7 @@ from typing import Callable, Dict, Optional
 class RegisteredFunction:
     manifest_id: str
     module: str
+    module_caller_instructions: Optional[str]
     func: Callable
     name: Optional[str] = None
     description: Optional[str] = None
@@ -55,6 +56,7 @@ def register_function(
     *,
     manifest_id: str,
     module: str,
+    module_caller_instructions: Optional[str] = None,
     name: Optional[str] = None,
     description: Optional[str] = None,
     params_schema: Optional[dict] = None,
@@ -65,7 +67,11 @@ def register_function(
     Decorator to register a callable as a tool function.
 
     Usage:
-        @register_function(manifest_id="calendar.create_event", module="calendar")
+        @register_function(
+            manifest_id="calendar.create_event",
+            module="calendar",
+            module_caller_instructions="Use ISO datetimes and confirm timezone.",
+        )
         def create_event(...):
             ...
     """
@@ -74,6 +80,7 @@ def register_function(
         entry = RegisteredFunction(
             manifest_id=manifest_id,
             module=module,
+            module_caller_instructions=module_caller_instructions,
             func=func,
             name=name or manifest_id,
             description=description or "",
@@ -99,8 +106,19 @@ def sync_registry_to_db():
         for entry in FunctionRegistry.all():
             module_obj, _ = ToolModule.objects.get_or_create(
                 slug=entry.module,
-                defaults={"name": entry.module, "description": ""},
+                defaults={
+                    "name": entry.module,
+                    "description": "",
+                    "caller_instructions": entry.module_caller_instructions or "",
+                },
             )
+            update_fields = []
+            if entry.module_caller_instructions is not None:
+                if module_obj.caller_instructions != entry.module_caller_instructions:
+                    module_obj.caller_instructions = entry.module_caller_instructions
+                    update_fields.append("caller_instructions")
+            if update_fields:
+                module_obj.save(update_fields=update_fields)
             defaults = {
                 "module": module_obj,
                 "name": entry.name or entry.manifest_id,

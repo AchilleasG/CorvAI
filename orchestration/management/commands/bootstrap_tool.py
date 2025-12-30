@@ -37,6 +37,11 @@ class Command(BaseCommand):
         parser.add_argument("--module-slug", required=True, help="Module slug (e.g., calendar)")
         parser.add_argument("--module-name", default=None, help="Display name; defaults to slug")
         parser.add_argument("--module-description", default="", help="Module description")
+        parser.add_argument(
+            "--module-caller-instructions",
+            default="",
+            help="Hints for the Function Caller when planning tools in this module",
+        )
         parser.add_argument("--manifest-id", required=True, help="Function manifest id (e.g., calendar.create_event)")
         parser.add_argument("--function-name", required=False, help="Python function name; defaults to last segment of manifest id")
         parser.add_argument("--function-description", default="", help="Function description")
@@ -62,6 +67,7 @@ class Command(BaseCommand):
         module_slug: str = options["module_slug"]
         module_name: str = options["module_name"] or module_slug
         module_description: str = options["module_description"]
+        module_caller_instructions: str = options["module_caller_instructions"]
         manifest_id: str = options["manifest_id"]
         function_name: str = options.get("function_name") or manifest_id.split(".")[-1]
         function_description: str = options["function_description"] or ""
@@ -127,12 +133,21 @@ class Command(BaseCommand):
         with transaction.atomic():
             module_obj, _ = ToolModule.objects.get_or_create(
                 slug=module_slug,
-                defaults={"name": module_name, "description": module_description},
+                defaults={
+                    "name": module_name,
+                    "description": module_description,
+                    "caller_instructions": module_caller_instructions,
+                },
             )
-            if module_obj.name != module_name or module_obj.description != module_description:
+            if (
+                module_obj.name != module_name
+                or module_obj.description != module_description
+                or module_obj.caller_instructions != module_caller_instructions
+            ):
                 module_obj.name = module_name
                 module_obj.description = module_description
-                module_obj.save(update_fields=["name", "description"])
+                module_obj.caller_instructions = module_caller_instructions
+                module_obj.save(update_fields=["name", "description", "caller_instructions"])
 
             func_defaults = {
                 "module": module_obj,

@@ -1,5 +1,6 @@
 import json
 from typing import Optional, Dict, Any, List
+import threading
 
 from chat.models import Chat, ChatMessage
 from openai_integration.services import ChatAIService
@@ -130,9 +131,13 @@ class ChatService:
             message_type="user_visible",
         )
 
-        summary_text = FunctionCallOrchestrator.run(chat_context, job)
-        JobService.mark_status(job, Job.STATUS_COMPLETED)
-        return summary_text
+        # Run the caller in a background thread so the ack is delivered immediately.
+        threading.Thread(
+            target=ChatService._run_job_async,
+            args=(chat_context["chat"].id, job.id),
+            daemon=True,
+        ).start()
+        return "Got it. I'll run this and report back."
 
     @staticmethod
     def handle_user_input(chat_id: int, user_text: str):
@@ -154,18 +159,65 @@ class ChatService:
             waiting_job.status = Job.STATUS_RUNNING
             waiting_job.save(update_fields=["status", "updated_at"])
             chat_context = ChatService.construct_chat_context(chat_id)
-            summary_text = FunctionCallOrchestrator.resume(chat_context, waiting_job, user_text)
-            waiting_job.refresh_from_db()
-            if waiting_job.status != Job.STATUS_WAITING_USER:
-                JobService.mark_status(waiting_job, Job.STATUS_COMPLETED)
-            ChatService.add_message_to_chat(chat_id, summary_text, role="assistant")
-            return {"success": True, "message": summary_text, "chat_id": str(chat_id)}
+            threading.Thread(
+                target=ChatService._run_resume_async,
+                args=(chat_context, waiting_job.id, user_text),
+                daemon=True,
+            ).start()
+            return {"success": True, "message": "Got it. Continuing and will report back.", "chat_id": str(chat_id)}
 
         response = ChatService.get_chat_next_message(chat_id)
         print(f"Response from chat service: {response}")
-        # Assuming response contains the assistant's reply
-        ChatService.add_message_to_chat(chat_id, response, role="assistant")
+        # Avoid duplicating identical consecutive assistant messages
+        last_assistant = (
+            ChatMessage.objects.filter(chat_id=chat_id, role="assistant")
+            .order_by("-created_at")
+            .first()
+        )
+        if not last_assistant or last_assistant.text != response:
+            ChatService.add_message_to_chat(chat_id, response, role="assistant")
         return {"success": True, "message": response, "chat_id": str(chat_id)}
+
+    @staticmethod
+    def _run_job_async(chat_id: int, job_id):
+        """
+        Execute Function Caller in background and log the result.
+        """
+        try:
+            from orchestration.models import Job as JobModel
+
+            job = JobModel.objects.get(id=job_id)
+            chat_context = ChatService.construct_chat_context(chat_id)
+            summary_text = FunctionCallOrchestrator.run(chat_context, job)
+            JobService.mark_status(job, Job.STATUS_COMPLETED)
+            ChatService.add_message_to_chat(chat_id, summary_text, role="assistant", job=job)
+        except Exception as exc:  # pragma: no cover
+            # Best effort logging
+            ChatService.add_message_to_chat(
+                chat_id,
+                f"Job error: {exc}",
+                role="assistant",
+                job=None,
+            )
+
+    @staticmethod
+    def _run_resume_async(chat_context: Dict[str, Any], job_id, user_response: str):
+        try:
+            from orchestration.models import Job as JobModel
+
+            job = JobModel.objects.get(id=job_id)
+            summary_text = FunctionCallOrchestrator.resume(chat_context, job, user_response)
+            job.refresh_from_db()
+            if job.status != Job.STATUS_WAITING_USER:
+                JobService.mark_status(job, Job.STATUS_COMPLETED)
+            ChatService.add_message_to_chat(chat_context["chat"].id, summary_text, role="assistant", job=job)
+        except Exception as exc:  # pragma: no cover
+            ChatService.add_message_to_chat(
+                chat_context["chat"].id,
+                f"Job error: {exc}",
+                role="assistant",
+                job=None,
+            )
 
     @staticmethod
     def _parse_decision(raw: str) -> Optional[Dict[str, Any]]:
