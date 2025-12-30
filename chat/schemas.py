@@ -5,6 +5,8 @@ from uuid import UUID
 class ChatListItem(Schema):
     chat_id: UUID
     chat_nickname: Optional[str] = None
+    last_activity_at: Optional[str] = None
+    archived: bool = False
 
 class CreateChatIn(Schema):
     # Optional; create works with no body at all
@@ -19,10 +21,12 @@ class DeleteChatOut(Schema):
 
 class RenameChatIn(Schema):
     nickname: Optional[str] = None
+    archived: Optional[bool] = None
 
 class RenameChatOut(Schema):
     chat_id: UUID
     chat_nickname: Optional[str] = None
+    archived: bool = False
 class MessageOut(Schema):
     id: UUID
     role: Literal["user", "assistant", "system", "tool"]

@@ -7,6 +7,7 @@ class Chat(models.Model):
     id = models.TextField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     nickname = models.TextField(max_length=255, blank=True, null=True)
+    archived = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         ordering = ["-created_at"]

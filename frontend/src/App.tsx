@@ -6,6 +6,8 @@ import {
   fetchJobs,
   sendText,
   sendVoice,
+  renameChat,
+  deleteChat,
 } from "./api";
 import { ChatListItem, Message, Job } from "./types";
 
@@ -48,6 +50,7 @@ export default function App() {
   const [micReady, setMicReady] = useState(false);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState<string>("");
+  const [openChatActionsId, setOpenChatActionsId] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
@@ -55,15 +58,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      try {
-        const data = await fetchChats();
-        setChats(data);
-        if (data.length && !activeChatId) {
-          setActiveChatId(data[0].chat_id);
-        }
-      } catch (err: any) {
-        setError(err.message || "Failed to load chats");
-      }
+      await refreshChats();
     })();
   }, []);
 
@@ -98,13 +93,47 @@ export default function App() {
     () => chats.find((c) => c.chat_id === activeChatId) || null,
     [chats, activeChatId],
   );
+  const sortedChats = useMemo(() => {
+    return [...chats].sort((a, b) => {
+      const aTime = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0;
+      const bTime = b.last_activity_at ? new Date(b.last_activity_at).getTime() : 0;
+      return bTime - aTime;
+    });
+  }, [chats]);
+
+  async function refreshChats(preferredActiveId?: string | null) {
+    try {
+      const data = await fetchChats();
+      setChats(data);
+      if (preferredActiveId && data.some((c) => c.chat_id === preferredActiveId)) {
+        setActiveChatId(preferredActiveId);
+        return data;
+      }
+      if (!activeChatId && data.length) {
+        setActiveChatId(data[0].chat_id);
+      } else if (activeChatId && !data.some((c) => c.chat_id === activeChatId)) {
+        const fallbackId = data[0]?.chat_id || null;
+        setActiveChatId(fallbackId);
+        if (!fallbackId) {
+          setMessages([]);
+          setJobs([]);
+        }
+      } else if (!data.length) {
+        setActiveChatId(null);
+        setMessages([]);
+        setJobs([]);
+      }
+      return data;
+    } catch (err: any) {
+      setError(err.message || "Failed to load chats");
+      return [];
+    }
+  }
 
   async function ensureChat(): Promise<string> {
     if (activeChatId) return activeChatId;
     const created = await createChat("");
-    const nextChats = await fetchChats();
-    setChats(nextChats);
-    setActiveChatId(created.chat_id);
+    await refreshChats(created.chat_id);
     return created.chat_id;
   }
 
@@ -126,9 +155,7 @@ export default function App() {
   async function handleNewChat() {
     try {
       const created = await createChat("");
-      const nextChats = await fetchChats();
-      setChats(nextChats);
-      setActiveChatId(created.chat_id);
+      await refreshChats(created.chat_id);
       setMessages([]);
     } catch (err: any) {
       setError(err.message || "Could not create chat");
@@ -151,6 +178,7 @@ export default function App() {
         fetchMessages(chatId, true),
         fetchJobs(chatId),
       ]);
+      await refreshChats(chatId);
       setMessages(msgs);
       setJobs(jobsData);
     } catch (err: any) {
@@ -175,12 +203,51 @@ export default function App() {
         fetchMessages(chatId, true),
         fetchJobs(chatId),
       ]);
+      await refreshChats(chatId);
       setMessages(msgs);
       setJobs(jobsData);
     } catch (err: any) {
       setError(err.message || "Failed to send voice message");
     } finally {
       setVoiceSending(false);
+    }
+  }
+
+  async function handleRenameChat(chat_id: string) {
+    const chat = chats.find((c) => c.chat_id === chat_id);
+    const currentLabel = chat ? formatChatLabel(chat) : "Chat";
+    const nextName = window.prompt("Rename chat", currentLabel);
+    if (nextName === null) return;
+    try {
+      await renameChat(chat_id, { nickname: nextName.trim() });
+      await refreshChats(activeChatId === chat_id ? chat_id : undefined);
+      setOpenChatActionsId(null);
+    } catch (err: any) {
+      setError(err.message || "Failed to rename chat");
+    }
+  }
+
+  async function handleArchiveChat(chat_id: string) {
+    const confirmArchive = window.confirm("Archive this chat? It will disappear from the list.");
+    if (!confirmArchive) return;
+    try {
+      await renameChat(chat_id, { archived: true });
+      await refreshChats(activeChatId === chat_id ? null : activeChatId);
+      setOpenChatActionsId(null);
+    } catch (err: any) {
+      setError(err.message || "Failed to archive chat");
+    }
+  }
+
+  async function handleDeleteChat(chat_id: string) {
+    const confirmDelete = window.confirm("Delete this chat permanently?");
+    if (!confirmDelete) return;
+    try {
+      await deleteChat(chat_id);
+      await refreshChats(activeChatId === chat_id ? null : activeChatId);
+      setOpenChatActionsId(null);
+    } catch (err: any) {
+      setError(err.message || "Failed to delete chat");
     }
   }
 
@@ -300,16 +367,58 @@ export default function App() {
               + New chat
             </button>
             <div className="chat-list">
-              {chats.map((chat) => {
+              {sortedChats.map((chat) => {
                 const isActive = chat.chat_id === activeChatId;
                 return (
-                  <button
-                    key={chat.chat_id}
-                    className={`chat-pill ${isActive ? "active" : ""}`}
-                    onClick={() => setActiveChatId(chat.chat_id)}
-                  >
-                    <span>{formatChatLabel(chat)}</span>
-                  </button>
+                  <div key={chat.chat_id} className={`chat-pill ${isActive ? "active" : ""}`}>
+                    <button
+                      type="button"
+                      className="chat-select"
+                      onClick={() => setActiveChatId(chat.chat_id)}
+                    >
+                      <span>{formatChatLabel(chat)}</span>
+                    </button>
+                    <div className="chat-actions-row">
+                      <button
+                        type="button"
+                        className="ghost pill-action"
+                        onClick={() =>
+                          setOpenChatActionsId((prev) =>
+                            prev === chat.chat_id ? null : chat.chat_id,
+                          )
+                        }
+                        aria-expanded={openChatActionsId === chat.chat_id}
+                        aria-label="Chat actions"
+                      >
+                        Actions ▾
+                      </button>
+                      {openChatActionsId === chat.chat_id && (
+                        <div className="chat-actions-menu">
+                          <button
+                            type="button"
+                            className="ghost pill-action"
+                            onClick={() => handleRenameChat(chat.chat_id)}
+                          >
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost pill-action"
+                            onClick={() => handleArchiveChat(chat.chat_id)}
+                          >
+                            Archive
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost pill-action danger"
+                            onClick={() => handleDeleteChat(chat.chat_id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 );
               })}
               {!chats.length && <p className="muted">No chats yet.</p>}
