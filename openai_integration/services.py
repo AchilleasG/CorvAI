@@ -7,7 +7,7 @@ from openai import OpenAI
 
 from chat.models import ChatMessage  # adjust if your app label differs
 from Corv.config import settings     # your Pydantic Settings (with openai_key)
-from orchestration.services import ModuleDirectory, PersonaService
+from orchestration.services import ModuleDirectory, PersonaService, ModelConfigService
 
 
 class ChatAIService:
@@ -82,8 +82,9 @@ class ChatAIService:
         input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=lead_text)
 
         print(f"Input sequence for OpenAI: {input_seq}")
+        model_name = model or ModelConfigService.get_frontman_model()
         resp = ChatAIService.client.responses.create(
-            model=model,
+            model=model_name,
             input=input_seq,
             text={"format": {"type": "text"}, "verbosity": "medium"},
             reasoning={"effort": "low"},
@@ -118,8 +119,8 @@ class ChatAIService:
 
         instructions = (
             f"{persona_text}\n\n"
-            "Decision rule: If the user only needs conversation, reply directly. "
-            "If action/data is needed, do NOT answer; instead emit a JSON handoff object.\n"
+            "Decision rule: If the user only needs conversation or analysis (including discussing data already shown in recent messages), reply directly. "
+            "If fresh action/data is needed, do NOT answer; instead emit a JSON handoff object.\n"
             "Handoff JSON shape:\n"
             '{\"handoff\":true,\"reason\":\"why\",\"module_hint\":\"optional\"}\n'
             "If not handing off, return {\"handoff\":false,\"reply\":\"your message\"}.\n"
@@ -130,8 +131,9 @@ class ChatAIService:
             instructions += f"\nAvailable modules:\n{module_text}"
 
         input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=instructions)
+        model_name = model or ModelConfigService.get_frontman_model()
         resp = ChatAIService.client.responses.create(
-            model=model,
+            model=model_name,
             input=input_seq,
             text={"format": {"type": "text"}, "verbosity": "medium"},
             reasoning={"effort": "low"},

@@ -13,6 +13,7 @@ from orchestration.models import (
     JobEvent,
     ToolFunction,
     ToolModule,
+    OrchestrationSetting,
 )
 from orchestration.registry import FunctionRegistry
 from orchestration.schemas import FunctionCallPayload, FunctionResultPayload, MessageEnvelope
@@ -328,3 +329,32 @@ class PersonaService:
         if persona.postamble:
             base = f"{base}\n\n{persona.postamble}"
         return base
+
+
+class ModelConfigService:
+    """
+    Accessor for dynamic model selection stored in OrchestrationSetting.
+    """
+
+    DEFAULT_FRONTMAN_MODEL = "gpt-5.2"
+    DEFAULT_CALLER_MODEL = "gpt-5.2"
+
+    @staticmethod
+    def get_setting(key: str, default: str) -> str:
+        try:
+            setting = OrchestrationSetting.objects.get(key=key)
+            return setting.value or default
+        except OrchestrationSetting.DoesNotExist:
+            return default
+
+    @staticmethod
+    def set_setting(key: str, value: str):
+        OrchestrationSetting.objects.update_or_create(key=key, defaults={"value": value})
+
+    @staticmethod
+    def get_frontman_model() -> str:
+        return ModelConfigService.get_setting("frontman_model", ModelConfigService.DEFAULT_FRONTMAN_MODEL)
+
+    @staticmethod
+    def get_caller_model() -> str:
+        return ModelConfigService.get_setting("caller_model", ModelConfigService.DEFAULT_CALLER_MODEL)

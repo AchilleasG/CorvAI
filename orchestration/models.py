@@ -200,6 +200,26 @@ class JobEvent(models.Model):
         return f"{self.job_id} {self.event_type}"
 
 
+class OrchestrationSetting(models.Model):
+    """
+    Simple key/value store for runtime-configurable orchestration settings.
+    """
+
+    key = models.CharField(max_length=255, unique=True)
+    value = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["key"]
+        indexes = [
+            models.Index(fields=["key"]),
+        ]
+
+    def __str__(self):
+        return f"{self.key}"
+
+
 class FrontmanPersona(models.Model):
     """
     Stores persona/instructions for the Front Man layer.
