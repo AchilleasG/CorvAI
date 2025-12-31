@@ -8,7 +8,6 @@ from typing import Callable, Dict, Optional
 class RegisteredFunction:
     manifest_id: str
     module: str
-    module_caller_instructions: Optional[str]
     func: Callable
     name: Optional[str] = None
     description: Optional[str] = None
@@ -56,7 +55,6 @@ def register_function(
     *,
     manifest_id: str,
     module: str,
-    module_caller_instructions: Optional[str] = None,
     name: Optional[str] = None,
     description: Optional[str] = None,
     params_schema: Optional[dict] = None,
@@ -80,7 +78,6 @@ def register_function(
         entry = RegisteredFunction(
             manifest_id=manifest_id,
             module=module,
-            module_caller_instructions=module_caller_instructions,
             func=func,
             name=name or manifest_id,
             description=description or "",
@@ -92,44 +89,3 @@ def register_function(
         return func
 
     return decorator
-
-
-def sync_registry_to_db():
-    """
-    Sync the in-process registry to the DB manifests.
-    Should be called at startup or via a management command.
-    """
-    from django.db import transaction
-    from orchestration.models import ToolFunction, ToolModule
-
-    with transaction.atomic():
-        for entry in FunctionRegistry.all():
-            module_obj, _ = ToolModule.objects.get_or_create(
-                slug=entry.module,
-                defaults={
-                    "name": entry.module,
-                    "description": "",
-                    "caller_instructions": entry.module_caller_instructions or "",
-                },
-            )
-            update_fields = []
-            if entry.module_caller_instructions is not None:
-                if module_obj.caller_instructions != entry.module_caller_instructions:
-                    module_obj.caller_instructions = entry.module_caller_instructions
-                    update_fields.append("caller_instructions")
-            if update_fields:
-                module_obj.save(update_fields=update_fields)
-            defaults = {
-                "module": module_obj,
-                "name": entry.name or entry.manifest_id,
-                "description": entry.description or "",
-                "params_schema": entry.params_schema or {},
-                "return_schema": entry.return_schema or {},
-                "tags": [],
-                "deprecated": entry.deprecated,
-                "handler_ref": entry.handler_ref,
-            }
-            ToolFunction.objects.update_or_create(
-                manifest_id=entry.manifest_id,
-                defaults=defaults,
-            )

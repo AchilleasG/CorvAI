@@ -11,11 +11,6 @@ from orchestration.registry import register_function
 
 # OAuth scope allows read/write access; requires a service account or delegated user.
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
-MODULE_CALLER_INSTRUCTIONS = (
-    "Use Google Calendar for scheduling or retrieving events. "
-    "Always provide ISO 8601 datetimes and confirm the correct time zone. "
-    "Prefer the primary calendar unless the user names another."
-)
 DEFAULT_CALENDAR_ID = settings.google_calendar_default_id or "primary"
 DEFAULT_TIMEZONE = settings.google_calendar_default_timezone or "UTC"
 
@@ -75,7 +70,6 @@ def _delete_event_with_optional_cancel(
 @register_function(
     manifest_id="calendar.list_events",
     module="calendar",
-    module_caller_instructions=MODULE_CALLER_INSTRUCTIONS,
     name="calendar.list_events",
     description="List upcoming Google Calendar events.",
     params_schema={
@@ -159,7 +153,6 @@ def list_events(
 @register_function(
     manifest_id="calendar.create_event",
     module="calendar",
-    module_caller_instructions=MODULE_CALLER_INSTRUCTIONS,
     name="calendar.create_event",
     description="Create a Google Calendar event.",
     params_schema={
@@ -228,7 +221,6 @@ def create_event(
 @register_function(
     manifest_id="calendar.update_event",
     module="calendar",
-    module_caller_instructions=MODULE_CALLER_INSTRUCTIONS,
     name="calendar.update_event",
     description="Update fields on an existing Google Calendar event.",
     params_schema={
@@ -338,7 +330,6 @@ def update_event(
 @register_function(
     manifest_id="calendar.delete_event",
     module="calendar",
-    module_caller_instructions=MODULE_CALLER_INSTRUCTIONS,
     name="calendar.delete_event",
     description="Delete a Google Calendar event.",
     params_schema={

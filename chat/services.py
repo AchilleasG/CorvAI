@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Optional, Dict, Any, List
 import threading
 
@@ -11,6 +12,8 @@ from orchestration.services import (
 from orchestration.message_router import MessageRouter
 from orchestration.models import Job
 from orchestration.function_caller import FunctionCallOrchestrator
+
+logger = logging.getLogger(__name__)
 
 
 class ChatService:
@@ -192,13 +195,34 @@ class ChatService:
             JobService.mark_status(job, Job.STATUS_COMPLETED)
             ChatService.add_message_to_chat(chat_id, summary_text, role="assistant", job=job)
         except Exception as exc:  # pragma: no cover
-            # Best effort logging
-            ChatService.add_message_to_chat(
-                chat_id,
-                f"Job error: {exc}",
-                role="assistant",
-                job=None,
-            )
+            logger.exception("Background job crashed")
+            try:
+                from orchestration.models import Job as JobModel
+
+                job = JobModel.objects.filter(id=job_id).first()
+                if job:
+                    JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+                    MessageRouter.tool_only_note(
+                        chat_id=chat_id,
+                        content=f"Function Caller crash: {exc}",
+                        role="caller",
+                        job=job,
+                    )
+                    MessageRouter.frontman_update(
+                        chat_id=chat_id,
+                        content="The job failed due to an internal error. Please try again.",
+                        job=job,
+                        message_type="user_visible",
+                    )
+                else:
+                    ChatService.add_message_to_chat(
+                        chat_id,
+                        f"Job error: {exc}",
+                        role="assistant",
+                        job=None,
+                    )
+            except Exception:
+                logger.exception("Failed to record crash for job %s", job_id)
 
     @staticmethod
     def _run_resume_async(chat_context: Dict[str, Any], job_id, user_response: str):
@@ -212,12 +236,34 @@ class ChatService:
                 JobService.mark_status(job, Job.STATUS_COMPLETED)
             ChatService.add_message_to_chat(chat_context["chat"].id, summary_text, role="assistant", job=job)
         except Exception as exc:  # pragma: no cover
-            ChatService.add_message_to_chat(
-                chat_context["chat"].id,
-                f"Job error: {exc}",
-                role="assistant",
-                job=None,
-            )
+            logger.exception("Resume job crashed")
+            try:
+                from orchestration.models import Job as JobModel
+
+                job = JobModel.objects.filter(id=job_id).first()
+                if job:
+                    JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+                    MessageRouter.tool_only_note(
+                        chat_id=chat_context["chat"].id,
+                        content=f"Function Caller resume crash: {exc}",
+                        role="caller",
+                        job=job,
+                    )
+                    MessageRouter.frontman_update(
+                        chat_id=chat_context["chat"].id,
+                        content="The job failed due to an internal error. Please try again.",
+                        job=job,
+                        message_type="user_visible",
+                    )
+                else:
+                    ChatService.add_message_to_chat(
+                        chat_context["chat"].id,
+                        f"Job error: {exc}",
+                        role="assistant",
+                        job=None,
+                    )
+            except Exception:
+                logger.exception("Failed to record crash for resume job %s", job_id)
 
     @staticmethod
     def _parse_decision(raw: str) -> Optional[Dict[str, Any]]:

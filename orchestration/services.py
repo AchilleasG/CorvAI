@@ -96,14 +96,17 @@ class JobService:
     @staticmethod
     @transaction.atomic
     def request_cancel(job: Job, reason: str = ""):
+        # Hard stop: mark canceled immediately and prevent further execution.
         job.cancel_requested = True
-        job.save(update_fields=["cancel_requested", "updated_at"])
+        job.status = Job.STATUS_CANCELED
+        job.finished_at = timezone.now()
+        job.save(update_fields=["cancel_requested", "status", "finished_at", "updated_at"])
         JobEvent.objects.create(
             job=job,
             role="frontman",
             event_type=JobEvent.EVENT_STATE,
             visibility=JobEvent.VISIBILITY_USER,
-            message="Cancel requested",
+            message="Job canceled",
             payload={"reason": reason} if reason else {},
         )
         return job
@@ -132,7 +135,7 @@ class FunctionRunnerService:
                 job_id=str(job.id) if job else None,
             )
 
-        if job and job.cancel_requested:
+        if job and (job.cancel_requested or job.status == Job.STATUS_CANCELED):
             return FunctionResultPayload(
                 trace_id=payload.trace_id,
                 call_id=payload.call_id,
@@ -308,6 +311,9 @@ class PersonaService:
                 return qs.get(slug=slug)
             except FrontmanPersona.DoesNotExist:
                 return None
+        active = qs.filter(is_active=True).order_by("-updated_at", "-created_at").first()
+        if active:
+            return active
         return qs.order_by("-created_at").first()
 
     @staticmethod
@@ -318,4 +324,7 @@ class PersonaService:
                 "You are Corv's Front Man. Be personable, concise, and keep the user "
                 "informed about background work. Use the available modules when helpful."
             )
-        return persona.instructions
+        base = persona.instructions
+        if persona.postamble:
+            base = f"{base}\n\n{persona.postamble}"
+        return base

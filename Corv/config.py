@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     google_calendar_delegated_user: Optional[str] = None
     google_calendar_default_id: Optional[str] = None
     google_calendar_default_timezone: Optional[str] = "Europe/Athens"
+    module_secret_key: Optional[str] = os.getenv("MODULE_SECRET_KEY")
 
     # Accept extra env vars so a fuller .env file does not raise
     model_config = SettingsConfigDict(

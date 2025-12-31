@@ -25,10 +25,3 @@ class OrchestrationConfig(AppConfig):
     def ready(self):
         # Register decorated functions at startup.
         _import_tool_modules()
-        try:
-            from orchestration.registry import sync_registry_to_db
-
-            sync_registry_to_db()
-        except Exception:
-            # Avoid startup crash if migrations pending; admin can run sync manually.
-            pass

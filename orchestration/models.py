@@ -16,6 +16,7 @@ class ToolModule(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     tags = models.JSONField(default=list, blank=True)
+    secrets_encrypted = models.TextField(blank=True, default="", help_text="Encrypted secrets blob")
     caller_instructions = models.TextField(
         blank=True,
         default="",
@@ -210,6 +211,15 @@ class FrontmanPersona(models.Model):
     description = models.TextField(blank=True, default="")
     instructions = models.TextField(
         help_text="Developer/system message describing tone, behavior, and guardrails."
+    )
+    postamble = models.TextField(
+        blank=True,
+        default="",
+        help_text="Optional instructions appended after persona to further steer Front Man.",
+    )
+    is_active = models.BooleanField(
+        default=False,
+        help_text="If true, this persona is the active one used by Frontman.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
