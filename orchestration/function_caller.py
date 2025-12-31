@@ -4,6 +4,7 @@ import json
 from json import JSONDecoder
 import re
 from typing import Any, Dict, List, Optional
+import logging
 
 from openai import OpenAI
 
@@ -12,6 +13,8 @@ from orchestration.services import ModuleDirectory, FunctionRunnerService, JobSe
 from orchestration.models import Job
 from orchestration.schemas import FunctionCallPayload
 from orchestration.message_router import MessageRouter
+
+logger = logging.getLogger(__name__)
 
 
 class FunctionCallOrchestrator:
@@ -103,6 +106,7 @@ class FunctionCallOrchestrator:
             tools=[],  # planning only
             text={"format": {"type": "json_object"}},
             reasoning={"effort": "low"},
+            timeout=30,
         )
         raw = getattr(resp, "output_text", "{}") or "{}"
         decision = FunctionCallOrchestrator._safe_json_load(raw)
@@ -167,77 +171,106 @@ class FunctionCallOrchestrator:
 
         prior_results: List[Dict[str, Any]] = []
 
-        for step in range(max_steps):
-            decision = FunctionCallOrchestrator._plan_next_action(
-                user_request=user_request,
-                tool_catalog=tool_catalog,
-                prior_results=prior_results,
-                job=job,
-                chat_id=job.chat.id if job and job.chat else None,
-            )
+        try:
+            for step in range(max_steps):
+                if job.cancel_requested or job.status == Job.STATUS_CANCELED:
+                    JobService.mark_status(job, Job.STATUS_CANCELED)
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content="Job canceled mid-run; stopping immediately.",
+                        role="caller",
+                        job=job,
+                    )
+                    return "Job canceled."
 
-            if decision.get("ask_user"):
-                # Pause and request input via Front Man.
-                JobService.mark_status(job, Job.STATUS_WAITING_USER)
-                MessageRouter.frontman_update(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=decision["ask_user"],
+                decision = FunctionCallOrchestrator._plan_next_action(
+                    user_request=user_request,
+                    tool_catalog=tool_catalog,
+                    prior_results=prior_results,
                     job=job,
-                    message_type="user_visible",
+                    chat_id=job.chat.id if job and job.chat else None,
                 )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Planner asked user: {decision['ask_user']}",
-                    role="caller",
-                    job=job,
-                )
-                # Stash state so we can resume later.
-                job.metadata = job.metadata or {}
-                job.metadata["pending_state"] = {
-                    "user_request": user_request,
-                    "prior_results": prior_results,
-                }
-                job.save(update_fields=["metadata", "updated_at"])
-                return decision["ask_user"]
 
-            call = decision.get("call")
-            if call and call.get("function_id"):
-                payload = FunctionCallPayload(
-                    trace_id=job.trace_id,
-                    function_id=call["function_id"],
-                    params=call.get("params") or {},
-                    job_id=str(job.id),
-                )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Calling {payload.function_id} with params: {payload.params}",
-                    role="caller",
-                    job=job,
-                )
-                result = FunctionRunnerService.run_function_call(payload, job=job)
-                prior_results.append(
-                    {
-                        "function_id": call["function_id"],
-                        "params": call.get("params") or {},
-                        "status": result.status,
-                        "data": result.data,
-                        "error": result.error_summary,
+                if decision.get("ask_user"):
+                    # Pause and request input via Front Man.
+                    JobService.mark_status(job, Job.STATUS_WAITING_USER)
+                    MessageRouter.frontman_update(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=decision["ask_user"],
+                        job=job,
+                        message_type="user_visible",
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Planner asked user: {decision['ask_user']}",
+                        role="caller",
+                        job=job,
+                    )
+                    # Stash state so we can resume later.
+                    job.metadata = job.metadata or {}
+                    job.metadata["pending_state"] = {
+                        "user_request": user_request,
+                        "prior_results": prior_results,
                     }
-                )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Function result: {result.model_dump()}",
-                    role="runner",
-                    job=job,
-                    call_id=result.call_id,
-                )
-                job.updated_at = job.updated_at  # no-op placeholder to avoid stale writes
-                job.save(update_fields=["updated_at"])
-                continue
+                    job.save(update_fields=["metadata", "updated_at"])
+                    return decision["ask_user"]
 
-            # No call; either done or unable to proceed.
-            if decision.get("done"):
-                break
+                call = decision.get("call")
+                if call and call.get("function_id"):
+                    payload = FunctionCallPayload(
+                        trace_id=job.trace_id,
+                        function_id=call["function_id"],
+                        params=call.get("params") or {},
+                        job_id=str(job.id),
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Calling {payload.function_id} with params: {payload.params}",
+                        role="caller",
+                        job=job,
+                    )
+                    result = FunctionRunnerService.run_function_call(payload, job=job)
+                    prior_results.append(
+                        {
+                            "function_id": call["function_id"],
+                            "params": call.get("params") or {},
+                            "status": result.status,
+                            "data": result.data,
+                            "error": result.error_summary,
+                        }
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Function result: {result.model_dump()}",
+                        role="runner",
+                        job=job,
+                        call_id=result.call_id,
+                    )
+                    job.updated_at = job.updated_at  # no-op placeholder to avoid stale writes
+                    job.save(update_fields=["updated_at"])
+                    continue
+
+                # No call; either done or unable to proceed.
+                if decision.get("done"):
+                    break
+
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Function caller crashed")
+            err = f"Function Caller error: {exc}"
+            MessageRouter.tool_only_note(
+                chat_id=job.chat.id if job and job.chat else None,
+                content=err,
+                role="caller",
+                job=job,
+            )
+            MessageRouter.frontman_update(
+                chat_id=job.chat.id if job and job.chat else None,
+                content="The job failed due to an internal error. Please try again.",
+                job=job,
+                message_type="user_visible",
+            )
+            JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+            return "Job failed."
 
         summary = ""
         if prior_results:
@@ -272,73 +305,102 @@ class FunctionCallOrchestrator:
         user_request = "\n".join(ctx_lines)
         tool_catalog = ModuleDirectory.function_catalog()
 
-        for step in range(max_steps):
-            decision = FunctionCallOrchestrator._plan_next_action(
-                user_request=user_request,
-                tool_catalog=tool_catalog,
-                prior_results=prior_results,
-                job=job,
-                chat_id=job.chat.id if job and job.chat else None,
-            )
+        try:
+            for step in range(max_steps):
+                if job.cancel_requested or job.status == Job.STATUS_CANCELED:
+                    JobService.mark_status(job, Job.STATUS_CANCELED)
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content="Job canceled mid-resume; stopping immediately.",
+                        role="caller",
+                        job=job,
+                    )
+                    return "Job canceled."
 
-            if decision.get("ask_user"):
-                MessageRouter.frontman_update(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=decision["ask_user"],
+                decision = FunctionCallOrchestrator._plan_next_action(
+                    user_request=user_request,
+                    tool_catalog=tool_catalog,
+                    prior_results=prior_results,
                     job=job,
-                    message_type="user_visible",
+                    chat_id=job.chat.id if job and job.chat else None,
                 )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Planner asked user: {decision['ask_user']}",
-                    role="caller",
-                    job=job,
-                )
-                job.metadata = job.metadata or {}
-                job.metadata["pending_state"] = {
-                    "user_request": base_request,
-                    "prior_results": prior_results,
-                }
-                job.save(update_fields=["metadata", "updated_at"])
-                JobService.mark_status(job, Job.STATUS_WAITING_USER)
-                return decision["ask_user"]
 
-            call = decision.get("call")
-            if call and call.get("function_id"):
-                payload = FunctionCallPayload(
-                    trace_id=job.trace_id,
-                    function_id=call["function_id"],
-                    params=call.get("params") or {},
-                    job_id=str(job.id),
-                )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Calling {payload.function_id} with params: {payload.params}",
-                    role="caller",
-                    job=job,
-                )
-                result = FunctionRunnerService.run_function_call(payload, job=job)
-                prior_results.append(
-                    {
-                        "function_id": call["function_id"],
-                        "params": call.get("params") or {},
-                        "status": result.status,
-                        "data": result.data,
-                        "error": result.error_summary,
+                if decision.get("ask_user"):
+                    MessageRouter.frontman_update(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=decision["ask_user"],
+                        job=job,
+                        message_type="user_visible",
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Planner asked user: {decision['ask_user']}",
+                        role="caller",
+                        job=job,
+                    )
+                    job.metadata = job.metadata or {}
+                    job.metadata["pending_state"] = {
+                        "user_request": base_request,
+                        "prior_results": prior_results,
                     }
-                )
-                MessageRouter.tool_only_note(
-                    chat_id=job.chat.id if job.chat else None,
-                    content=f"Function result: {result.model_dump()}",
-                    role="runner",
-                    job=job,
-                    call_id=result.call_id,
-                )
-                JobService.heartbeat(job)
-                continue
+                    job.save(update_fields=["metadata", "updated_at"])
+                    JobService.mark_status(job, Job.STATUS_WAITING_USER)
+                    return decision["ask_user"]
 
-            if decision.get("done"):
-                break
+                call = decision.get("call")
+                if call and call.get("function_id"):
+                    payload = FunctionCallPayload(
+                        trace_id=job.trace_id,
+                        function_id=call["function_id"],
+                        params=call.get("params") or {},
+                        job_id=str(job.id),
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Calling {payload.function_id} with params: {payload.params}",
+                        role="caller",
+                        job=job,
+                    )
+                    result = FunctionRunnerService.run_function_call(payload, job=job)
+                    prior_results.append(
+                        {
+                            "function_id": call["function_id"],
+                            "params": call.get("params") or {},
+                            "status": result.status,
+                            "data": result.data,
+                            "error": result.error_summary,
+                        }
+                    )
+                    MessageRouter.tool_only_note(
+                        chat_id=job.chat.id if job.chat else None,
+                        content=f"Function result: {result.model_dump()}",
+                        role="runner",
+                        job=job,
+                        call_id=result.call_id,
+                    )
+                    JobService.heartbeat(job)
+                    continue
+
+                if decision.get("done"):
+                    break
+
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Function caller resume crashed")
+            err = f"Function Caller error: {exc}"
+            MessageRouter.tool_only_note(
+                chat_id=job.chat.id if job and job.chat else None,
+                content=err,
+                role="caller",
+                job=job,
+            )
+            MessageRouter.frontman_update(
+                chat_id=job.chat.id if job and job.chat else None,
+                content="The job failed due to an internal error. Please try again.",
+                job=job,
+                message_type="user_visible",
+            )
+            JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+            return "Job failed."
 
         summary = decision.get("summary") or "No actions taken."
         if prior_results:
