@@ -9,7 +9,7 @@ import logging
 from openai import OpenAI
 
 from Corv.config import settings
-from orchestration.services import ModuleDirectory, FunctionRunnerService, JobService
+from orchestration.services import ModuleDirectory, FunctionRunnerService, JobService, ModelConfigService
 from orchestration.models import Job
 from orchestration.schemas import FunctionCallPayload
 from orchestration.message_router import MessageRouter
@@ -172,6 +172,7 @@ class FunctionCallOrchestrator:
         prior_results: List[Dict[str, Any]] = []
 
         try:
+            model_name = ModelConfigService.get_caller_model()
             for step in range(max_steps):
                 if job.cancel_requested or job.status == Job.STATUS_CANCELED:
                     JobService.mark_status(job, Job.STATUS_CANCELED)
@@ -189,6 +190,7 @@ class FunctionCallOrchestrator:
                     prior_results=prior_results,
                     job=job,
                     chat_id=job.chat.id if job and job.chat else None,
+                    model=model_name,
                 )
 
                 if decision.get("ask_user"):
@@ -306,6 +308,7 @@ class FunctionCallOrchestrator:
         tool_catalog = ModuleDirectory.function_catalog()
 
         try:
+            model_name = ModelConfigService.get_caller_model()
             for step in range(max_steps):
                 if job.cancel_requested or job.status == Job.STATUS_CANCELED:
                     JobService.mark_status(job, Job.STATUS_CANCELED)
@@ -323,6 +326,7 @@ class FunctionCallOrchestrator:
                     prior_results=prior_results,
                     job=job,
                     chat_id=job.chat.id if job and job.chat else None,
+                    model=model_name,
                 )
 
                 if decision.get("ask_user"):
