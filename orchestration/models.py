@@ -220,6 +220,49 @@ class OrchestrationSetting(models.Model):
         return f"{self.key}"
 
 
+class UsageEvent(models.Model):
+    """
+    Tracks token usage per OpenAI call for observability.
+    """
+
+    SOURCE_CHOICES = [
+        ("frontman_decision", "Frontman Decision"),
+        ("frontman_generate", "Frontman Generate"),
+        ("caller_plan", "Caller Plan"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    source = models.CharField(max_length=64, choices=SOURCE_CHOICES)
+    model = models.CharField(max_length=128, blank=True, default="")
+    cache_mode = models.CharField(max_length=32, blank=True, default="")
+    prompt_tokens = models.IntegerField(default=0)
+    cached_prompt_tokens = models.IntegerField(default=0)
+    completion_tokens = models.IntegerField(default=0)
+    total_tokens = models.IntegerField(default=0)
+    prompt_cache_key = models.CharField(max_length=255, blank=True, default="")
+    prompt_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    completion_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    total_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    job = models.ForeignKey(
+        Job, null=True, blank=True, on_delete=models.SET_NULL, related_name="usage_events"
+    )
+    chat = models.ForeignKey(
+        Chat, null=True, blank=True, on_delete=models.SET_NULL, related_name="usage_events"
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["source"]),
+            models.Index(fields=["model"]),
+        ]
+
+    def __str__(self):
+        return f"{self.source} {self.created_at}"
+
+
 class FrontmanPersona(models.Model):
     """
     Stores persona/instructions for the Front Man layer.

@@ -1,4 +1,4 @@
-import { ChatListItem, Message, SendTextResponse, Job } from "./types";
+import { ChatListItem, Message, SendTextResponse, Job, UsageEvent, UsageSummary } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
@@ -16,7 +16,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(text || `Request failed with ${res.status}`);
   }
 
-  // Some endpoints may return empty; guard accordingly
   if (res.status === 204) {
     // @ts-expect-error allow void
     return undefined;
@@ -104,5 +103,24 @@ export function fetchJobs(chat_id?: string) {
 export function cancelJob(job_id: string) {
   return request<Job>(`/orchestration/jobs/${job_id}/cancel`, {
     method: "POST",
+  });
+}
+
+export function fetchUsageRecent(limit = 50) {
+  return request<UsageEvent[]>(`/orchestration/usage/recent?limit=${limit}`);
+}
+
+export function fetchUsageSummary(days = 7) {
+  return request<UsageSummary>(`/orchestration/usage/summary?days=${days}`);
+}
+
+export function fetchSettings() {
+  return request<{ frontman_model: string; caller_model: string; cache_mode: string }>(`/orchestration/settings`);
+}
+
+export function updateSettings(payload: { frontman_model?: string; caller_model?: string; cache_mode?: string }) {
+  return request<{ frontman_model: string; caller_model: string; cache_mode: string }>(`/orchestration/settings`, {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }

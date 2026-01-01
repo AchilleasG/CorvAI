@@ -34,3 +34,67 @@ export type Job = {
   updated_at?: string | null;
   cancel_requested?: boolean | null;
 };
+
+export type UsageEvent = {
+  id: string;
+  created_at: string;
+  source: string;
+  model: string;
+  cache_mode: string;
+  prompt_tokens: number;
+  cached_prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
+export type UsageSummary = {
+  since: string;
+  by_source: Record<
+    string,
+    {
+      source: string;
+      prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
+    }
+  >;
+  totals: {
+    prompt_tokens: number | null;
+    cached_prompt_tokens: number | null;
+    completion_tokens: number | null;
+    total_tokens: number | null;
+  };
+};
+
+export type UsageEvent = {
+  id: string;
+  created_at: string;
+  source: string;
+  model: string;
+  cache_mode: string;
+  prompt_tokens: number;
+  cached_prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
+export type UsageSummary = {
+  since: string;
+  by_source: Record<
+    string,
+    {
+      source: string;
+      prompt_tokens: number | null;
+      cached_prompt_tokens: number | null;
+      completion_tokens: number | null;
+      total_tokens: number | null;
+    }
+  >;
+  totals: {
+    prompt_tokens: number | null;
+    cached_prompt_tokens: number | null;
+    completion_tokens: number | null;
+    total_tokens: number | null;
+  };
+};
