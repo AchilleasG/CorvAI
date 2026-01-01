@@ -14,9 +14,14 @@ from orchestration.models import (
     ToolFunction,
     ToolModule,
     OrchestrationSetting,
+    UsageEvent,
 )
 from orchestration.registry import FunctionRegistry
-from orchestration.schemas import FunctionCallPayload, FunctionResultPayload, MessageEnvelope
+from orchestration.schemas import (
+    FunctionCallPayload,
+    FunctionResultPayload,
+    MessageEnvelope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +80,9 @@ class JobService:
 
     @staticmethod
     @transaction.atomic
-    def mark_status(job: Job, status: str, *, error_summary: str = "", progress: float | None = None):
+    def mark_status(
+        job: Job, status: str, *, error_summary: str = "", progress: float | None = None
+    ):
         job.status = status
         if progress is not None:
             job.progress = progress
@@ -83,7 +90,15 @@ class JobService:
             job.finished_at = timezone.now()
         if error_summary:
             job.error_summary = error_summary
-        job.save(update_fields=["status", "progress", "finished_at", "error_summary", "updated_at"])
+        job.save(
+            update_fields=[
+                "status",
+                "progress",
+                "finished_at",
+                "error_summary",
+                "updated_at",
+            ]
+        )
         JobEvent.objects.create(
             job=job,
             role="caller",
@@ -101,7 +116,9 @@ class JobService:
         job.cancel_requested = True
         job.status = Job.STATUS_CANCELED
         job.finished_at = timezone.now()
-        job.save(update_fields=["cancel_requested", "status", "finished_at", "updated_at"])
+        job.save(
+            update_fields=["cancel_requested", "status", "finished_at", "updated_at"]
+        )
         JobEvent.objects.create(
             job=job,
             role="frontman",
@@ -175,7 +192,9 @@ class FunctionRunnerService:
             JobService.append_event(
                 job,
                 role="runner",
-                event_type=JobEvent.EVENT_INFO if status == "ok" else JobEvent.EVENT_ERROR,
+                event_type=(
+                    JobEvent.EVENT_INFO if status == "ok" else JobEvent.EVENT_ERROR
+                ),
                 visibility=JobEvent.VISIBILITY_TOOL,
                 message="Function completed" if status == "ok" else "Function error",
                 payload={"result": result, "error_summary": error_summary},
@@ -203,7 +222,9 @@ class FunctionCallerService:
 
     @staticmethod
     def list_functions_for_module(module: ToolModule):
-        return ToolFunction.objects.filter(module=module, deprecated=False).order_by("name")
+        return ToolFunction.objects.filter(module=module, deprecated=False).order_by(
+            "name"
+        )
 
     @staticmethod
     def build_call_payload(
@@ -284,7 +305,9 @@ class ModuleDirectory:
         to expose tools automatically; Runner resolves via registry.
         """
         specs = []
-        for func in ToolFunction.objects.filter(deprecated=False).select_related("module"):
+        for func in ToolFunction.objects.filter(deprecated=False).select_related(
+            "module"
+        ):
             specs.append(
                 {
                     "type": "function",
@@ -312,7 +335,9 @@ class PersonaService:
                 return qs.get(slug=slug)
             except FrontmanPersona.DoesNotExist:
                 return None
-        active = qs.filter(is_active=True).order_by("-updated_at", "-created_at").first()
+        active = (
+            qs.filter(is_active=True).order_by("-updated_at", "-created_at").first()
+        )
         if active:
             return active
         return qs.order_by("-created_at").first()
@@ -338,6 +363,8 @@ class ModelConfigService:
 
     DEFAULT_FRONTMAN_MODEL = "gpt-5.2"
     DEFAULT_CALLER_MODEL = "gpt-5.2"
+    DEFAULT_CACHE_MODE = "off"
+    DEFAULT_PRICING_JSON = "{}"
 
     @staticmethod
     def get_setting(key: str, default: str) -> str:
@@ -349,12 +376,144 @@ class ModelConfigService:
 
     @staticmethod
     def set_setting(key: str, value: str):
-        OrchestrationSetting.objects.update_or_create(key=key, defaults={"value": value})
+        OrchestrationSetting.objects.update_or_create(
+            key=key, defaults={"value": value}
+        )
 
     @staticmethod
     def get_frontman_model() -> str:
-        return ModelConfigService.get_setting("frontman_model", ModelConfigService.DEFAULT_FRONTMAN_MODEL)
+        return ModelConfigService.get_setting(
+            "frontman_model", ModelConfigService.DEFAULT_FRONTMAN_MODEL
+        )
 
     @staticmethod
     def get_caller_model() -> str:
-        return ModelConfigService.get_setting("caller_model", ModelConfigService.DEFAULT_CALLER_MODEL)
+        return ModelConfigService.get_setting(
+            "caller_model", ModelConfigService.DEFAULT_CALLER_MODEL
+        )
+
+    @staticmethod
+    def get_cache_mode() -> str:
+        """
+        Returns 'off', 'frontman', 'caller', or 'all'.
+        """
+        return ModelConfigService.get_setting(
+            "cache_mode", ModelConfigService.DEFAULT_CACHE_MODE
+        ).lower()
+
+    @staticmethod
+    def get_pricing() -> dict:
+        """
+        Returns a dict of {model: {prompt_per_1k: float, completion_per_1k: float}} from setting 'model_pricing'.
+        """
+        import json
+
+        raw = ModelConfigService.get_setting(
+            "model_pricing", ModelConfigService.DEFAULT_PRICING_JSON
+        )
+        try:
+            data = json.loads(raw) if raw else {}
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return {}
+        return {}
+
+
+class UsageService:
+    """
+    Helper to log usage events for observability.
+    """
+
+    logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def log_usage(
+        *,
+        source: str,
+        model: str,
+        cache_mode: str = "",
+        usage: Optional[dict] = None,
+        prompt_cache_key: str = "",
+        job: Optional[Job] = None,
+    ):
+        if not usage:
+            return
+
+        # usage may be a dict or OpenAI's ResponseUsage object; normalize via attrs then dict.
+        def _val(obj, key, default=None):
+            if hasattr(obj, key):
+                return getattr(obj, key, default)
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return default
+
+        def _first_not_none(*vals, default=0):
+            for v in vals:
+                if v is not None:
+                    return v
+            return default
+
+        prompt_tokens = _first_not_none(
+            _val(usage, "prompt_tokens", None),
+            _val(usage, "input_tokens", None),
+        )
+        completion_tokens = _first_not_none(
+            _val(usage, "completion_tokens", None),
+            _val(usage, "output_tokens", None),
+        )
+        total_tokens = _first_not_none(
+            _val(usage, "total_tokens", None),
+            (prompt_tokens or 0) + (completion_tokens or 0),
+        )
+        details = _first_not_none(
+            _val(usage, "prompt_tokens_details", None),
+            _val(usage, "input_tokens_details", None),
+            default={},
+        )
+        cached_prompt_tokens = _first_not_none(_val(details, "cached_tokens", None))
+
+        if cache_mode and cache_mode != "off":
+            try:
+                # Use warning level so it shows up with default Django logging.
+                UsageService.logger.warning(
+                    "Usage detail",
+                    extra={
+                        "source": source,
+                        "cache_mode": cache_mode,
+                        "prompt_cache_key": prompt_cache_key,
+                        "usage_raw": usage,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                        "cached_prompt_tokens": cached_prompt_tokens,
+                    },
+                )
+            except Exception:
+                pass
+
+        pricing = ModelConfigService.get_pricing()
+        prompt_cost = completion_cost = total_cost = 0
+        if model in pricing:
+            p = pricing[model]
+            pp = p.get("prompt_per_1k") or 0
+            cp = p.get("completion_per_1k") or 0
+            prompt_cost = (prompt_tokens / 1000) * pp
+            completion_cost = (completion_tokens / 1000) * cp
+            total_cost = prompt_cost + completion_cost
+
+        UsageEvent.objects.create(
+            source=source,
+            model=model,
+            cache_mode=cache_mode,
+            prompt_tokens=prompt_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            prompt_cache_key=prompt_cache_key or "",
+            prompt_cost=prompt_cost,
+            completion_cost=completion_cost,
+            total_cost=total_cost,
+            job=job,
+            chat=job.chat if job else None,
+        )

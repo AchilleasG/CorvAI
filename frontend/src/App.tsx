@@ -10,8 +10,12 @@ import {
   deleteChat,
   cancelJob,
   fetchJobMessagesDirect,
+  fetchUsageRecent,
+  fetchUsageSummary,
+  fetchSettings,
+  updateSettings,
 } from "./api";
-import { ChatListItem, Message, Job } from "./types";
+import { ChatListItem, Message, Job, UsageEvent, UsageSummary, SettingsPayload } from "./types";
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -105,7 +109,13 @@ export default function App() {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [usageRecent, setUsageRecent] = useState<UsageEvent[]>([]);
+  const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [input, setInput] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<SettingsPayload>({});
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
@@ -127,6 +137,18 @@ export default function App() {
   useEffect(() => {
     (async () => {
       await refreshChats();
+      try {
+        const [recent, summary, settingsResp] = await Promise.all([
+          fetchUsageRecent(20),
+          fetchUsageSummary(7),
+          fetchSettings(),
+        ]);
+        setUsageRecent(recent);
+        setUsageSummary(summary);
+        setSettings(settingsResp);
+      } catch (err) {
+        // ignore usage/settings load errors
+      }
     })();
   }, []);
 
@@ -192,6 +214,33 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const [recent, summary] = await Promise.all([fetchUsageRecent(20), fetchUsageSummary(7)]);
+        setUsageRecent(recent);
+        setUsageSummary(summary);
+      } catch {
+        // ignore usage load errors
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [recent, summary] = await Promise.all([
+          fetchUsageRecent(20),
+          fetchUsageSummary(7),
+        ]);
+        setUsageRecent(recent);
+        setUsageSummary(summary);
+      } catch (err) {
+        // ignore usage load errors in UI
+      }
+    })();
+  }, []);
+
   const activeChat = useMemo(
     () => chats.find((c) => c.chat_id === activeChatId) || null,
     [chats, activeChatId],
@@ -203,6 +252,26 @@ export default function App() {
       return bTime - aTime;
     });
   }, [chats]);
+
+  async function handleSaveSettings(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setSavingSettings(true);
+    setSettingsError(null);
+    try {
+      const formData = new FormData(e.currentTarget);
+      const payload: SettingsPayload = {
+        frontman_model: formData.get("frontman_model") as string,
+        caller_model: formData.get("caller_model") as string,
+        cache_mode: formData.get("cache_mode") as string,
+      };
+      const updated = await updateSettings(payload);
+      setSettings(updated);
+    } catch (err: any) {
+      setSettingsError(err.message || "Failed to save settings");
+    } finally {
+      setSavingSettings(false);
+    }
+  }
 
   async function refreshChats(preferredActiveId?: string | null) {
     try {
@@ -531,189 +600,301 @@ export default function App() {
       </aside>
 
       <main className="main">
-        <header className="main-header">
-          <div>
-            <p className="eyebrow">Chat</p>
-            <h2>{activeChat ? formatChatLabel(activeChat) : "Start a chat"}</h2>
-            {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user" || j.cancel_requested) && (
-              <div
-                className="job-indicator"
-                style={{ marginTop: "0.4rem", position: "relative" }}
-              >
-                <span className="pulse" aria-hidden />
-                {(() => {
-                  const latestJob = [...jobs].sort((a, b) => {
-                    const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-                    const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
-                    return bt - at;
-                  })[0];
-                  const statusText =
-                    latestJob?.status === "completed"
-                      ? "Last job completed"
-                      : latestJob?.status === "failed"
-                        ? "Last job failed"
-                        : latestJob?.status === "waiting_on_user"
-                          ? "Job waiting on you…"
-                          : "Job in progress…";
-                  return <span>{statusText}</span>;
-                })()}
-                {(() => {
-                  const latestJob = [...jobs]
-                    .sort((a, b) => {
-                      const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-                      const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
-                      return bt - at;
-                    })[0];
-                  if (!latestJob) return null;
-                  return (
-                    <button
-                      type="button"
-                      className="ghost pill-action"
-                      style={{ marginLeft: "0.5rem" }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCancelJob(latestJob.id);
-                      }}
-                      disabled={
-                        latestJob.cancel_requested ||
-                        latestJob.status === "completed" ||
-                        latestJob.status === "failed"
-                      }
-                      title={
-                        latestJob.cancel_requested
-                          ? "Cancel requested"
-                          : latestJob.status === "completed" || latestJob.status === "failed"
-                            ? "Job finished"
-                            : "Cancel job"
-                      }
-                    >
-                      {latestJob.cancel_requested
-                        ? "Canceling…"
-                        : latestJob.status === "completed"
-                          ? "Done"
-                          : latestJob.status === "failed"
-                            ? "Failed"
-                            : "Cancel job"}
-                    </button>
-                  );
-                })()}
+        {showSettings ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Settings</p>
+                <h2>Models & Usage</h2>
               </div>
+              <div className="main-actions">
+                <button className="ghost" onClick={() => setShowSettings(false)}>Back to chat</button>
+              </div>
+            </header>
+            <div className="settings-grid">
+              <div className="card">
+                <h3>Model selection</h3>
+                <form onSubmit={handleSaveSettings} className="settings-form">
+                  {settingsError && <div className="error-banner">{settingsError}</div>}
+                  <label className="field">
+                    <span>Frontman model</span>
+                    <input name="frontman_model" defaultValue={settings.frontman_model || "gpt-5.2"} />
+                  </label>
+                  <label className="field">
+                    <span>Caller model</span>
+                    <input name="caller_model" defaultValue={settings.caller_model || "gpt-5.2"} />
+                  </label>
+                  <label className="field">
+                    <span>Cache mode</span>
+                    <select name="cache_mode" defaultValue={settings.cache_mode || "off"}>
+                      <option value="off">off</option>
+                      <option value="frontman">frontman</option>
+                      <option value="caller">caller</option>
+                      <option value="all">all</option>
+                    </select>
+                  </label>
+                  <div className="actions-row">
+                    <button className="primary" type="submit" disabled={savingSettings}>
+                      {savingSettings ? "Saving..." : "Save settings"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+              <div className="card">
+                <h3>Usage (last 7 days)</h3>
+                {usageSummary ? (
+                  (() => {
+                    const promptTokens = Number(usageSummary.totals.prompt_tokens ?? 0);
+                    const cachedPromptTokens = Number(usageSummary.totals.cached_prompt_tokens ?? 0);
+                    const completionTokens = Number(usageSummary.totals.completion_tokens ?? 0);
+                    const computedTotalTokens = promptTokens + completionTokens;
+                    const serverTotalTokens = Number(
+                      usageSummary.totals.total_tokens ?? computedTotalTokens,
+                    );
+                    const totalMismatch = serverTotalTokens !== computedTotalTokens;
+                    return (
+                      <div className="usage-summary">
+                        <div className="usage-totals">
+                          <div>
+                            <strong>Prompt</strong>{" "}
+                            {promptTokens.toLocaleString()} ({cachedPromptTokens.toLocaleString()} cached)
+                          </div>
+                          <div><strong>Completion</strong> {completionTokens.toLocaleString()}</div>
+                          <div>
+                            <strong>Total</strong> {computedTotalTokens.toLocaleString()}
+                            {totalMismatch && (
+                              <span className="muted"> (server {serverTotalTokens.toLocaleString()})</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="usage-totals" style={{ marginTop: "0.35rem" }}>
+                          <div><strong>Prompt $</strong> ${Number(usageSummary.totals.prompt_cost ?? 0).toFixed(4)}</div>
+                          <div><strong>Completion $</strong> ${Number(usageSummary.totals.completion_cost ?? 0).toFixed(4)}</div>
+                          <div><strong>Total $</strong> ${Number(usageSummary.totals.total_cost ?? 0).toFixed(4)}</div>
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <p className="muted">No usage yet.</p>
+                )}
+              </div>
+              <div className="card full">
+                <h3>Recent calls</h3>
+                {usageRecent.length ? (
+                  <div className="usage-table">
+                    <div className="usage-row usage-head">
+                      <span>When</span><span>Source</span><span>Model</span><span>Prompt</span><span>Cached</span><span>Completion</span><span>Total</span><span>$</span>
+                    </div>
+                    {usageRecent.map((u) => (
+                      <div key={u.id} className="usage-row">
+                        <span>{new Date(u.created_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span>
+                        <span>{u.source}</span>
+                        <span>{u.model}</span>
+                        <span>{u.prompt_tokens.toLocaleString()}</span>
+                        <span>{u.cached_prompt_tokens.toLocaleString()}</span>
+                        <span>{u.completion_tokens.toLocaleString()}</span>
+                        <span>{u.total_tokens.toLocaleString()}</span>
+                        <span>${(u.total_cost || 0).toFixed(4)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No recent usage.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Chat</p>
+                <h2>{activeChat ? formatChatLabel(activeChat) : "Start a chat"}</h2>
+                {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user" || j.cancel_requested) && (
+                  <div
+                    className="job-indicator"
+                    style={{ marginTop: "0.4rem", position: "relative" }}
+                  >
+                    <span className="pulse" aria-hidden />
+                    {(() => {
+                      const latestJob = [...jobs].sort((a, b) => {
+                        const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                        const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                        return bt - at;
+                      })[0];
+                      const statusText =
+                        latestJob?.status === "completed"
+                          ? "Last job completed"
+                          : latestJob?.status === "failed"
+                            ? "Last job failed"
+                            : latestJob?.status === "waiting_on_user"
+                              ? "Job waiting on you…"
+                              : "Job in progress…";
+                      return <span>{statusText}</span>;
+                    })()}
+                    {(() => {
+                      const latestJob = [...jobs]
+                        .sort((a, b) => {
+                          const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                          const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                          return bt - at;
+                        })[0];
+                      if (!latestJob) return null;
+                      return (
+                        <button
+                          type="button"
+                          className="ghost pill-action"
+                          style={{ marginLeft: "0.5rem" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCancelJob(latestJob.id);
+                          }}
+                          disabled={
+                            latestJob.cancel_requested ||
+                            latestJob.status === "completed" ||
+                            latestJob.status === "failed"
+                          }
+                          title={
+                            latestJob.cancel_requested
+                              ? "Cancel requested"
+                              : latestJob.status === "completed" || latestJob.status === "failed"
+                                ? "Job finished"
+                                : "Cancel job"
+                          }
+                        >
+                          {latestJob.cancel_requested
+                            ? "Canceling…"
+                            : latestJob.status === "completed"
+                              ? "Done"
+                              : latestJob.status === "failed"
+                                ? "Failed"
+                                : "Cancel job"}
+                        </button>
+                      );
+                    })()}
+                  </div>
             )}
           </div>
           <div className="header-actions">
+            <button className="ghost" onClick={() => setShowSettings(true)}>
+              Settings
+            </button>
             <button className="ghost" onClick={handleNewChat}>
               Start fresh
             </button>
           </div>
         </header>
 
-        <section className="chat-window">
-          {error && <div className="alert">{error}</div>}
-          {loadingMessages ? (
-            <div className="muted">Loading messages…</div>
-          ) : (
-            <div className="messages">
-              {(() => {
-                const visibleMessages = messages.filter(
-                  (m) => m.message_type === undefined || m.message_type === "user_visible",
-                );
-                const lastJobIndex: Record<string, number> = {};
-                visibleMessages.forEach((m, idx) => {
-                  if (m.job_id) {
-                    lastJobIndex[m.job_id] = idx;
-                  }
-                });
-                return visibleMessages.map((m, idx) => {
-                  const isLastJobMessage = m.job_id ? lastJobIndex[m.job_id] === idx : false;
-                  return (
-                  <MessageBubble
-                    key={m.id}
-                    msg={m}
-                    jobLogMessages={jobLogMessages}
-                    jobLogAnchorId={jobLogAnchorId}
-                    showJobLog={showJobLog}
-                    isLastJobMessage={isLastJobMessage}
-                    onShowJobLog={(jobId) => {
-                      setShowJobLog(true);
-                      setJobLogAnchorId(jobId);
-                      loadJobLog(jobId);
-                    }}
-                    onHideJobLog={() => {
-                      setShowJobLog(false);
-                      setJobLogAnchorId(null);
-                    }}
-                  />
-                  );
-                });
-              })()}
-              <div ref={messagesEndRef} />
-              {!messages.length && (
-                <div className="muted empty">
-                  <p>Ask Corv anything to begin.</p>
+            <section className="chat-window">
+              {error && <div className="alert">{error}</div>}
+              {loadingMessages ? (
+                <div className="muted">Loading messages…</div>
+              ) : (
+                <div className="messages">
+                  {(() => {
+                    const visibleMessages = messages.filter(
+                      (m) => m.message_type === undefined || m.message_type === "user_visible",
+                    );
+                    const lastJobIndex: Record<string, number> = {};
+                    visibleMessages.forEach((m, idx) => {
+                      if (m.job_id) {
+                        lastJobIndex[m.job_id] = idx;
+                      }
+                    });
+                    return visibleMessages.map((m, idx) => {
+                      const isLastJobMessage = m.job_id ? lastJobIndex[m.job_id] === idx : false;
+                      return (
+                        <MessageBubble
+                          key={m.id}
+                          msg={m}
+                          jobLogMessages={jobLogMessages}
+                          jobLogAnchorId={jobLogAnchorId}
+                          showJobLog={showJobLog}
+                          isLastJobMessage={isLastJobMessage}
+                          onShowJobLog={(jobId) => {
+                            setShowJobLog(true);
+                            setJobLogAnchorId(jobId);
+                            loadJobLog(jobId);
+                          }}
+                          onHideJobLog={() => {
+                            setShowJobLog(false);
+                            setJobLogAnchorId(null);
+                          }}
+                        />
+                      );
+                    });
+                  })()}
+                  <div ref={messagesEndRef} />
+                  {!messages.length && (
+                    <div className="muted empty">
+                      <p>Ask Corv anything to begin.</p>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-        </section>
+            </section>
 
-        <form className="input-bar" onSubmit={handleSend}>
-          <textarea
-            placeholder="Send a message…"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            disabled={sending}
-          />
-          <div className="input-actions">
-            <button
-              type="button"
-              className={`ghost voice ${recording ? "recording" : ""}`}
-              onClick={toggleVoiceRecording}
-              disabled={sending || voiceSending}
-            >
-              {recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
-            </button>
-            <button type="submit" className="primary" disabled={sending || !input.trim()}>
-              {sending ? "Sending…" : "Send"}
-            </button>
-          </div>
-          {mics.length > 0 && (
-            <div className="muted" style={{ marginTop: "0.35rem", display: "flex", gap: "0.35rem", alignItems: "center" }}>
-              <span>Mic:</span>
-              <select
-                className="mic-select"
-                value={selectedMicId}
-                onChange={(e) => setSelectedMicId(e.target.value)}
-                disabled={recording}
-              >
-                {mics.map((mic, idx) => (
-                  <option key={mic.deviceId} value={mic.deviceId}>
-                    {mic.label || `Microphone ${idx + 1}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-          {!micReady && !recording && !voiceSending && (
-            <div className="muted" style={{ marginTop: "0.35rem" }}>
-              Having trouble?{" "}
-              <button
-                type="button"
-                className="ghost"
-                style={{ padding: 0, display: "inline", minWidth: "auto" }}
-                onClick={requestMicPermission}
+            <form className="input-bar" onSubmit={handleSend}>
+              <textarea
+                placeholder="Send a message…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 disabled={sending}
-              >
-                Give mic permission
-              </button>
-            </div>
-          )}
-        </form>
+              />
+              <div className="input-actions">
+                <button
+                  type="button"
+                  className={`ghost voice ${recording ? "recording" : ""}`}
+                  onClick={toggleVoiceRecording}
+                  disabled={sending || voiceSending}
+                >
+                  {recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
+                </button>
+                <button type="submit" className="primary" disabled={sending || !input.trim()}>
+                  {sending ? "Sending…" : "Send"}
+                </button>
+              </div>
+              {mics.length > 0 && (
+                <div className="muted" style={{ marginTop: "0.35rem", display: "flex", gap: "0.35rem", alignItems: "center" }}>
+                  <span>Mic:</span>
+                  <select
+                    className="mic-select"
+                    value={selectedMicId}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    disabled={recording}
+                  >
+                    {mics.map((mic, idx) => (
+                      <option key={mic.deviceId} value={mic.deviceId}>
+                        {mic.label || `Microphone ${idx + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {!micReady && !recording && !voiceSending && (
+                <div className="muted" style={{ marginTop: "0.35rem" }}>
+                  Having trouble?{" "}
+                  <button
+                    type="button"
+                    className="ghost"
+                    style={{ padding: 0, display: "inline", minWidth: "auto" }}
+                    onClick={requestMicPermission}
+                    disabled={sending}
+                  >
+                    Give mic permission
+                  </button>
+                </div>
+              )}
+            </form>
+          </>
+        )}
       </main>
     </div>
   );

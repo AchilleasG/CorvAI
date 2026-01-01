@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 from json import JSONDecoder
+import hashlib
+import logging
 import re
 from typing import Any, Dict, List, Optional
-import logging
 
 from openai import OpenAI
 
 from Corv.config import settings
-from orchestration.services import ModuleDirectory, FunctionRunnerService, JobService, ModelConfigService
+from orchestration.services import ModuleDirectory, FunctionRunnerService, JobService, ModelConfigService, UsageService
 from orchestration.models import Job
 from orchestration.schemas import FunctionCallPayload
 from orchestration.message_router import MessageRouter
@@ -31,6 +32,7 @@ class FunctionCallOrchestrator:
         tool_catalog: List[Dict[str, Any]],
         prior_results: List[Dict[str, Any]],
         model: str = "gpt-5.2",
+        cache_mode: str = "off",
         job: Optional[Job] = None,
         chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -100,14 +102,30 @@ class FunctionCallOrchestrator:
             },
         ]
 
-        resp = FunctionCallOrchestrator.client.responses.create(
-            model=model,
-            input=input_seq,
-            tools=[],  # planning only
-            text={"format": {"type": "json_object"}},
-            reasoning={"effort": "low"},
-            timeout=30,
-        )
+        resp_kwargs = {
+            "model": model,
+            "input": input_seq,
+            "tools": [],
+            "text": {"format": {"type": "json_object"}},
+            "reasoning": {"effort": "low"},
+            "timeout": 30,
+        }
+        if cache_mode in ("caller", "all"):
+            # Stable key based on the planner instructions and tool catalog shape.
+            catalog_sig = hashlib.md5(
+                "|".join(sorted(t["manifest_id"] for t in tool_catalog)).encode("utf-8")
+            ).hexdigest()
+            resp_kwargs["prompt_cache_key"] = f"caller-v1-{catalog_sig}"
+        resp = FunctionCallOrchestrator.client.responses.create(**resp_kwargs)
+        if getattr(resp, "usage", None):
+            UsageService.log_usage(
+                source="caller_plan",
+                model=model,
+                cache_mode=cache_mode,
+                usage=getattr(resp, "usage", {}),
+                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                job=job,
+            )
         raw = getattr(resp, "output_text", "{}") or "{}"
         decision = FunctionCallOrchestrator._safe_json_load(raw)
         if not decision:
@@ -173,6 +191,7 @@ class FunctionCallOrchestrator:
 
         try:
             model_name = ModelConfigService.get_caller_model()
+            cache_mode = ModelConfigService.get_cache_mode()
             for step in range(max_steps):
                 if job.cancel_requested or job.status == Job.STATUS_CANCELED:
                     JobService.mark_status(job, Job.STATUS_CANCELED)
@@ -191,6 +210,7 @@ class FunctionCallOrchestrator:
                     job=job,
                     chat_id=job.chat.id if job and job.chat else None,
                     model=model_name,
+                    cache_mode=cache_mode,
                 )
 
                 if decision.get("ask_user"):
