@@ -2,10 +2,16 @@ import { ChatListItem, Message, SendTextResponse, Job, UsageEvent, UsageSummary 
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
+function authHeaders(): Record<string, string> {
+  const token = localStorage.getItem("appAccessToken");
+  return token ? { "X-App-Token": token } : {};
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...authHeaders(),
       ...(init?.headers || {}),
     },
     ...init,
@@ -13,7 +19,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Request failed with ${res.status}`);
+    const err: any = new Error(text || `Request failed with ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
 
   if (res.status === 204) {
@@ -85,11 +93,14 @@ export async function sendVoice(chat_id: string, file: Blob) {
   const res = await fetch(`${API_BASE}/input/voice/`, {
     method: "POST",
     body: formData,
+    headers: authHeaders(),
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `Request failed with ${res.status}`);
+    const err: any = new Error(text || `Request failed with ${res.status}`);
+    err.status = res.status;
+    throw err;
   }
 
   return (await res.json()) as SendTextResponse;
