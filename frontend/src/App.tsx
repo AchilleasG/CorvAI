@@ -613,26 +613,39 @@ export default function App() {
             </header>
             <div className="settings-grid">
               <div className="card">
-                <h3>Model selection</h3>
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Models</p>
+                    <h3>Model selection</h3>
+                    <p className="muted small">Tune how Corv routes requests between Frontman and Caller.</p>
+                  </div>
+                  <div className="pill-stack">
+                    <span className="pill">Frontman: {settings.frontman_model || "gpt-5.2"}</span>
+                    <span className="pill">Caller: {settings.caller_model || "gpt-5.2"}</span>
+                    <span className="pill">Cache: {settings.cache_mode || "off"}</span>
+                  </div>
+                </div>
                 <form onSubmit={handleSaveSettings} className="settings-form">
                   {settingsError && <div className="error-banner">{settingsError}</div>}
-                  <label className="field">
-                    <span>Frontman model</span>
-                    <input name="frontman_model" defaultValue={settings.frontman_model || "gpt-5.2"} />
-                  </label>
-                  <label className="field">
-                    <span>Caller model</span>
-                    <input name="caller_model" defaultValue={settings.caller_model || "gpt-5.2"} />
-                  </label>
-                  <label className="field">
-                    <span>Cache mode</span>
-                    <select name="cache_mode" defaultValue={settings.cache_mode || "off"}>
-                      <option value="off">off</option>
-                      <option value="frontman">frontman</option>
-                      <option value="caller">caller</option>
-                      <option value="all">all</option>
-                    </select>
-                  </label>
+                  <div className="form-grid">
+                    <label className="field">
+                      <span>Frontman model</span>
+                      <input name="frontman_model" defaultValue={settings.frontman_model || "gpt-5.2"} />
+                    </label>
+                    <label className="field">
+                      <span>Caller model</span>
+                      <input name="caller_model" defaultValue={settings.caller_model || "gpt-5.2"} />
+                    </label>
+                    <label className="field">
+                      <span>Cache mode</span>
+                      <select name="cache_mode" defaultValue={settings.cache_mode || "off"}>
+                        <option value="off">off</option>
+                        <option value="frontman">frontman</option>
+                        <option value="caller">caller</option>
+                        <option value="all">all</option>
+                      </select>
+                    </label>
+                  </div>
                   <div className="actions-row">
                     <button className="primary" type="submit" disabled={savingSettings}>
                       {savingSettings ? "Saving..." : "Save settings"}
@@ -641,7 +654,13 @@ export default function App() {
                 </form>
               </div>
               <div className="card">
-                <h3>Usage (last 7 days)</h3>
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Usage</p>
+                    <h3>Last 7 days</h3>
+                    <p className="muted small">Token footprint and spend, including cached hits.</p>
+                  </div>
+                </div>
                 {usageSummary ? (
                   (() => {
                     const promptTokens = Number(usageSummary.totals.prompt_tokens ?? 0);
@@ -653,24 +672,34 @@ export default function App() {
                     );
                     const totalMismatch = serverTotalTokens !== computedTotalTokens;
                     return (
-                      <div className="usage-summary">
-                        <div className="usage-totals">
-                          <div>
-                            <strong>Prompt</strong>{" "}
-                            {promptTokens.toLocaleString()} ({cachedPromptTokens.toLocaleString()} cached)
-                          </div>
-                          <div><strong>Completion</strong> {completionTokens.toLocaleString()}</div>
-                          <div>
-                            <strong>Total</strong> {computedTotalTokens.toLocaleString()}
+                      <div className="stat-grid">
+                        <div className="stat-card">
+                          <p className="muted small">Prompt tokens</p>
+                          <div className="stat-value">{promptTokens.toLocaleString()}</div>
+                          <div className="stat-sub">Cached {cachedPromptTokens.toLocaleString()}</div>
+                        </div>
+                        <div className="stat-card">
+                          <p className="muted small">Completion tokens</p>
+                          <div className="stat-value">{completionTokens.toLocaleString()}</div>
+                          <div className="stat-sub">Generated responses</div>
+                        </div>
+                        <div className="stat-card">
+                          <p className="muted small">Total tokens</p>
+                          <div className="stat-value">
+                            {computedTotalTokens.toLocaleString()}
                             {totalMismatch && (
-                              <span className="muted"> (server {serverTotalTokens.toLocaleString()})</span>
+                              <span className="muted small"> (server {serverTotalTokens.toLocaleString()})</span>
                             )}
                           </div>
+                          <div className="stat-sub">Prompt + completion</div>
                         </div>
-                        <div className="usage-totals" style={{ marginTop: "0.35rem" }}>
-                          <div><strong>Prompt $</strong> ${Number(usageSummary.totals.prompt_cost ?? 0).toFixed(4)}</div>
-                          <div><strong>Completion $</strong> ${Number(usageSummary.totals.completion_cost ?? 0).toFixed(4)}</div>
-                          <div><strong>Total $</strong> ${Number(usageSummary.totals.total_cost ?? 0).toFixed(4)}</div>
+                        <div className="stat-card">
+                          <p className="muted small">Cost</p>
+                          <div className="stat-value">${Number(usageSummary.totals.total_cost ?? 0).toFixed(4)}</div>
+                          <div className="stat-sub">
+                            Prompt ${Number(usageSummary.totals.prompt_cost ?? 0).toFixed(4)} · Completion $
+                            {Number(usageSummary.totals.completion_cost ?? 0).toFixed(4)}
+                          </div>
                         </div>
                       </div>
                     );
@@ -680,7 +709,13 @@ export default function App() {
                 )}
               </div>
               <div className="card full">
-                <h3>Recent calls</h3>
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Recent</p>
+                    <h3>Recent calls</h3>
+                    <p className="muted small">Most recent 20 usage events.</p>
+                  </div>
+                </div>
                 {usageRecent.length ? (
                   <div className="usage-table">
                     <div className="usage-row usage-head">

@@ -59,7 +59,7 @@ class ChatAIService:
     @transaction.atomic
     def generate_reply_from_context(
         context: Dict[str, Any],
-        model: str = "gpt-5.2",
+        model: str | None = None,
     ) -> ChatMessage:
         """
         Given the dict returned by `construct_chat_context`, generate the next assistant
@@ -130,7 +130,7 @@ class ChatAIService:
     @staticmethod
     def frontman_decision(
         context: Dict[str, Any],
-        model: str = "gpt-5.2",
+        model: str | None = None,
     ) -> str:
         """
         First-pass call: Front Man either responds normally or signals a handoff.

@@ -4,6 +4,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
+from openai import OpenAI
 from django.db import transaction
 from django.utils import timezone
 
@@ -15,6 +16,8 @@ from orchestration.models import (
     ToolModule,
     OrchestrationSetting,
     UsageEvent,
+    UserProfile,
+    UserNote,
 )
 from orchestration.registry import FunctionRegistry
 from orchestration.schemas import (
@@ -22,6 +25,7 @@ from orchestration.schemas import (
     FunctionResultPayload,
     MessageEnvelope,
 )
+from Corv.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +326,168 @@ class ModuleDirectory:
         return specs
 
 
+class UserInfoService:
+    """
+    Helpers for core and circumstantial user info with embeddings.
+    """
+
+    client = OpenAI(api_key=settings.openai_key)
+    DEFAULT_USER_ID = "default"
+    DEFAULT_EMBED_MODEL = "text-embedding-3-small"
+
+    @staticmethod
+    def _normalize_user_id(user_id: Optional[str] = None) -> str:
+        return user_id or UserInfoService.DEFAULT_USER_ID
+
+    @staticmethod
+    def _canonicalize(text: str) -> str:
+        return " ".join(text.strip().split()).lower()
+
+    @staticmethod
+    def _embed_text(text: str, model: Optional[str] = None) -> Optional[list]:
+        if not text:
+            return None
+        model_name = model or ModelConfigService.get_user_info_embedding_model()
+        resp = UserInfoService.client.embeddings.create(model=model_name, input=[text])
+        if getattr(resp, "data", None):
+            return resp.data[0].embedding  # type: ignore[attr-defined]
+        return None
+
+    @staticmethod
+    def get_core_profile(user_id: Optional[str] = None) -> Optional[UserProfile]:
+        uid = UserInfoService._normalize_user_id(user_id)
+        return UserProfile.objects.filter(user_id=uid).first()
+
+    @staticmethod
+    def set_core_profile(text: str, user_id: Optional[str] = None) -> UserProfile:
+        uid = UserInfoService._normalize_user_id(user_id)
+        profile, _ = UserProfile.objects.update_or_create(
+            user_id=uid,
+            defaults={"core_text": text},
+        )
+        return profile
+
+    @staticmethod
+    def append_core_profile(text: str, user_id: Optional[str] = None, separator: str = "\n") -> UserProfile:
+        uid = UserInfoService._normalize_user_id(user_id)
+        profile, _ = UserProfile.objects.get_or_create(user_id=uid, defaults={"core_text": ""})
+        base = profile.core_text or ""
+        sep = separator if base and separator is not None else ""
+        profile.core_text = f"{base}{sep}{text}".strip()
+        profile.save(update_fields=["core_text", "updated_at"])
+        return profile
+
+    @staticmethod
+    def delete_core_profile(user_id: Optional[str] = None):
+        uid = UserInfoService._normalize_user_id(user_id)
+        UserProfile.objects.filter(user_id=uid).delete()
+
+    @staticmethod
+    def format_core_profile_block(user_id: Optional[str] = None) -> str:
+        profile = UserInfoService.get_core_profile(user_id)
+        if not profile or not profile.core_text:
+            return ""
+        return f"User profile:\n{profile.core_text}"
+
+    @staticmethod
+    def add_note(
+        *,
+        content: str,
+        user_id: Optional[str] = None,
+        source: str = "",
+        tags: Optional[list] = None,
+        canonicalize: bool = True,
+        model: Optional[str] = None,
+    ) -> UserNote:
+        uid = UserInfoService._normalize_user_id(user_id)
+        canonical = UserInfoService._canonicalize(content) if canonicalize else content
+        embedding = UserInfoService._embed_text(canonical or content, model=model)
+        note = UserNote.objects.create(
+            user_id=uid,
+            content_raw=content,
+            content_canonical=canonical or "",
+            embedding=embedding,
+            source=source or "",
+            tags=tags or [],
+        )
+        return note
+
+    @staticmethod
+    def update_note(
+        note_id: str,
+        *,
+        content: str,
+        user_id: Optional[str] = None,
+        source: Optional[str] = None,
+        tags: Optional[list] = None,
+        canonicalize: bool = True,
+        model: Optional[str] = None,
+    ) -> UserNote:
+        uid = UserInfoService._normalize_user_id(user_id)
+        note = UserNote.objects.filter(id=note_id, user_id=uid, deleted_at__isnull=True).first()
+        if not note:
+            raise ValueError("Note not found")
+        canonical = UserInfoService._canonicalize(content) if canonicalize else content
+        embedding = UserInfoService._embed_text(canonical or content, model=model)
+        note.content_raw = content
+        note.content_canonical = canonical or ""
+        note.embedding = embedding
+        if source is not None:
+            note.source = source
+        if tags is not None:
+            note.tags = tags
+        note.save(update_fields=["content_raw", "content_canonical", "embedding", "source", "tags", "updated_at"])
+        return note
+
+    @staticmethod
+    def delete_note(note_id: str, *, user_id: Optional[str] = None):
+        uid = UserInfoService._normalize_user_id(user_id)
+        note = UserNote.objects.filter(id=note_id, user_id=uid, deleted_at__isnull=True).first()
+        if not note:
+            return
+        note.deleted_at = timezone.now()
+        note.save(update_fields=["deleted_at", "updated_at"])
+
+    @staticmethod
+    def search_notes(
+        query: str,
+        *,
+        user_id: Optional[str] = None,
+        limit: int = 5,
+        source: Optional[str] = None,
+        tag: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> list:
+        uid = UserInfoService._normalize_user_id(user_id)
+        canonical_query = UserInfoService._canonicalize(query)
+        embedding = UserInfoService._embed_text(canonical_query, model=model)
+        if not embedding:
+            return []
+        from pgvector.django import CosineDistance  # local import to avoid module load issues
+
+        qs = UserNote.objects.filter(user_id=uid, deleted_at__isnull=True, embedding__isnull=False)
+        if source:
+            qs = qs.filter(source=source)
+        if tag:
+            qs = qs.filter(tags__contains=[tag])
+        qs = qs.annotate(distance=CosineDistance("embedding", embedding)).order_by("distance")[:limit]
+        out = []
+        for n in qs:
+            out.append(
+                {
+                    "id": str(n.id),
+                    "user_id": n.user_id,
+                    "content": n.content_raw,
+                    "content_canonical": n.content_canonical,
+                    "source": n.source,
+                    "tags": n.tags,
+                    "created_at": n.created_at,
+                    "distance": getattr(n, "distance", None),
+                }
+            )
+        return out
+
+
 class PersonaService:
     """
     Accessor for Front Man persona instructions.
@@ -346,13 +512,17 @@ class PersonaService:
     def build_persona_prompt(slug: Optional[str] = None) -> str:
         persona = PersonaService.get_persona(slug)
         if not persona:
-            return (
+            base = (
                 "You are Corv's Front Man. Be personable, concise, and keep the user "
                 "informed about background work. Use the available modules when helpful."
             )
-        base = persona.instructions
-        if persona.postamble:
-            base = f"{base}\n\n{persona.postamble}"
+        else:
+            base = persona.instructions
+            if persona.postamble:
+                base = f"{base}\n\n{persona.postamble}"
+        profile_block = UserInfoService.format_core_profile_block()
+        if profile_block:
+            base = f"{base}\n\n{profile_block}"
         return base
 
 
@@ -365,6 +535,7 @@ class ModelConfigService:
     DEFAULT_CALLER_MODEL = "gpt-5.2"
     DEFAULT_CACHE_MODE = "off"
     DEFAULT_PRICING_JSON = "{}"
+    DEFAULT_USER_INFO_EMBED_MODEL = "text-embedding-3-small"
 
     @staticmethod
     def get_setting(key: str, default: str) -> str:
@@ -418,6 +589,12 @@ class ModelConfigService:
         except Exception:
             return {}
         return {}
+
+    @staticmethod
+    def get_user_info_embedding_model() -> str:
+        return ModelConfigService.get_setting(
+            "user_info_embedding_model", ModelConfigService.DEFAULT_USER_INFO_EMBED_MODEL
+        )
 
 
 class UsageService:
@@ -497,8 +674,11 @@ class UsageService:
         if model in pricing:
             p = pricing[model]
             pp = p.get("prompt_per_1k") or 0
+            cpp = p.get("cached_prompt_per_1k") or pp
             cp = p.get("completion_per_1k") or 0
-            prompt_cost = (prompt_tokens / 1000) * pp
+            effective_cached = cached_prompt_tokens or 0
+            effective_prompt = max((prompt_tokens or 0) - effective_cached, 0)
+            prompt_cost = (effective_prompt / 1000) * pp + (effective_cached / 1000) * cpp
             completion_cost = (completion_tokens / 1000) * cp
             total_cost = prompt_cost + completion_cost
 
