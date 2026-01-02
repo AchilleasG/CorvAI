@@ -587,7 +587,7 @@ button {
   height: 44px;
   border-radius: 12px;
   border: 1px solid var(--border);
-  background: var(--panel);
+  background-color: var(--panel);
   color: var(--text);
   font-size: 1.2rem;
   display: inline-flex;
@@ -604,7 +604,7 @@ button {
 }
 
 .icon-btn.send-btn {
-  background: var(--accent);
+  background-color: var(--accent);
   color: #041316;
   border-color: rgba(0, 0, 0, 0.08);
 }
@@ -620,7 +620,7 @@ button {
 }
 
 .icon-btn.recording {
-  background: #7f1d1d;
+  background-color: #7f1d1d;
   border-color: rgba(255, 255, 255, 0.1);
 }
 
@@ -739,5 +739,7 @@ button {
     width: 40px;
     height: 40px;
     font-size: 1.1rem;
+    background-color: var(--panel);
+    border-color: var(--border);
   }
 }
