@@ -24,6 +24,7 @@ class FunctionCallOrchestrator:
     """
 
     client = OpenAI(api_key=settings.openai_key)
+    MAX_RESULT_CHARS = 6000  # guardrail to avoid blowing out prompt/context
 
     @staticmethod
     def _plan_next_action(
@@ -175,6 +176,37 @@ class FunctionCallOrchestrator:
         return {"done": True, "summary": "Planner output could not be parsed."}
 
     @staticmethod
+    def _coerce_result_payload(result: FunctionResultPayload) -> Dict[str, Any]:
+        """
+        Ensure the stored result is bounded so the next prompt doesn't explode.
+        """
+        data = result.data
+        coerced = {
+            "function_id": result.call_id,
+            "status": result.status,
+            "data": data,
+            "error": result.error_summary,
+        }
+        if data is None:
+            coerced["data"] = None
+            coerced["truncated"] = False
+            return coerced
+
+        try:
+            import json
+
+            serialized = json.dumps(data, ensure_ascii=False)
+            if len(serialized) > FunctionCallOrchestrator.MAX_RESULT_CHARS:
+                coerced["data"] = None
+                coerced["truncated"] = True
+                coerced["truncation_reason"] = (
+                    f"Result too large ({len(serialized)} chars). Ask for narrower scope or filters."
+                )
+        except Exception:
+            coerced["truncated"] = False
+        return coerced
+
+    @staticmethod
     def run(chat_context: Dict[str, Any], job: Job, max_steps: int = 5) -> str:
         tool_catalog = ModuleDirectory.function_catalog()
         # Build a brief recent-context string (last 10 messages).
@@ -252,15 +284,17 @@ class FunctionCallOrchestrator:
                         job=job,
                     )
                     result = FunctionRunnerService.run_function_call(payload, job=job)
-                    prior_results.append(
-                        {
-                            "function_id": call["function_id"],
-                            "params": call.get("params") or {},
-                            "status": result.status,
-                            "data": result.data,
-                            "error": result.error_summary,
-                        }
-                    )
+                    coerced = FunctionCallOrchestrator._coerce_result_payload(result)
+                    coerced["function_id"] = call["function_id"]
+                    coerced["params"] = call.get("params") or {}
+                    prior_results.append(coerced)
+                    if coerced.get("truncated"):
+                        MessageRouter.tool_only_note(
+                            chat_id=job.chat.id if job.chat else None,
+                            content=coerced.get("truncation_reason", "Result truncated for size"),
+                            role="caller",
+                            job=job,
+                        )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
                         content=f"Function result: {result.model_dump()}",
@@ -386,15 +420,17 @@ class FunctionCallOrchestrator:
                         job=job,
                     )
                     result = FunctionRunnerService.run_function_call(payload, job=job)
-                    prior_results.append(
-                        {
-                            "function_id": call["function_id"],
-                            "params": call.get("params") or {},
-                            "status": result.status,
-                            "data": result.data,
-                            "error": result.error_summary,
-                        }
-                    )
+                    coerced = FunctionCallOrchestrator._coerce_result_payload(result)
+                    coerced["function_id"] = call["function_id"]
+                    coerced["params"] = call.get("params") or {}
+                    prior_results.append(coerced)
+                    if coerced.get("truncated"):
+                        MessageRouter.tool_only_note(
+                            chat_id=job.chat.id if job.chat else None,
+                            content=coerced.get("truncation_reason", "Result truncated for size"),
+                            role="caller",
+                            job=job,
+                        )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
                         content=f"Function result: {result.model_dump()}",
