@@ -14,18 +14,21 @@
   box-sizing: border-box;
 }
 
+html, body, #root {
+  height: 100dvh;
+}
+
 body {
   margin: 0;
   background: radial-gradient(circle at 20% 20%, rgba(42, 209, 163, 0.08), transparent 35%),
     radial-gradient(circle at 80% 0%, rgba(247, 194, 102, 0.08), transparent 30%),
     var(--bg);
   color: var(--text);
-  height: 100%;
   overflow: hidden;
 }
 
 .page {
-  height: 100vh;
+  height: 100%;
 }
 
 .page {
@@ -154,7 +157,8 @@ body {
 .main {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  max-height: 100%;
   padding: 1.25rem 1.5rem;
   gap: 1rem;
   min-height: 0;
@@ -316,7 +320,7 @@ body {
 }
 
 .chat-window {
-  flex: 1;
+  flex: 1 1 auto;
   background: rgba(255, 255, 255, 0.01);
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -328,7 +332,7 @@ body {
 }
 
 .messages {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   display: flex;
@@ -644,6 +648,7 @@ button {
 @media (max-width: 900px) {
   .page {
     grid-template-columns: 1fr;
+    height: 100dvh;
   }
 
   .sidebar {
@@ -653,7 +658,9 @@ button {
   }
 
   .main {
-    padding: 1rem;
+    padding: 0.75rem;
+    height: 100dvh;
+    max-height: 100dvh;
   }
 
   .input-bar {
