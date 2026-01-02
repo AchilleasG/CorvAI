@@ -536,6 +536,7 @@ class ModelConfigService:
     DEFAULT_CACHE_MODE = "off"
     DEFAULT_PRICING_JSON = "{}"
     DEFAULT_USER_INFO_EMBED_MODEL = "text-embedding-3-small"
+    DEFAULT_MAX_FUNCTION_RESULT_CHARS = 6000
 
     @staticmethod
     def get_setting(key: str, default: str) -> str:
@@ -595,6 +596,17 @@ class ModelConfigService:
         return ModelConfigService.get_setting(
             "user_info_embedding_model", ModelConfigService.DEFAULT_USER_INFO_EMBED_MODEL
         )
+
+    @staticmethod
+    def get_max_function_result_chars() -> int:
+        try:
+            raw = ModelConfigService.get_setting(
+                "max_function_result_chars",
+                str(ModelConfigService.DEFAULT_MAX_FUNCTION_RESULT_CHARS),
+            )
+            return int(raw)
+        except Exception:
+            return ModelConfigService.DEFAULT_MAX_FUNCTION_RESULT_CHARS
 
 
 class UsageService:

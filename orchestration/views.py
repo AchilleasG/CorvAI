@@ -126,6 +126,7 @@ def get_settings(request):
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
+        "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }
 
 
@@ -135,6 +136,7 @@ def set_settings(
     frontman_model: Optional[str] = None,
     caller_model: Optional[str] = None,
     cache_mode: Optional[str] = None,
+    max_function_result_chars: Optional[int] = None,
 ):
     if frontman_model:
         ModelConfigService.set_setting("frontman_model", frontman_model)
@@ -142,8 +144,11 @@ def set_settings(
         ModelConfigService.set_setting("caller_model", caller_model)
     if cache_mode:
         ModelConfigService.set_setting("cache_mode", cache_mode.lower())
+    if max_function_result_chars is not None:
+        ModelConfigService.set_setting("max_function_result_chars", str(max_function_result_chars))
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
+        "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }

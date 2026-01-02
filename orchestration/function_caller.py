@@ -30,8 +30,6 @@ class FunctionCallOrchestrator:
     """
 
     client = OpenAI(api_key=settings.openai_key)
-    MAX_RESULT_CHARS = 6000  # guardrail to avoid blowing out prompt/context
-
     @staticmethod
     def _plan_next_action(
         *,
@@ -210,11 +208,12 @@ class FunctionCallOrchestrator:
             import json
 
             serialized = json.dumps(data, ensure_ascii=False)
-            if len(serialized) > FunctionCallOrchestrator.MAX_RESULT_CHARS:
+            max_chars = ModelConfigService.get_max_function_result_chars()
+            if len(serialized) > max_chars:
                 coerced["data"] = None
                 coerced["truncated"] = True
                 coerced["truncation_reason"] = (
-                    f"Result too large ({len(serialized)} chars). Ask for narrower scope or filters."
+                    f"Result too large ({len(serialized)} chars > limit {max_chars}). Ask for narrower scope or filters."
                 )
         except Exception:
             coerced["truncated"] = False

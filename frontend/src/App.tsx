@@ -279,11 +279,12 @@ export default function App() {
     setSettingsError(null);
     try {
       const formData = new FormData(e.currentTarget);
-    const payload: SettingsPayload = {
-      frontman_model: formData.get("frontman_model") as string,
-      caller_model: formData.get("caller_model") as string,
-      cache_mode: formData.get("cache_mode") as string,
-    };
+      const payload: SettingsPayload = {
+        frontman_model: formData.get("frontman_model") as string,
+        caller_model: formData.get("caller_model") as string,
+        cache_mode: formData.get("cache_mode") as string,
+        max_function_result_chars: Number(formData.get("max_function_result_chars") || 0) || undefined,
+      };
     const updated = await updateSettings(payload);
     setSettings(updated);
   } catch (err: any) {
@@ -710,6 +711,9 @@ export default function App() {
                     <span className="pill">Frontman: {settings.frontman_model || "gpt-5.2"}</span>
                     <span className="pill">Caller: {settings.caller_model || "gpt-5.2"}</span>
                     <span className="pill">Cache: {settings.cache_mode || "off"}</span>
+                    <span className="pill">
+                      Max result: {settings.max_function_result_chars ?? "6000"} chars
+                    </span>
                   </div>
                 </div>
                 <form onSubmit={handleSaveSettings} className="settings-form">
@@ -731,6 +735,16 @@ export default function App() {
                         <option value="caller">caller</option>
                         <option value="all">all</option>
                       </select>
+                    </label>
+                    <label className="field">
+                      <span>Max function result chars</span>
+                      <input
+                        name="max_function_result_chars"
+                        type="number"
+                        min={500}
+                        step={100}
+                        defaultValue={settings.max_function_result_chars ?? 6000}
+                      />
                     </label>
                   </div>
                   <div className="actions-row">

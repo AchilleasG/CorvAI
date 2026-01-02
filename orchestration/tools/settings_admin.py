@@ -7,7 +7,7 @@ from orchestration.registry import register_function
 from orchestration.services import ModelConfigService
 
 
-ALLOWED_KEYS = {"frontman_model", "caller_model", "user_info_embedding_model"}
+ALLOWED_KEYS = {"frontman_model", "caller_model", "user_info_embedding_model", "max_function_result_chars"}
 
 
 def _validate_key(key: str):
@@ -18,7 +18,7 @@ def _validate_key(key: str):
 @register_function(
     manifest_id="settings_admin.list_settings",
     module="settings_admin",
-    description="List configurable orchestration settings (frontman/caller models, user_info embedding model).",
+    description="List configurable orchestration settings (frontman/caller models, user_info embedding model, max function result chars).",
     params_schema={"type": "object", "properties": {}},
     return_schema={
         "type": "object",
@@ -43,13 +43,13 @@ def list_settings():
 @register_function(
     manifest_id="settings_admin.get_setting",
     module="settings_admin",
-    description="Get a single orchestration setting (frontman_model, caller_model, or user_info_embedding_model).",
+    description="Get a single orchestration setting (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars).",
     params_schema={
         "type": "object",
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Setting key (frontman_model, caller_model, or user_info_embedding_model)",
+                "description": "Setting key (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars)",
             }
         },
         "required": ["key"],
@@ -64,15 +64,15 @@ def get_setting(key: str):
 @register_function(
     manifest_id="settings_admin.set_setting",
     module="settings_admin",
-    description="Set a single orchestration setting (frontman_model, caller_model, or user_info_embedding_model).",
+    description="Set a single orchestration setting (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars).",
     params_schema={
         "type": "object",
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Setting key (frontman_model, caller_model, or user_info_embedding_model)",
+                "description": "Setting key (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars)",
             },
-            "value": {"type": "string", "description": "New model name/id"},
+            "value": {"type": "string", "description": "New value"},
         },
         "required": ["key", "value"],
     },

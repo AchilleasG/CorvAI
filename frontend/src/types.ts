@@ -67,6 +67,13 @@ export type UsageSummary = {
   };
 };
 
+export type SettingsPayload = {
+  frontman_model?: string;
+  caller_model?: string;
+  cache_mode?: string;
+  max_function_result_chars?: number;
+};
+
 export type UsageEvent = {
   id: string;
   created_at: string;

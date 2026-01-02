@@ -126,12 +126,15 @@ export function fetchUsageSummary(days = 7) {
 }
 
 export function fetchSettings() {
-  return request<{ frontman_model: string; caller_model: string; cache_mode: string }>(`/orchestration/settings`);
+  return request<{ frontman_model: string; caller_model: string; cache_mode: string; max_function_result_chars: number }>(`/orchestration/settings`);
 }
 
-export function updateSettings(payload: { frontman_model?: string; caller_model?: string; cache_mode?: string }) {
-  return request<{ frontman_model: string; caller_model: string; cache_mode: string }>(`/orchestration/settings`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export function updateSettings(payload: { frontman_model?: string; caller_model?: string; cache_mode?: string; max_function_result_chars?: number }) {
+  return request<{ frontman_model: string; caller_model: string; cache_mode: string; max_function_result_chars: number }>(
+    `/orchestration/settings`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
 }
