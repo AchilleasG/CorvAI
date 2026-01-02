@@ -12,6 +12,10 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+# Load .env values (including APP_ACCESS_TOKEN) early
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,6 +31,9 @@ SECRET_KEY = 'django-insecure-(ge2777wrfkdq@ak#@n^sx^+8^6yz2v*78gy5h6f$+^de4e6p9
 DEBUG = True
 
 ALLOWED_HOSTS = ['*']
+
+# Simple app-wide access token (optional). Used by AccessTokenMiddleware.
+APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent

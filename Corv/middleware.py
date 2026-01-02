@@ -1,10 +1,10 @@
 import os
 from typing import Callable
 
+from django.conf import settings
 from django.http import JsonResponse, HttpResponse
 
 
-APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN") or ""
 _SKIP_PATH_PREFIXES = (
     "/static/",
     "/favicon.ico",
@@ -21,7 +21,8 @@ class AccessTokenMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if not APP_ACCESS_TOKEN:
+        app_token = getattr(settings, "APP_ACCESS_TOKEN", "") or os.getenv("APP_ACCESS_TOKEN") or ""
+        if not app_token:
             return self.get_response(request)
 
         path = request.path or ""
@@ -35,7 +36,7 @@ class AccessTokenMiddleware:
             bearer = auth_header[7:].strip()
 
         token = header_token or bearer
-        if token == APP_ACCESS_TOKEN:
+        if token == app_token:
             return self.get_response(request)
 
         # Default to JSON for API-like paths, otherwise plain text.

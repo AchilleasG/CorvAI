@@ -589,6 +589,17 @@ export default function App() {
             <button className="primary full" onClick={handleNewChat}>
               + New chat
             </button>
+            <button
+              className="ghost full"
+              onClick={() => {
+                localStorage.removeItem("appAccessToken");
+                setAuthed(false);
+                setAuthError(null);
+              }}
+              style={{ marginTop: "0.35rem" }}
+            >
+              Log out
+            </button>
             <div className="chat-list">
               {sortedChats.map((chat) => {
                 const isActive = chat.chat_id === activeChatId;

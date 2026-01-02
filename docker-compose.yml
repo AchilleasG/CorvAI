@@ -11,6 +11,7 @@ services:
     environment:
       - DEBUG=True
       - DATABASE_URL=${DATABASE_URL}
+      - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
 
   frontend:
     build: ./frontend
