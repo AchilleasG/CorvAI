@@ -132,6 +132,7 @@ export default function App() {
   const [authed, setAuthed] = useState<boolean>(() => !!localStorage.getItem("appAccessToken"));
   const [authError, setAuthError] = useState<string | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
+  const [showMicSettings, setShowMicSettings] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
@@ -591,6 +592,13 @@ export default function App() {
             </button>
             <button
               className="ghost full"
+              onClick={() => setShowMicSettings((v) => !v)}
+              style={{ marginTop: "0.35rem" }}
+            >
+              {showMicSettings ? "Hide mic settings" : "Mic settings"}
+            </button>
+            <button
+              className="ghost full"
               onClick={() => {
                 localStorage.removeItem("appAccessToken");
                 setAuthed(false);
@@ -948,18 +956,26 @@ export default function App() {
               <div className="input-actions">
                 <button
                   type="button"
-                  className={`ghost voice ${recording ? "recording" : ""}`}
+                  className={`icon-btn ${recording ? "recording" : ""}`}
                   onClick={toggleVoiceRecording}
                   disabled={sending || voiceSending}
+                  aria-label={recording ? "Stop recording" : "Record voice"}
+                  title={recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
                 >
-                  {recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
+                  {recording ? "■" : "🎤"}
                 </button>
-                <button type="submit" className="primary" disabled={sending || !input.trim()}>
-                  {sending ? "Sending…" : "Send"}
+                <button
+                  type="submit"
+                  className="icon-btn send-btn"
+                  disabled={sending || !input.trim()}
+                  aria-label="Send message"
+                  title="Send"
+                >
+                  {sending ? "…" : "➤"}
                 </button>
               </div>
-              {mics.length > 0 && (
-                <div className="muted" style={{ marginTop: "0.35rem", display: "flex", gap: "0.35rem", alignItems: "center" }}>
+              {showMicSettings && mics.length > 0 && (
+                <div className="muted mic-row">
                   <span>Mic:</span>
                   <select
                     className="mic-select"
@@ -973,20 +989,17 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                </div>
-              )}
-              {!micReady && !recording && !voiceSending && (
-                <div className="muted" style={{ marginTop: "0.35rem" }}>
-                  Having trouble?{" "}
-                  <button
-                    type="button"
-                    className="ghost"
-                    style={{ padding: 0, display: "inline", minWidth: "auto" }}
-                    onClick={requestMicPermission}
-                    disabled={sending}
-                  >
-                    Give mic permission
-                  </button>
+                  {!micReady && !recording && !voiceSending && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      style={{ padding: "0.25rem 0.5rem", minWidth: "auto" }}
+                      onClick={requestMicPermission}
+                      disabled={sending}
+                    >
+                      Give mic permission
+                    </button>
+                  )}
                 </div>
               )}
             </form>

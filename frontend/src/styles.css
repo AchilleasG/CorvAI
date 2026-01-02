@@ -576,6 +576,47 @@ button {
   border: none;
 }
 
+.input-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.4rem;
+}
+
+.icon-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.icon-btn.send-btn {
+  background: var(--accent);
+  color: #041316;
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.icon-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.icon-btn:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+.icon-btn.recording {
+  background: #7f1d1d;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
 .usage-table {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -616,6 +657,14 @@ button {
 .mic-select:focus {
   outline: 1px solid var(--accent);
   border-color: var(--accent);
+}
+
+.mic-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+  margin-top: 0.35rem;
 }
 
 .primary {
@@ -664,6 +713,11 @@ button {
   }
 
   .input-bar {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+  }
+
+  .mic-row {
+    display: none;
   }
 }
