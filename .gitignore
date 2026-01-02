@@ -6,3 +6,4 @@ frontend/dist/
 managed_files/
 media/voices/
 .env
+frontend/.vite/deps_temp_4201da8f/package.json

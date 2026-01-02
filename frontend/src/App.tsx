@@ -129,13 +129,29 @@ export default function App() {
   const [jobLogMessages, setJobLogMessages] = useState<Message[]>([]);
   const [showJobLog, setShowJobLog] = useState(false);
   const [jobLogAnchorId, setJobLogAnchorId] = useState<string | null>(null);
+  const [authed, setAuthed] = useState<boolean>(() => !!localStorage.getItem("appAccessToken"));
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [passwordInput, setPasswordInput] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
+  function handleAuthError(err: any): boolean {
+    const status = err?.status;
+    const msg = (err?.message || "").toString().toLowerCase();
+    if (status === 401 || msg.includes("unauthorized")) {
+      localStorage.removeItem("appAccessToken");
+      setAuthed(false);
+      setAuthError("Access password required or invalid. Please sign in again.");
+      return true;
+    }
+    return false;
+  }
+
   useEffect(() => {
     (async () => {
+      if (!authed) return;
       await refreshChats();
       try {
         const [recent, summary, settingsResp] = await Promise.all([
@@ -147,44 +163,56 @@ export default function App() {
         setUsageSummary(summary);
         setSettings(settingsResp);
       } catch (err) {
-        // ignore usage/settings load errors
+        if (handleAuthError(err)) return;
       }
     })();
-  }, []);
+  }, [authed]);
 
   useEffect(() => {
+    if (!authed) return;
     if (!activeChatId) return;
     setLoadingMessages(true);
     fetchMessages(activeChatId, true)
       .then((msgs) => setMessages(msgs))
-      .catch((err: any) => setError(err.message || "Failed to load messages"))
+      .catch((err: any) => {
+        if (handleAuthError(err)) return;
+        setError(err.message || "Failed to load messages");
+      })
       .finally(() => setLoadingMessages(false));
     fetchJobs(activeChatId)
       .then((data) => setJobs(data))
-      .catch(() => {});
-  }, [activeChatId]);
+      .catch((err) => {
+        handleAuthError(err);
+      });
+  }, [activeChatId, authed]);
 
   // Poll jobs periodically for active chat
   useEffect(() => {
+    if (!authed) return;
     if (!activeChatId) return;
     const id = setInterval(() => {
       fetchJobs(activeChatId)
         .then((data) => setJobs(data))
-        .catch(() => {});
+        .catch((err) => {
+          handleAuthError(err);
+        });
     }, 5000);
     return () => clearInterval(id);
-  }, [activeChatId]);
+  }, [activeChatId, authed]);
 
   // Poll messages periodically so background job updates appear without reload.
   useEffect(() => {
+    if (!authed) return;
     if (!activeChatId) return;
     const id = setInterval(() => {
       fetchMessages(activeChatId, true)
         .then((msgs) => setMessages(msgs))
-        .catch(() => {});
+        .catch((err) => {
+          handleAuthError(err);
+        });
     }, 3000);
     return () => clearInterval(id);
-  }, [activeChatId]);
+  }, [activeChatId, authed]);
 
   async function loadJobLog(jobId: string) {
     try {
@@ -206,6 +234,7 @@ export default function App() {
         setMessages(msgs);
       }
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to cancel job");
     }
   }
@@ -213,33 +242,6 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [recent, summary] = await Promise.all([fetchUsageRecent(20), fetchUsageSummary(7)]);
-        setUsageRecent(recent);
-        setUsageSummary(summary);
-      } catch {
-        // ignore usage load errors
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const [recent, summary] = await Promise.all([
-          fetchUsageRecent(20),
-          fetchUsageSummary(7),
-        ]);
-        setUsageRecent(recent);
-        setUsageSummary(summary);
-      } catch (err) {
-        // ignore usage load errors in UI
-      }
-    })();
-  }, []);
 
   const activeChat = useMemo(
     () => chats.find((c) => c.chat_id === activeChatId) || null,
@@ -259,19 +261,20 @@ export default function App() {
     setSettingsError(null);
     try {
       const formData = new FormData(e.currentTarget);
-      const payload: SettingsPayload = {
-        frontman_model: formData.get("frontman_model") as string,
-        caller_model: formData.get("caller_model") as string,
-        cache_mode: formData.get("cache_mode") as string,
-      };
-      const updated = await updateSettings(payload);
-      setSettings(updated);
-    } catch (err: any) {
-      setSettingsError(err.message || "Failed to save settings");
-    } finally {
-      setSavingSettings(false);
-    }
+    const payload: SettingsPayload = {
+      frontman_model: formData.get("frontman_model") as string,
+      caller_model: formData.get("caller_model") as string,
+      cache_mode: formData.get("cache_mode") as string,
+    };
+    const updated = await updateSettings(payload);
+    setSettings(updated);
+  } catch (err: any) {
+    if (handleAuthError(err)) return;
+    setSettingsError(err.message || "Failed to save settings");
+  } finally {
+    setSavingSettings(false);
   }
+}
 
   async function refreshChats(preferredActiveId?: string | null) {
     try {
@@ -297,6 +300,7 @@ export default function App() {
       }
       return data;
     } catch (err: any) {
+      if (handleAuthError(err)) return [];
       setError(err.message || "Failed to load chats");
       return [];
     }
@@ -330,6 +334,7 @@ export default function App() {
       await refreshChats(created.chat_id);
       setMessages([]);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Could not create chat");
     }
   }
@@ -354,6 +359,7 @@ export default function App() {
       setMessages(msgs);
       setJobs(jobsData);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to send");
     } finally {
       setSending(false);
@@ -379,6 +385,7 @@ export default function App() {
       setMessages(msgs);
       setJobs(jobsData);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to send voice message");
     } finally {
       setVoiceSending(false);
@@ -395,6 +402,7 @@ export default function App() {
       await refreshChats(activeChatId === chat_id ? chat_id : undefined);
       setOpenChatActionsId(null);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to rename chat");
     }
   }
@@ -407,6 +415,7 @@ export default function App() {
       await refreshChats(activeChatId === chat_id ? null : activeChatId);
       setOpenChatActionsId(null);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to archive chat");
     }
   }
@@ -419,6 +428,7 @@ export default function App() {
       await refreshChats(activeChatId === chat_id ? null : activeChatId);
       setOpenChatActionsId(null);
     } catch (err: any) {
+      if (handleAuthError(err)) return;
       setError(err.message || "Failed to delete chat");
     }
   }
@@ -523,6 +533,47 @@ export default function App() {
       cleanupStream();
     };
   }, []);
+
+  if (!authed) {
+    return (
+      <div className="auth-gate">
+        <div className="card auth-card">
+          <h2>Corv Access</h2>
+          <p className="muted small">Enter the shared access password to continue.</p>
+          {authError && <div className="error-banner">{authError}</div>}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!passwordInput.trim()) {
+                setAuthError("Password required");
+                return;
+              }
+              localStorage.setItem("appAccessToken", passwordInput.trim());
+              setAuthError(null);
+              setAuthed(true);
+            }}
+            className="settings-form"
+            style={{ marginTop: "0.75rem" }}
+          >
+            <label className="field">
+              <span>Password</span>
+              <input
+                type="password"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                autoFocus
+              />
+            </label>
+            <div className="actions-row">
+              <button className="primary" type="submit">
+                Enter
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page">
