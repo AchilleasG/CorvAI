@@ -198,6 +198,21 @@ body {
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
 }
 
+.auth-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 30% 20%, rgba(42, 209, 163, 0.08), transparent 35%),
+    radial-gradient(circle at 80% 0%, rgba(247, 194, 102, 0.08), transparent 30%),
+    var(--bg);
+  padding: 1.5rem;
+}
+
+.auth-card {
+  max-width: 420px;
+  width: 100%;
+}
+
 .card.full {
   grid-column: 1 / -1;
 }
