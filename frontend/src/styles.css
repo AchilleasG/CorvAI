@@ -601,6 +601,7 @@ button {
   padding: 0;
   text-decoration: none;
   fill: currentColor;
+  box-shadow: none;
 }
 
 .icon-btn.send-btn {
@@ -741,5 +742,6 @@ button {
     font-size: 1.1rem;
     background-color: var(--panel);
     border-color: var(--border);
+    box-shadow: none;
   }
 }
