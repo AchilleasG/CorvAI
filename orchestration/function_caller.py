@@ -7,9 +7,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
-
 from Corv.config import settings
+from orchestration.model_providers import resolve_provider, get_client
 from orchestration.services import (
     ModuleDirectory,
     FunctionRunnerService,
@@ -29,7 +28,6 @@ class FunctionCallOrchestrator:
     Iterative Function Caller that plans and executes tool calls using manifests from the DB.
     """
 
-    client = OpenAI(api_key=settings.openai_key)
     @staticmethod
     def _plan_next_action(
         *,
@@ -113,31 +111,64 @@ class FunctionCallOrchestrator:
             },
         ]
 
-        resp_kwargs = {
-            "model": model,
-            "input": input_seq,
-            "tools": [],
-            "text": {"format": {"type": "json_object"}},
-            "reasoning": {"effort": "low"},
-            "timeout": 30,
-        }
-        if cache_mode in ("caller", "all"):
-            # Stable key based on the planner instructions and tool catalog shape.
-            catalog_sig = hashlib.md5(
-                "|".join(sorted(t["manifest_id"] for t in tool_catalog)).encode("utf-8")
-            ).hexdigest()
-            resp_kwargs["prompt_cache_key"] = f"caller-v1-{catalog_sig}"
-        resp = FunctionCallOrchestrator.client.responses.create(**resp_kwargs)
-        if getattr(resp, "usage", None):
+        provider = resolve_provider(model)
+        prompt_cache_key = ""
+        usage_obj = None
+        raw = "{}"
+
+        if provider == "openai":
+            resp_kwargs = {
+                "model": model,
+                "input": input_seq,
+                "tools": [],
+                "text": {"format": {"type": "json_object"}},
+                "reasoning": {"effort": "low"},
+                "timeout": 30,
+            }
+            if cache_mode in ("caller", "all"):
+                # Stable key based on the planner instructions and tool catalog shape.
+                catalog_sig = hashlib.md5(
+                    "|".join(sorted(t["manifest_id"] for t in tool_catalog)).encode("utf-8")
+                ).hexdigest()
+                prompt_cache_key = f"caller-v1-{catalog_sig}"
+                resp_kwargs["prompt_cache_key"] = prompt_cache_key
+            resp = get_client("openai").responses.create(**resp_kwargs)
+            usage_obj = getattr(resp, "usage", None)
+            raw = getattr(resp, "output_text", "{}") or "{}"
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": instructions,
+                },
+                {
+                    "role": "user",
+                    "content": f"User request: {user_request}",
+                },
+                {
+                    "role": "user",
+                    "content": f"Prior results: {results_text}",
+                },
+            ]
+            resp = get_client("xai").chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                timeout=30,
+            )
+            usage_obj = getattr(resp, "usage", None)
+            if getattr(resp, "choices", None):
+                raw = resp.choices[0].message.content or "{}"  # type: ignore[assignment]
+
+        if usage_obj:
             UsageService.log_usage(
                 source="caller_plan",
                 model=model,
                 cache_mode=cache_mode,
-                usage=getattr(resp, "usage", {}),
-                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                usage=usage_obj,
+                prompt_cache_key=prompt_cache_key,
                 job=job,
             )
-        raw = getattr(resp, "output_text", "{}") or "{}"
         decision = FunctionCallOrchestrator._safe_json_load(raw)
         if not decision:
             decision = {"done": True, "summary": "Planner output could not be parsed."}
@@ -427,6 +458,7 @@ class FunctionCallOrchestrator:
 
         try:
             model_name = ModelConfigService.get_caller_model()
+            cache_mode = ModelConfigService.get_cache_mode()
             for step in range(max_steps):
                 if job.cancel_requested or job.status == Job.STATUS_CANCELED:
                     JobService.mark_status(job, Job.STATUS_CANCELED)
@@ -445,6 +477,7 @@ class FunctionCallOrchestrator:
                     job=job,
                     chat_id=job.chat.id if job and job.chat else None,
                     model=model_name,
+                    cache_mode=cache_mode,
                 )
 
                 if decision.get("ask_user"):

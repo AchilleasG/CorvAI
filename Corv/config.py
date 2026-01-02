@@ -6,6 +6,8 @@ import os
 
 class Settings(BaseSettings):
     openai_key: str = os.getenv("OPENAI_KEY")
+    xai_key: Optional[str] = os.getenv("XAI_API_KEY")
+    xai_base_url: Optional[str] = os.getenv("XAI_BASE_URL") or "https://api.x.ai/v1"
     google_calendar_credentials_json: Optional[str] = None
     google_calendar_credentials_file: Optional[str] = None
     google_calendar_delegated_user: Optional[str] = None

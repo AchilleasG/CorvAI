@@ -5,10 +5,9 @@ from typing import Dict, Any, List
 import hashlib
 import logging
 from django.db import transaction
-from openai import OpenAI
 
 from chat.models import ChatMessage  # adjust if your app label differs
-from Corv.config import settings     # your Pydantic Settings (with openai_key)
+from orchestration.model_providers import resolve_provider, get_client
 from orchestration.services import ModuleDirectory, PersonaService, ModelConfigService, UsageService
 
 logger = logging.getLogger(__name__)
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class ChatAIService:
     """
-    LLM reply generator backed by OpenAI Responses API.
+    LLM reply generator that routes to provider-specific clients (OpenAI Responses or X.ai Grok chat completions).
     All methods are static for easy import & testing.
     """
 
@@ -28,11 +27,23 @@ class ChatAIService:
         "tool": "tool",
     }
 
-    # Single shared client (initialized at import)
-    client = OpenAI(api_key=settings.openai_key)
+    @staticmethod
+    def _messages_to_chat_messages(messages, *, system_text: str = ""):
+        out = []
+        if system_text:
+            out.append({"role": "system", "content": system_text})
+        for m in messages:
+            role = ChatAIService.ROLE_MAP.get(m.role, "user")
+            # Chat completions expect "system" instead of "developer".
+            if role == "developer":
+                role = "system"
+            ts = ""
+            if getattr(m, "created_at", None):
+                ts = f"[{m.created_at.isoformat()}] "
+            out.append({"role": role, "content": f"{ts}{m.text}"})
+        return out
 
     @staticmethod
-    
     def _messages_to_openai_input(messages, *, lead_developer_text: str = ""):
         out = []
         if lead_developer_text:
@@ -85,46 +96,65 @@ class ChatAIService:
 
         input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=lead_text)
 
-        print(f"Input sequence for OpenAI: {input_seq}")
         model_name = model or ModelConfigService.get_frontman_model()
-        resp_kwargs = {
-            "model": model_name,
-            "input": input_seq,
-            "text": {"format": {"type": "text"}, "verbosity": "medium"},
-            "reasoning": {"effort": "low"},
-            "tools": ModuleDirectory.function_tool_specs(),
-            "store": True,
-        }
         cache_mode = ModelConfigService.get_cache_mode()
-        if cache_mode in ("frontman", "all"):
-            persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
-            module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
-            key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
-            resp_kwargs["prompt_cache_key"] = f"fmv1-{key_hash}"
-        resp = ChatAIService.client.responses.create(**resp_kwargs)
-        try:
-            raw = (
-                resp.model_dump()
-                if hasattr(resp, "model_dump")
-                else resp.to_dict()
-                if hasattr(resp, "to_dict")
-                else str(resp)
+        provider = resolve_provider(model_name)
+        usage_obj = None
+        prompt_cache_key = ""
+
+        if provider == "openai":
+            resp_kwargs = {
+                "model": model_name,
+                "input": input_seq,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "reasoning": {"effort": "low"},
+                "tools": ModuleDirectory.function_tool_specs(),
+                "store": True,
+            }
+            if cache_mode in ("frontman", "all"):
+                persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
+                module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
+                key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
+                prompt_cache_key = f"fmv1-{key_hash}"
+                resp_kwargs["prompt_cache_key"] = prompt_cache_key
+            resp = get_client("openai").responses.create(**resp_kwargs)
+            assistant_text = getattr(resp, "output_text", None)
+            usage_obj = getattr(resp, "usage", None)
+            try:
+                raw = (
+                    resp.model_dump()
+                    if hasattr(resp, "model_dump")
+                    else resp.to_dict()
+                    if hasattr(resp, "to_dict")
+                    else str(resp)
+                )
+                logger.warning("Frontman generate response (%s): %s", provider, raw)
+            except Exception:
+                logger.warning("Frontman generate response (%s): <unserializable>", provider)
+        else:
+            messages = ChatAIService._messages_to_chat_messages(history, system_text=lead_text)
+            resp = get_client("xai").chat.completions.create(
+                model=model_name,
+                messages=messages,
+                tools=ModuleDirectory.function_tool_specs(),
+                tool_choice="none",
             )
-            logger.warning("OpenAI frontman generate response: %s", raw)
-        except Exception:
-            logger.warning("OpenAI frontman generate response: <unserializable>")
-        if getattr(resp, "usage", None):
+            assistant_text = ""
+            if getattr(resp, "choices", None):
+                assistant_text = resp.choices[0].message.content or ""  # type: ignore[assignment]
+            usage_obj = getattr(resp, "usage", None)
+            logger.warning("Frontman generate response (%s): %s", provider, resp)
+
+        if usage_obj:
             UsageService.log_usage(
                 source="frontman_generate",
                 model=model_name,
                 cache_mode=cache_mode,
-                usage=getattr(resp, "usage", {}),
-                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                usage=usage_obj,
+                prompt_cache_key=prompt_cache_key,
                 job=None,
             )
 
-        # Preferred accessor for plain text (newer SDKs)
-        assistant_text = getattr(resp, "output_text", None)
         return assistant_text
 
     @staticmethod
@@ -161,46 +191,66 @@ class ChatAIService:
         if module_text:
             instructions += f"\nAvailable modules:\n{module_text}"
 
-        input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=instructions)
         model_name = model or ModelConfigService.get_frontman_model()
-        resp_kwargs = {
-            "model": model_name,
-            "input": input_seq,
-            "text": {"format": {"type": "text"}, "verbosity": "medium"},
-            "reasoning": {"effort": "low"},
-            "tools": [],
-            "store": True,
-        }
         cache_mode = ModelConfigService.get_cache_mode()
-        if cache_mode in ("frontman", "all"):
-            persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
-            module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
-            key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
-            resp_kwargs["prompt_cache_key"] = f"fmv1-{key_hash}"
-        resp = ChatAIService.client.responses.create(**resp_kwargs)
-        try:
-            raw = (
-                resp.model_dump()
-                if hasattr(resp, "model_dump")
-                else resp.to_dict()
-                if hasattr(resp, "to_dict")
-                else str(resp)
+        provider = resolve_provider(model_name)
+        prompt_cache_key = ""
+        usage_obj = None
+        assistant_text = ""
+
+        if provider == "openai":
+            input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=instructions)
+            resp_kwargs = {
+                "model": model_name,
+                "input": input_seq,
+                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "reasoning": {"effort": "low"},
+                "tools": [],
+                "store": True,
+            }
+            if cache_mode in ("frontman", "all"):
+                persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
+                module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
+                key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
+                prompt_cache_key = f"fmv1-{key_hash}"
+                resp_kwargs["prompt_cache_key"] = prompt_cache_key
+            resp = get_client("openai").responses.create(**resp_kwargs)
+            assistant_text = getattr(resp, "output_text", None) or ""
+            usage_obj = getattr(resp, "usage", None)
+            try:
+                raw = (
+                    resp.model_dump()
+                    if hasattr(resp, "model_dump")
+                    else resp.to_dict()
+                    if hasattr(resp, "to_dict")
+                    else str(resp)
+                )
+                logger.warning("Frontman decision response (%s): %s", provider, raw)
+            except Exception:
+                logger.warning("Frontman decision response (%s): <unserializable>", provider)
+        else:
+            messages = ChatAIService._messages_to_chat_messages(history, system_text=instructions)
+            resp = get_client("xai").chat.completions.create(
+                model=model_name,
+                messages=messages,
+                response_format={"type": "json_object"},
             )
-            logger.warning("OpenAI frontman decision response: %s", raw)
-        except Exception:
-            logger.warning("OpenAI frontman decision response: <unserializable>")
-        if getattr(resp, "usage", None):
+            if getattr(resp, "choices", None):
+                assistant_text = resp.choices[0].message.content or ""  # type: ignore[assignment]
+            usage_obj = getattr(resp, "usage", None)
+            logger.warning("Frontman decision response (%s): %s", provider, resp)
+
+        if usage_obj:
             UsageService.log_usage(
                 source="frontman_decision",
                 model=model_name,
                 cache_mode=cache_mode,
-                usage=getattr(resp, "usage", {}),
-                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                usage=usage_obj,
+                prompt_cache_key=prompt_cache_key,
                 job=None,
             )
 
-        assistant_text = getattr(resp, "output_text", None)
-        return assistant_text or ""
+        return assistant_text
 
     @staticmethod
     def transcribe_audio(
@@ -212,8 +262,8 @@ class ChatAIService:
         Returns the transcribed text.
         """
         with open(audio_file_path, "rb") as audio_file:
-            transcription = ChatAIService.client.audio.transcriptions.create(
-                model=model, 
+            transcription = get_client("openai").audio.transcriptions.create(
+                model=model,
                 file=audio_file,
                 response_format="text"
             )
