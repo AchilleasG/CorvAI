@@ -39,6 +39,23 @@ type MessageBubbleProps = {
   isLastJobMessage: boolean;
 };
 
+function MicIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 0 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.93V21a1 1 0 0 1-2 0v-2.07A7 7 0 0 1 5 12Z" />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M3.2 4.1c-.2-.7.5-1.3 1.2-1.1l16.8 6c.9.3.9 1.6 0 1.9l-16.8 6c-.7.2-1.4-.4-1.2-1.1L5.2 12 3.2 4.1Z" />
+      <path d="M7 9v6l7-3-7-3Z" />
+    </svg>
+  );
+}
+
 function MessageBubble({
   msg,
   jobLogMessages,
@@ -962,7 +979,7 @@ export default function App() {
                   aria-label={recording ? "Stop recording" : "Record voice"}
                   title={recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
                 >
-                  {recording ? "■" : "🎤"}
+                  {recording ? <span className="icon-square" /> : <MicIcon />}
                 </button>
                 <button
                   type="submit"
@@ -971,7 +988,7 @@ export default function App() {
                   aria-label="Send message"
                   title="Send"
                 >
-                  {sending ? "…" : "➤"}
+                  {sending ? "…" : <SendIcon />}
                 </button>
               </div>
               {showMicSettings && mics.length > 0 && (
