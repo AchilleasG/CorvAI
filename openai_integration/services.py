@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 from typing import Dict, Any, List
+import hashlib
+import logging
 from django.db import transaction
 from openai import OpenAI
 
 from chat.models import ChatMessage  # adjust if your app label differs
 from Corv.config import settings     # your Pydantic Settings (with openai_key)
+from orchestration.services import ModuleDirectory, PersonaService, ModelConfigService, UsageService
+
+logger = logging.getLogger(__name__)
 
 
 class ChatAIService:
@@ -28,15 +33,25 @@ class ChatAIService:
 
     @staticmethod
     
-    def _messages_to_openai_input(messages):
+    def _messages_to_openai_input(messages, *, lead_developer_text: str = ""):
         out = []
+        if lead_developer_text:
+            out.append(
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": lead_developer_text}],
+                }
+            )
         for m in messages:
             role = ChatAIService.ROLE_MAP.get(m.role, "user")
             # Assistant turns must be output_text; everything else you send in is input_text.
             content_type = "output_text" if role == "assistant" else "input_text"
+            ts = ""
+            if getattr(m, "created_at", None):
+                ts = f"[{m.created_at.isoformat()}] "
             out.append({
                 "role": role,
-                "content": [{"type": content_type, "text": m.text}],
+                "content": [{"type": content_type, "text": f"{ts}{m.text}"}],
             })
         return out
 
@@ -44,7 +59,7 @@ class ChatAIService:
     @transaction.atomic
     def generate_reply_from_context(
         context: Dict[str, Any],
-        model: str = "gpt-5",
+        model: str | None = None,
     ) -> ChatMessage:
         """
         Given the dict returned by `construct_chat_context`, generate the next assistant
@@ -57,20 +72,135 @@ class ChatAIService:
 
         history: List[ChatMessage] = context["messages"]
 
-        input_seq = ChatAIService._messages_to_openai_input(history)
-        print(f"Input sequence for OpenAI: {input_seq}")
-        resp = ChatAIService.client.responses.create(
-            model=model,
-            input=input_seq,
-            text={"format": {"type": "text"}, "verbosity": "medium"},
-            reasoning={"effort": "medium"},
-            tools=[],    # add tool specs here if/when you support tool calls
-            store=True,  # optional
+        # Build developer prompt with persona + module inventory
+        persona_text = PersonaService.build_persona_prompt()
+        module_lines = ModuleDirectory.module_summaries()
+        module_text = "\n".join(
+            f"- {m['name']} ({m['slug']}): {m['description']} [{m['function_count']} functions]"
+            for m in module_lines
         )
+        lead_text = persona_text
+        if module_text:
+            lead_text = f"{persona_text}\n\nAvailable modules:\n{module_text}"
+
+        input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=lead_text)
+
+        print(f"Input sequence for OpenAI: {input_seq}")
+        model_name = model or ModelConfigService.get_frontman_model()
+        resp_kwargs = {
+            "model": model_name,
+            "input": input_seq,
+            "text": {"format": {"type": "text"}, "verbosity": "medium"},
+            "reasoning": {"effort": "low"},
+            "tools": ModuleDirectory.function_tool_specs(),
+            "store": True,
+        }
+        cache_mode = ModelConfigService.get_cache_mode()
+        if cache_mode in ("frontman", "all"):
+            persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
+            module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
+            key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
+            resp_kwargs["prompt_cache_key"] = f"fmv1-{key_hash}"
+        resp = ChatAIService.client.responses.create(**resp_kwargs)
+        try:
+            raw = (
+                resp.model_dump()
+                if hasattr(resp, "model_dump")
+                else resp.to_dict()
+                if hasattr(resp, "to_dict")
+                else str(resp)
+            )
+            logger.warning("OpenAI frontman generate response: %s", raw)
+        except Exception:
+            logger.warning("OpenAI frontman generate response: <unserializable>")
+        if getattr(resp, "usage", None):
+            UsageService.log_usage(
+                source="frontman_generate",
+                model=model_name,
+                cache_mode=cache_mode,
+                usage=getattr(resp, "usage", {}),
+                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                job=None,
+            )
 
         # Preferred accessor for plain text (newer SDKs)
         assistant_text = getattr(resp, "output_text", None)
         return assistant_text
+
+    @staticmethod
+    def frontman_decision(
+        context: Dict[str, Any],
+        model: str | None = None,
+    ) -> str:
+        """
+        First-pass call: Front Man either responds normally or signals a handoff.
+        Output is raw text; caller is responsible for parsing the handoff JSON.
+        """
+        if not context or "chat" not in context or "messages" not in context:
+            raise ValueError("Invalid context: expected keys 'chat' and 'messages'.")
+
+        history: List[ChatMessage] = context["messages"]
+
+        persona_text = PersonaService.build_persona_prompt()
+        module_lines = ModuleDirectory.module_summaries()
+        module_text = "\n".join(
+            f"- {m['name']} ({m['slug']}): {m['description']} [{m['function_count']} functions]"
+            for m in module_lines
+        )
+
+        instructions = (
+            f"{persona_text}\n\n"
+            "Decision rule: If the user only needs conversation or analysis (including discussing data already shown in recent messages), reply directly. "
+            "If fresh action/data is needed, do NOT answer; instead emit a JSON handoff object.\n"
+            "Handoff JSON shape:\n"
+            '{\"handoff\":true,\"reason\":\"why\",\"module_hint\":\"optional\"}\n'
+            "If not handing off, return {\"handoff\":false,\"reply\":\"your message\"}.\n"
+            "Keep JSON terse. No extra prose outside the JSON."
+        )
+
+        if module_text:
+            instructions += f"\nAvailable modules:\n{module_text}"
+
+        input_seq = ChatAIService._messages_to_openai_input(history, lead_developer_text=instructions)
+        model_name = model or ModelConfigService.get_frontman_model()
+        resp_kwargs = {
+            "model": model_name,
+            "input": input_seq,
+            "text": {"format": {"type": "text"}, "verbosity": "medium"},
+            "reasoning": {"effort": "low"},
+            "tools": [],
+            "store": True,
+        }
+        cache_mode = ModelConfigService.get_cache_mode()
+        if cache_mode in ("frontman", "all"):
+            persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
+            module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
+            key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
+            resp_kwargs["prompt_cache_key"] = f"fmv1-{key_hash}"
+        resp = ChatAIService.client.responses.create(**resp_kwargs)
+        try:
+            raw = (
+                resp.model_dump()
+                if hasattr(resp, "model_dump")
+                else resp.to_dict()
+                if hasattr(resp, "to_dict")
+                else str(resp)
+            )
+            logger.warning("OpenAI frontman decision response: %s", raw)
+        except Exception:
+            logger.warning("OpenAI frontman decision response: <unserializable>")
+        if getattr(resp, "usage", None):
+            UsageService.log_usage(
+                source="frontman_decision",
+                model=model_name,
+                cache_mode=cache_mode,
+                usage=getattr(resp, "usage", {}),
+                prompt_cache_key=resp_kwargs.get("prompt_cache_key", ""),
+                job=None,
+            )
+
+        assistant_text = getattr(resp, "output_text", None)
+        return assistant_text or ""
 
     @staticmethod
     def transcribe_audio(
