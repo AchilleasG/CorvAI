@@ -15,7 +15,7 @@
 }
 
 html, body, #root {
-  height: 100dvh;
+  min-height: 100dvh;
 }
 
 body {
@@ -24,18 +24,13 @@ body {
     radial-gradient(circle at 80% 0%, rgba(247, 194, 102, 0.08), transparent 30%),
     var(--bg);
   color: var(--text);
-  overflow: hidden;
-}
-
-.page {
-  height: 100%;
+  overflow-x: hidden;
 }
 
 .page {
   display: grid;
   grid-template-columns: 280px 1fr;
   min-height: 100vh;
-  overflow: hidden;
 }
 
 .sidebar {
@@ -158,11 +153,10 @@ body {
   display: flex;
   flex-direction: column;
   height: 100%;
-  max-height: 100%;
   padding: 1.25rem 1.5rem;
   gap: 1rem;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .main-header {

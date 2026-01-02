@@ -30,19 +30,21 @@ class ChatService:
         if not chat:
             chat = Chat.objects.create()
         return chat
+
     @staticmethod
     def get_chat_messages(chat_id: int):
-        return ChatMessage.objects.filter(chat_id=chat_id).order_by('created_at')
+        return ChatMessage.objects.filter(chat_id=chat_id).order_by("created_at")
 
     @staticmethod
     def construct_chat_context(chat_id: int, limit: int = 20):
-        # TODO add corv's personality here
         chat = ChatService.get_chat_by_id(chat_id)
         if not chat:
             return None
 
         # Grab most recent N (index uses chat+created_at), then reverse to oldest→newest
-        recent_qs = ChatMessage.objects.filter(chat_id=chat_id).order_by("-created_at")[:limit]
+        recent_qs = ChatMessage.objects.filter(chat_id=chat_id).order_by("-created_at")[
+            :limit
+        ]
         messages = list(reversed(recent_qs))
 
         return {
@@ -150,7 +152,12 @@ class ChatService:
         print(f"Chat {chat_id} exists or created.")
         # Before logging, check for a waiting job to resume
         from orchestration.models import Job  # local import to avoid circulars
-        waiting_job = Job.objects.filter(chat_id=chat_id, status=Job.STATUS_WAITING_USER).order_by("-created_at").first()
+
+        waiting_job = (
+            Job.objects.filter(chat_id=chat_id, status=Job.STATUS_WAITING_USER)
+            .order_by("-created_at")
+            .first()
+        )
 
         message = ChatService.add_message_to_chat(chat_id, user_text, role="user")
         print(f"Message saved: {message}")
@@ -167,7 +174,11 @@ class ChatService:
                 args=(chat_context, waiting_job.id, user_text),
                 daemon=True,
             ).start()
-            return {"success": True, "message": "Got it. Continuing and will report back.", "chat_id": str(chat_id)}
+            return {
+                "success": True,
+                "message": "Got it. Continuing and will report back.",
+                "chat_id": str(chat_id),
+            }
 
         response = ChatService.get_chat_next_message(chat_id)
         print(f"Response from chat service: {response}")
@@ -193,7 +204,9 @@ class ChatService:
             chat_context = ChatService.construct_chat_context(chat_id)
             summary_text = FunctionCallOrchestrator.run(chat_context, job)
             JobService.mark_status(job, Job.STATUS_COMPLETED)
-            ChatService.add_message_to_chat(chat_id, summary_text, role="assistant", job=job)
+            ChatService.add_message_to_chat(
+                chat_id, summary_text, role="assistant", job=job
+            )
         except Exception as exc:  # pragma: no cover
             logger.exception("Background job crashed")
             try:
@@ -201,7 +214,9 @@ class ChatService:
 
                 job = JobModel.objects.filter(id=job_id).first()
                 if job:
-                    JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+                    JobService.mark_status(
+                        job, Job.STATUS_FAILED, error_summary=str(exc)
+                    )
                     MessageRouter.tool_only_note(
                         chat_id=chat_id,
                         content=f"Function Caller crash: {exc}",
@@ -230,11 +245,15 @@ class ChatService:
             from orchestration.models import Job as JobModel
 
             job = JobModel.objects.get(id=job_id)
-            summary_text = FunctionCallOrchestrator.resume(chat_context, job, user_response)
+            summary_text = FunctionCallOrchestrator.resume(
+                chat_context, job, user_response
+            )
             job.refresh_from_db()
             if job.status != Job.STATUS_WAITING_USER:
                 JobService.mark_status(job, Job.STATUS_COMPLETED)
-            ChatService.add_message_to_chat(chat_context["chat"].id, summary_text, role="assistant", job=job)
+            ChatService.add_message_to_chat(
+                chat_context["chat"].id, summary_text, role="assistant", job=job
+            )
         except Exception as exc:  # pragma: no cover
             logger.exception("Resume job crashed")
             try:
@@ -242,7 +261,9 @@ class ChatService:
 
                 job = JobModel.objects.filter(id=job_id).first()
                 if job:
-                    JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc))
+                    JobService.mark_status(
+                        job, Job.STATUS_FAILED, error_summary=str(exc)
+                    )
                     MessageRouter.tool_only_note(
                         chat_id=chat_context["chat"].id,
                         content=f"Function Caller resume crash: {exc}",
