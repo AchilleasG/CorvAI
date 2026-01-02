@@ -10,7 +10,13 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from Corv.config import settings
-from orchestration.services import ModuleDirectory, FunctionRunnerService, JobService, ModelConfigService, UsageService
+from orchestration.services import (
+    ModuleDirectory,
+    FunctionRunnerService,
+    JobService,
+    ModelConfigService,
+    UsageService,
+)
 from orchestration.models import Job
 from orchestration.schemas import FunctionCallPayload
 from orchestration.message_router import MessageRouter
@@ -49,7 +55,9 @@ class FunctionCallOrchestrator:
         # Calendar defaults to reduce redundant asks.
         calendar_defaults = []
         if settings.google_calendar_default_id:
-            calendar_defaults.append(f"Use calendar_id='{settings.google_calendar_default_id}' if none provided.")
+            calendar_defaults.append(
+                f"Use calendar_id='{settings.google_calendar_default_id}' if none provided."
+            )
         if settings.google_calendar_default_timezone:
             calendar_defaults.append(
                 f"Use timezone '{settings.google_calendar_default_timezone}' if none provided; do not ask for it when listing events."
@@ -95,11 +103,15 @@ class FunctionCallOrchestrator:
             },
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": f"User request: {user_request}"}],
+                "content": [
+                    {"type": "input_text", "text": f"User request: {user_request}"}
+                ],
             },
             {
                 "role": "system",
-                "content": [{"type": "input_text", "text": f"Prior results: {results_text}"}],
+                "content": [
+                    {"type": "input_text", "text": f"Prior results: {results_text}"}
+                ],
             },
         ]
 
@@ -155,7 +167,9 @@ class FunctionCallOrchestrator:
             try:
                 obj, end = decoder.raw_decode(text, idx)
                 if first_obj is None:
-                    first_obj = obj  # prefer the first well-formed JSON object (the decision)
+                    first_obj = (
+                        obj  # prefer the first well-formed JSON object (the decision)
+                    )
                 idx = end
             except json.JSONDecodeError:
                 # Move forward to next brace and try again
@@ -207,6 +221,36 @@ class FunctionCallOrchestrator:
         return coerced
 
     @staticmethod
+    def _summarize_result_for_log(
+        result: FunctionResultPayload,
+        *,
+        truncated: bool = False,
+        truncation_reason: str = "",
+        limit: int = 2000,
+    ) -> str:
+        """
+        Text for tool-only log messages, truncated to avoid stuffing chat context.
+        If truncated=True, emit only status + reason (no payload).
+        """
+        if truncated:
+            reason = truncation_reason or "Result too large; data dropped."
+            return f"{result.status.upper()}: {reason}"
+
+        import json
+
+        try:
+            payload = result.model_dump()
+        except Exception:
+            payload = {
+                "status": result.status,
+                "error_summary": result.error_summary,
+            }
+        text = json.dumps(payload, default=str, ensure_ascii=False)
+        if len(text) > limit:
+            return f"{text[:limit]}... [truncated {len(text) - limit} chars]"
+        return text
+
+    @staticmethod
     def run(chat_context: Dict[str, Any], job: Job, max_steps: int = 5) -> str:
         tool_catalog = ModuleDirectory.function_catalog()
         # Build a brief recent-context string (last 10 messages).
@@ -214,8 +258,16 @@ class FunctionCallOrchestrator:
         recent = messages[-10:] if len(messages) > 10 else messages
         ctx_lines = []
         for m in recent:
-            prefix = "User" if m.role == "user" else "Assistant" if m.role == "assistant" else "Tool"
-            ts = f"[{m.created_at.isoformat()}] " if getattr(m, "created_at", None) else ""
+            prefix = (
+                "User"
+                if m.role == "user"
+                else "Assistant" if m.role == "assistant" else "Tool"
+            )
+            ts = (
+                f"[{m.created_at.isoformat()}] "
+                if getattr(m, "created_at", None)
+                else ""
+            )
             ctx_lines.append(f"{prefix}: {ts}{m.text}")
         user_request = "\n".join(ctx_lines) if ctx_lines else ""
 
@@ -291,18 +343,22 @@ class FunctionCallOrchestrator:
                     if coerced.get("truncated"):
                         MessageRouter.tool_only_note(
                             chat_id=job.chat.id if job.chat else None,
-                            content=coerced.get("truncation_reason", "Result truncated for size"),
+                            content=coerced.get(
+                                "truncation_reason", "Result truncated for size"
+                            ),
                             role="caller",
                             job=job,
                         )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
-                        content=f"Function result: {result.model_dump()}",
+                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
                         role="runner",
                         job=job,
                         call_id=result.call_id,
                     )
-                    job.updated_at = job.updated_at  # no-op placeholder to avoid stale writes
+                    job.updated_at = (
+                        job.updated_at
+                    )  # no-op placeholder to avoid stale writes
                     job.save(update_fields=["updated_at"])
                     continue
 
@@ -333,8 +389,7 @@ class FunctionCallOrchestrator:
             summary = decision.get("summary") or "Completed calls."
             # Append concise list of results for transparency.
             summary += "\n" + "\n".join(
-                f"- {r['function_id']}: {r['status']}"
-                for r in prior_results
+                f"- {r['function_id']}: {r['status']}" for r in prior_results
             )
         else:
             summary = decision.get("summary") or "No actions taken."
@@ -342,7 +397,9 @@ class FunctionCallOrchestrator:
         return summary
 
     @staticmethod
-    def resume(chat_context: Dict[str, Any], job: Job, user_response: str, max_steps: int = 5) -> str:
+    def resume(
+        chat_context: Dict[str, Any], job: Job, user_response: str, max_steps: int = 5
+    ) -> str:
         """
         Resume a waiting-on-user job using stored pending_state.
         """
@@ -354,8 +411,16 @@ class FunctionCallOrchestrator:
         recent = messages[-10:] if len(messages) > 10 else messages
         ctx_lines = []
         for m in recent:
-            prefix = "User" if m.role == "user" else "Assistant" if m.role == "assistant" else "Tool"
-            ts = f"[{m.created_at.isoformat()}] " if getattr(m, "created_at", None) else ""
+            prefix = (
+                "User"
+                if m.role == "user"
+                else "Assistant" if m.role == "assistant" else "Tool"
+            )
+            ts = (
+                f"[{m.created_at.isoformat()}] "
+                if getattr(m, "created_at", None)
+                else ""
+            )
             ctx_lines.append(f"{prefix}: {ts}{m.text}")
         ctx_lines.append(f"User (new): {user_response}")
         user_request = "\n".join(ctx_lines)
@@ -427,13 +492,15 @@ class FunctionCallOrchestrator:
                     if coerced.get("truncated"):
                         MessageRouter.tool_only_note(
                             chat_id=job.chat.id if job.chat else None,
-                            content=coerced.get("truncation_reason", "Result truncated for size"),
+                            content=coerced.get(
+                                "truncation_reason", "Result truncated for size"
+                            ),
                             role="caller",
                             job=job,
                         )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
-                        content=f"Function result: {result.model_dump()}",
+                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
                         role="runner",
                         job=job,
                         call_id=result.call_id,
@@ -464,7 +531,9 @@ class FunctionCallOrchestrator:
 
         summary = decision.get("summary") or "No actions taken."
         if prior_results:
-            summary += "\n" + "\n".join(f"- {r['function_id']}: {r['status']}" for r in prior_results)
+            summary += "\n" + "\n".join(
+                f"- {r['function_id']}: {r['status']}" for r in prior_results
+            )
 
         # Clear pending state when finished.
         job.metadata.pop("pending_state", None)
