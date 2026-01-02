@@ -9,6 +9,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5173,
+    allowedHosts: ["ai.corv-labs.tech"],
     proxy: {
       "/api": {
         target: backend,
