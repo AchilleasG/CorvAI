@@ -98,23 +98,37 @@ def create_soft_event(
     manifest_id="soft_events.list_soft_events",
     module="soft_events",
     name="soft_events.list_soft_events",
-    description="List soft events with optional status filter and optional slot status filter.",
+    description="List soft events, optionally filtering by event status, slot status, and time window.",
     params_schema={
         "type": "object",
         "properties": {
             "status": {"type": "string", "description": "Filter by status (active/paused/archived)"},
             "slot_status": {"type": "string", "description": "Optional slot status filter (planned, completed, etc.)"},
+            "time_min": {"type": "string", "description": "ISO lower bound to filter slots"},
+            "time_max": {"type": "string", "description": "ISO upper bound to filter slots"},
         },
     },
 )
-def list_soft_events(status: Optional[str] = None, slot_status: Optional[str] = None):
+def list_soft_events(
+    status: Optional[str] = None,
+    slot_status: Optional[str] = None,
+    time_min: Optional[str] = None,
+    time_max: Optional[str] = None,
+):
     qs = SoftEvent.objects.all().order_by("-created_at")
     if status:
         qs = qs.filter(status=status)
 
     slot_map = {}
+    slot_filters = {}
     if slot_status:
-        slots = SoftEventSlot.objects.select_related("soft_event").filter(status=slot_status)
+        slot_filters["status"] = slot_status
+    if time_min:
+        slot_filters["start_at__gte"] = _parse_dt(time_min)
+    if time_max:
+        slot_filters["end_at__lte"] = _parse_dt(time_max)
+    if slot_filters:
+        slots = SoftEventSlot.objects.select_related("soft_event").filter(**slot_filters)
         for slot in slots:
             slot_map.setdefault(slot.soft_event_id, []).append(slot)
         qs = qs.filter(id__in=slot_map.keys())
@@ -146,39 +160,6 @@ def list_soft_events(status: Optional[str] = None, slot_status: Optional[str] = 
             }
         )
     return {"events": out}
-
-
-@register_function(
-    manifest_id="soft_events.list_slots",
-    module="soft_events",
-    name="soft_events.list_slots",
-    description="List planned slots for soft events.",
-    params_schema={
-        "type": "object",
-        "properties": {
-            "status": {"type": "string", "description": "Filter by slot status"},
-        },
-    },
-)
-def list_slots(status: Optional[str] = None):
-    qs = SoftEventSlot.objects.select_related("soft_event").all().order_by("start_at")
-    if status:
-        qs = qs.filter(status=status)
-    out = []
-    for slot in qs:
-        out.append(
-            {
-                "id": str(slot.id),
-                "soft_event_id": str(slot.soft_event_id),
-                "title": slot.soft_event.title,
-                "start_at": slot.start_at.isoformat(),
-                "end_at": slot.end_at.isoformat(),
-                "status": slot.status,
-                "deferral_count": slot.deferral_count,
-                "rationale": slot.rationale,
-            }
-        )
-    return {"slots": out}
 
 
 @register_function(
