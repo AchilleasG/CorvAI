@@ -192,6 +192,62 @@ body {
   padding-right: 0.25rem;
 }
 
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.calendar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.cal-row {
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cal-badge {
+  min-width: 54px;
+  text-align: center;
+  padding: 0.35rem 0.5rem;
+  border-radius: 10px;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.cal-badge.hard {
+  background: rgba(247, 194, 102, 0.15);
+  border: 1px solid rgba(247, 194, 102, 0.3);
+  color: var(--accent-2);
+}
+
+.cal-badge.soft {
+  background: rgba(42, 209, 163, 0.15);
+  border: 1px solid rgba(42, 209, 163, 0.3);
+  color: var(--accent);
+}
+
+.cal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.cal-title {
+  font-weight: 700;
+}
+
+.cal-time {
+  font-size: 0.95rem;
+}
+
 .settings-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

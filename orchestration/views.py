@@ -6,12 +6,14 @@ from ninja.errors import HttpError
 from django.db.models import Sum
 from datetime import timedelta
 from django.utils import timezone
+from datetime import datetime
 
 from orchestration.api_schemas import JobOut
-from orchestration.models import Job, UsageEvent
+from orchestration.models import Job, UsageEvent, SoftEvent, SoftEventSlot
 from orchestration.services import JobService, ModelConfigService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
+from orchestration.tools.calendar import list_events
 
 router = Router(tags=["orchestration"])
 
@@ -151,4 +153,96 @@ def set_settings(
         "caller_model": ModelConfigService.get_caller_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
+    }
+
+
+def _parse_dt(val: Optional[str]) -> Optional[datetime]:
+    if not val:
+        return None
+    try:
+        dt = datetime.fromisoformat(val)
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+@router.get("/calendar/combined")
+def calendar_combined(
+    request,
+    time_min: Optional[str] = None,
+    time_max: Optional[str] = None,
+    max_results: int = 250,
+    days: int = 14,
+):
+    """
+    Return combined hard calendar events and soft event slots for a window.
+    Defaults to next 14 days if no time_min/time_max provided.
+    """
+    now = timezone.now()
+    start = _parse_dt(time_min) or now
+    end = _parse_dt(time_max) or (now + timedelta(days=days))
+
+    try:
+        hard_resp = list_events(
+            time_min=start.isoformat(),
+            time_max=end.isoformat(),
+            max_results=max_results,
+        )
+        hard_events = hard_resp.get("events", [])
+    except Exception as exc:
+        raise HttpError(502, f"Failed to fetch calendar events: {exc}")
+
+    slot_qs = SoftEventSlot.objects.select_related("soft_event").filter(
+        start_at__lt=end, end_at__gt=start
+    ).exclude(status=SoftEventSlot.STATUS_CANCELED)
+    soft_slots = []
+    for slot in slot_qs:
+        soft_slots.append(
+            {
+                "id": str(slot.id),
+                "soft_event_id": str(slot.soft_event_id),
+                "title": slot.soft_event.title,
+                "start": slot.start_at.isoformat(),
+                "end": slot.end_at.isoformat(),
+                "status": slot.status,
+                "rationale": slot.rationale,
+                "deferral_count": slot.deferral_count,
+                "promoted": slot.status == SoftEventSlot.STATUS_PROMOTED,
+            }
+        )
+
+    unscheduled = []
+    for se in SoftEvent.objects.filter(status=SoftEvent.STATUS_ACTIVE):
+        has_future_slot = slot_qs.filter(soft_event=se).exists()
+        if not has_future_slot:
+            unscheduled.append(
+                {
+                    "id": str(se.id),
+                    "title": se.title,
+                    "priority": se.priority,
+                    "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+                    "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+                }
+            )
+
+    mapped_hard = []
+    for ev in hard_events:
+        mapped_hard.append(
+            {
+                "id": ev.get("id"),
+                "title": ev.get("summary") or "(no title)",
+                "start": ev.get("start"),
+                "end": ev.get("end"),
+                "source": "hard",
+            }
+        )
+
+    return {
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "hard_events": mapped_hard,
+        "soft_slots": soft_slots,
+        "soft_events_unscheduled": unscheduled,
     }

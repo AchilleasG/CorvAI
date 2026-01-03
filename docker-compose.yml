@@ -12,6 +12,8 @@ services:
       - DEBUG=True
       - DATABASE_URL=${DATABASE_URL}
       - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
 
   frontend:
     build: ./frontend
@@ -24,3 +26,36 @@ services:
       - /app/node_modules
     depends_on:
       - web
+
+  celery-worker:
+    build: .
+    command: celery -A CorvAI worker -l info
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=True
+      - DATABASE_URL=${DATABASE_URL}
+      - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+    depends_on:
+      - redis
+
+  celery-beat:
+    build: .
+    command: celery -A CorvAI beat -l info
+    volumes:
+      - .:/app
+    environment:
+      - DEBUG=True
+      - DATABASE_URL=${DATABASE_URL}
+      - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

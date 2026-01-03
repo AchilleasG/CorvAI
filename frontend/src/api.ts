@@ -1,4 +1,5 @@
 import { ChatListItem, Message, SendTextResponse, Job, UsageEvent, UsageSummary } from "./types";
+import { CombinedCalendar } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "/api";
 
@@ -137,4 +138,9 @@ export function updateSettings(payload: { frontman_model?: string; caller_model?
       body: JSON.stringify(payload),
     },
   );
+}
+
+export function fetchCalendarCombined(params: { days?: number } = {}) {
+  const qs = params.days ? `?days=${params.days}` : "";
+  return request<CombinedCalendar>(`/orchestration/calendar/combined${qs}`);
 }

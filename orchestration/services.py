@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Iterable, Tuple
+from datetime import datetime, timedelta
 
 from openai import OpenAI
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 
 from orchestration.models import (
@@ -368,9 +369,13 @@ class UserInfoService:
         return profile
 
     @staticmethod
-    def append_core_profile(text: str, user_id: Optional[str] = None, separator: str = "\n") -> UserProfile:
+    def append_core_profile(
+        text: str, user_id: Optional[str] = None, separator: str = "\n"
+    ) -> UserProfile:
         uid = UserInfoService._normalize_user_id(user_id)
-        profile, _ = UserProfile.objects.get_or_create(user_id=uid, defaults={"core_text": ""})
+        profile, _ = UserProfile.objects.get_or_create(
+            user_id=uid, defaults={"core_text": ""}
+        )
         base = profile.core_text or ""
         sep = separator if base and separator is not None else ""
         profile.core_text = f"{base}{sep}{text}".strip()
@@ -424,7 +429,9 @@ class UserInfoService:
         model: Optional[str] = None,
     ) -> UserNote:
         uid = UserInfoService._normalize_user_id(user_id)
-        note = UserNote.objects.filter(id=note_id, user_id=uid, deleted_at__isnull=True).first()
+        note = UserNote.objects.filter(
+            id=note_id, user_id=uid, deleted_at__isnull=True
+        ).first()
         if not note:
             raise ValueError("Note not found")
         canonical = UserInfoService._canonicalize(content) if canonicalize else content
@@ -436,13 +443,24 @@ class UserInfoService:
             note.source = source
         if tags is not None:
             note.tags = tags
-        note.save(update_fields=["content_raw", "content_canonical", "embedding", "source", "tags", "updated_at"])
+        note.save(
+            update_fields=[
+                "content_raw",
+                "content_canonical",
+                "embedding",
+                "source",
+                "tags",
+                "updated_at",
+            ]
+        )
         return note
 
     @staticmethod
     def delete_note(note_id: str, *, user_id: Optional[str] = None):
         uid = UserInfoService._normalize_user_id(user_id)
-        note = UserNote.objects.filter(id=note_id, user_id=uid, deleted_at__isnull=True).first()
+        note = UserNote.objects.filter(
+            id=note_id, user_id=uid, deleted_at__isnull=True
+        ).first()
         if not note:
             return
         note.deleted_at = timezone.now()
@@ -463,14 +481,20 @@ class UserInfoService:
         embedding = UserInfoService._embed_text(canonical_query, model=model)
         if not embedding:
             return []
-        from pgvector.django import CosineDistance  # local import to avoid module load issues
+        from pgvector.django import (
+            CosineDistance,
+        )  # local import to avoid module load issues
 
-        qs = UserNote.objects.filter(user_id=uid, deleted_at__isnull=True, embedding__isnull=False)
+        qs = UserNote.objects.filter(
+            user_id=uid, deleted_at__isnull=True, embedding__isnull=False
+        )
         if source:
             qs = qs.filter(source=source)
         if tag:
             qs = qs.filter(tags__contains=[tag])
-        qs = qs.annotate(distance=CosineDistance("embedding", embedding)).order_by("distance")[:limit]
+        qs = qs.annotate(distance=CosineDistance("embedding", embedding)).order_by(
+            "distance"
+        )[:limit]
         out = []
         for n in qs:
             out.append(
@@ -594,7 +618,8 @@ class ModelConfigService:
     @staticmethod
     def get_user_info_embedding_model() -> str:
         return ModelConfigService.get_setting(
-            "user_info_embedding_model", ModelConfigService.DEFAULT_USER_INFO_EMBED_MODEL
+            "user_info_embedding_model",
+            ModelConfigService.DEFAULT_USER_INFO_EMBED_MODEL,
         )
 
     @staticmethod
@@ -607,6 +632,187 @@ class ModelConfigService:
             return int(raw)
         except Exception:
             return ModelConfigService.DEFAULT_MAX_FUNCTION_RESULT_CHARS
+
+
+class SoftEventService:
+    """
+    Helpers for soft events (flexible tasks) and their planned slots.
+    """
+
+    logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _parse_dt(val: Any) -> Optional[datetime]:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            if timezone.is_naive(val):
+                return timezone.make_aware(val, timezone=timezone.utc)
+            return val
+        try:
+            parsed = datetime.fromisoformat(str(val))
+            if timezone.is_naive(parsed):
+                parsed = timezone.make_aware(parsed, timezone=timezone.utc)
+            return parsed
+        except Exception:
+            return None
+
+    @staticmethod
+    def list_soft_events_for_window(
+        start: datetime, end: datetime
+    ) -> List["SoftEvent"]:
+        from orchestration.models import SoftEvent  # local import to avoid cycles
+
+        return list(
+            SoftEvent.objects.filter(status=SoftEvent.STATUS_ACTIVE).filter(
+                models.Q(soft_deadline__isnull=True)
+                | models.Q(soft_deadline__gte=start),
+                models.Q(hard_deadline__isnull=True)
+                | models.Q(hard_deadline__gte=start),
+            )
+        )
+
+    @staticmethod
+    def list_slots_for_window(start: datetime, end: datetime) -> List["SoftEventSlot"]:
+        from orchestration.models import SoftEventSlot
+
+        return list(
+            SoftEventSlot.objects.filter(start_at__lt=end, end_at__gt=start).exclude(
+                status=SoftEventSlot.STATUS_CANCELED
+            )
+        )
+
+    @staticmethod
+    def due_slots(
+        now: datetime | None = None, horizon_minutes: int = 10
+    ) -> List["SoftEventSlot"]:
+        from orchestration.models import SoftEventSlot
+
+        now = now or timezone.now()
+        horizon = now + timedelta(minutes=horizon_minutes)
+        return list(
+            SoftEventSlot.objects.filter(
+                status=SoftEventSlot.STATUS_PLANNED,
+                start_at__gte=now,
+                start_at__lte=horizon,
+            )
+        )
+
+    @staticmethod
+    def apply_planner_actions(
+        actions: Iterable[dict], planner_trace_id: str = ""
+    ) -> Tuple[int, int]:
+        """
+        Apply planner-suggested actions to slots. Expected action shapes:
+          - {"type": "create_slot", "soft_event_id": str, "start_at": iso, "end_at": iso, "notify_at": iso?, "rationale": str}
+          - {"type": "cancel_slot", "slot_id": str}
+          - {"type": "update_slot", "slot_id": str, ...fields}
+          - {"type": "promote_slot", "slot_id": str, "summary": str?, "description": str?, "calendar_id"?, "timezone"?}
+        Returns (created, updated) counts.
+        """
+        from orchestration.models import SoftEvent, SoftEventSlot
+        from orchestration.tools import calendar as cal
+
+        created = updated = 0
+        for action in actions:
+            atype = (action or {}).get("type")
+            if atype == "create_slot":
+                try:
+                    se = SoftEvent.objects.get(id=action["soft_event_id"])
+                except SoftEvent.DoesNotExist:
+                    continue
+                start_at = SoftEventService._parse_dt(action.get("start_at"))
+                end_at = SoftEventService._parse_dt(action.get("end_at"))
+                notify_at = SoftEventService._parse_dt(action.get("notify_at"))
+                if not start_at or not end_at:
+                    continue
+                slot = SoftEventSlot.objects.create(
+                    soft_event=se,
+                    start_at=start_at,
+                    end_at=end_at,
+                    notify_at=notify_at,
+                    rationale=action.get("rationale", ""),
+                    planner_trace_id=planner_trace_id,
+                    metadata=action.get("metadata") or {},
+                )
+                created += 1
+                SoftEventService.logger.info(
+                    "Created soft slot %s for %s", slot.id, se.id
+                )
+            elif atype == "cancel_slot":
+                try:
+                    slot = SoftEventSlot.objects.get(id=action["slot_id"])
+                except SoftEventSlot.DoesNotExist:
+                    continue
+                slot.status = SoftEventSlot.STATUS_CANCELED
+                slot.save(update_fields=["status", "updated_at"])
+                updated += 1
+            elif atype == "update_slot":
+                try:
+                    slot = SoftEventSlot.objects.get(id=action["slot_id"])
+                except SoftEventSlot.DoesNotExist:
+                    continue
+                fields = []
+                for key in [
+                    "start_at",
+                    "end_at",
+                    "notify_at",
+                    "status",
+                    "rationale",
+                    "metadata",
+                ]:
+                    if key in action:
+                        val = action[key]
+                        if key in {"start_at", "end_at", "notify_at"}:
+                            val = SoftEventService._parse_dt(val)
+                            if not val:
+                                continue
+                        setattr(slot, key, val)
+                        fields.append(key)
+                if planner_trace_id:
+                    slot.planner_trace_id = planner_trace_id
+                    fields.append("planner_trace_id")
+                if fields:
+                    slot.save(update_fields=list(set(fields + ["updated_at"])))
+                    updated += 1
+            elif atype == "promote_slot":
+                try:
+                    slot = SoftEventSlot.objects.select_related("soft_event").get(
+                        id=action["slot_id"]
+                    )
+                except SoftEventSlot.DoesNotExist:
+                    continue
+                summary = action.get("summary") or slot.soft_event.title
+                description = (
+                    action.get("description")
+                    or slot.rationale
+                    or slot.soft_event.description
+                )
+                start_at = SoftEventService._parse_dt(
+                    action.get("start_at") or slot.start_at
+                )
+                end_at = SoftEventService._parse_dt(action.get("end_at") or slot.end_at)
+                if not start_at or not end_at:
+                    continue
+                try:
+                    resp = cal.create_event(
+                        summary=summary,
+                        start=start_at.isoformat(),
+                        end=end_at.isoformat(),
+                        description=description,
+                        calendar_id=action.get("calendar_id")
+                        or cal.DEFAULT_CALENDAR_ID,
+                        timezone=action.get("timezone") or cal.DEFAULT_TIMEZONE,
+                    )
+                    slot.status = SoftEventSlot.STATUS_PROMOTED
+                    slot.metadata["calendar_event_id"] = resp.get("id")
+                    slot.save(update_fields=["status", "metadata", "updated_at"])
+                    updated += 1
+                except Exception as exc:  # pragma: no cover - external API
+                    SoftEventService.logger.exception(
+                        "Failed to promote slot %s: %s", slot.id, exc
+                    )
+        return created, updated
 
 
 class UsageService:
@@ -690,7 +896,9 @@ class UsageService:
             cp = p.get("completion_per_1k") or 0
             effective_cached = cached_prompt_tokens or 0
             effective_prompt = max((prompt_tokens or 0) - effective_cached, 0)
-            prompt_cost = (effective_prompt / 1000) * pp + (effective_cached / 1000) * cpp
+            prompt_cost = (effective_prompt / 1000) * pp + (
+                effective_cached / 1000
+            ) * cpp
             completion_cost = (completion_tokens / 1000) * cp
             total_cost = prompt_cost + completion_cost
 

@@ -74,34 +74,38 @@ export type SettingsPayload = {
   max_function_result_chars?: number;
 };
 
-export type UsageEvent = {
+export type HardCalendarEvent = {
   id: string;
-  created_at: string;
-  source: string;
-  model: string;
-  cache_mode: string;
-  prompt_tokens: number;
-  cached_prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
+  title: string;
+  start: string;
+  end: string;
+  source: "hard";
 };
 
-export type UsageSummary = {
-  since: string;
-  by_source: Record<
-    string,
-    {
-      source: string;
-      prompt_tokens: number | null;
-      cached_prompt_tokens: number | null;
-      completion_tokens: number | null;
-      total_tokens: number | null;
-    }
-  >;
-  totals: {
-    prompt_tokens: number | null;
-    cached_prompt_tokens: number | null;
-    completion_tokens: number | null;
-    total_tokens: number | null;
-  };
+export type SoftSlot = {
+  id: string;
+  soft_event_id: string;
+  title: string;
+  start: string;
+  end: string;
+  status: string;
+  rationale?: string;
+  deferral_count: number;
+  promoted: boolean;
+};
+
+export type SoftEventUnscheduled = {
+  id: string;
+  title: string;
+  priority: number;
+  soft_deadline?: string | null;
+  hard_deadline?: string | null;
+};
+
+export type CombinedCalendar = {
+  window_start: string;
+  window_end: string;
+  hard_events: HardCalendarEvent[];
+  soft_slots: SoftSlot[];
+  soft_events_unscheduled: SoftEventUnscheduled[];
 };

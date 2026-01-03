@@ -265,6 +265,115 @@ class UsageEvent(models.Model):
         return f"{self.source} {self.created_at}"
 
 
+class SoftEvent(models.Model):
+    """
+    Flexible, user-intent tasks that can be scheduled into free time.
+    """
+
+    STATUS_ACTIVE = "active"
+    STATUS_PAUSED = "paused"
+    STATUS_ARCHIVED = "archived"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_PAUSED, "Paused"),
+        (STATUS_ARCHIVED, "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    duration_minutes = models.PositiveIntegerField(default=30)
+    soft_deadline = models.DateTimeField(null=True, blank=True)
+    hard_deadline = models.DateTimeField(null=True, blank=True)
+    frequency = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Optional recurrence description (e.g., weekly, monthly).",
+    )
+    preferred_dayparts = ArrayField(
+        models.CharField(max_length=32, blank=True),
+        default=list,
+        blank=True,
+        help_text="Optional preference hints such as morning/afternoon/evening.",
+    )
+    deferral_limit = models.PositiveIntegerField(default=3)
+    priority = models.IntegerField(default=0, help_text="Higher = more urgent/important.")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    metadata = models.JSONField(default=dict, blank=True)
+    chat = models.ForeignKey(
+        Chat, null=True, blank=True, on_delete=models.SET_NULL, related_name="soft_events"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["soft_deadline"]),
+            models.Index(fields=["hard_deadline"]),
+            models.Index(fields=["priority"]),
+        ]
+
+    def __str__(self):
+        return f"{self.title}"
+
+
+class SoftEventSlot(models.Model):
+    """
+    Planned instance of a soft event in time (not necessarily written to calendar).
+    """
+
+    STATUS_PLANNED = "planned"
+    STATUS_COMPLETED = "completed"
+    STATUS_DEFERRED = "deferred"
+    STATUS_SKIPPED = "skipped"
+    STATUS_PROMOTED = "promoted"
+    STATUS_CANCELED = "canceled"
+
+    STATUS_CHOICES = [
+        (STATUS_PLANNED, "Planned"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_DEFERRED, "Deferred"),
+        (STATUS_SKIPPED, "Skipped"),
+        (STATUS_PROMOTED, "Promoted to calendar"),
+        (STATUS_CANCELED, "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    soft_event = models.ForeignKey(
+        SoftEvent, on_delete=models.CASCADE, related_name="slots"
+    )
+    start_at = models.DateTimeField()
+    end_at = models.DateTimeField()
+    notify_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_PLANNED)
+    deferral_count = models.PositiveIntegerField(default=0)
+    rationale = models.TextField(blank=True, default="")
+    planner_trace_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Correlation id from planner decisions.",
+    )
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["start_at"]
+        indexes = [
+            models.Index(fields=["start_at"]),
+            models.Index(fields=["status"]),
+            models.Index(fields=["notify_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.soft_event.title} @ {self.start_at}"
+
+
 class FrontmanPersona(models.Model):
     """
     Stores persona/instructions for the Front Man layer.

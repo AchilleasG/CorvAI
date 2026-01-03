@@ -14,8 +14,9 @@ import {
   fetchUsageSummary,
   fetchSettings,
   updateSettings,
+  fetchCalendarCombined,
 } from "./api";
-import { ChatListItem, Message, Job, UsageEvent, UsageSummary, SettingsPayload } from "./types";
+import { ChatListItem, Message, Job, UsageEvent, UsageSummary, SettingsPayload, CombinedCalendar } from "./types";
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -130,6 +131,7 @@ export default function App() {
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [input, setInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -154,6 +156,9 @@ export default function App() {
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
+  const [calendarError, setCalendarError] = useState<string | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -185,6 +190,20 @@ export default function App() {
       }
     })();
   }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showCalendar) return;
+    setCalendarLoading(true);
+    setCalendarError(null);
+    fetchCalendarCombined({ days: 14 })
+      .then((data) => setCalendarData(data))
+      .catch((err: any) => {
+        if (handleAuthError(err)) return;
+        setCalendarError(err.message || "Failed to load calendar");
+      })
+      .finally(() => setCalendarLoading(false));
+  }, [authed, showCalendar]);
 
   useEffect(() => {
     if (!authed) return;
@@ -634,7 +653,11 @@ export default function App() {
                     <button
                       type="button"
                       className="chat-select"
-                      onClick={() => setActiveChatId(chat.chat_id)}
+                      onClick={() => {
+                        setActiveChatId(chat.chat_id);
+                        setShowSettings(false);
+                        setShowCalendar(false);
+                      }}
                     >
                       <span>{formatChatLabel(chat)}</span>
                     </button>
@@ -913,7 +936,22 @@ export default function App() {
             )}
           </div>
           <div className="header-actions">
-            <button className="ghost" onClick={() => setShowSettings(true)}>
+            <button
+              className="ghost"
+              onClick={() => {
+                setShowSettings(false);
+                setShowCalendar(true);
+              }}
+            >
+              Calendar
+            </button>
+            <button
+              className="ghost"
+              onClick={() => {
+                setShowCalendar(false);
+                setShowSettings(true);
+              }}
+            >
               Settings
             </button>
             <button className="ghost" onClick={handleNewChat}>
@@ -1035,8 +1073,119 @@ export default function App() {
               )}
             </form>
           </>
-        )}
-      </main>
-    </div>
-  );
+        ) : showCalendar ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Calendar</p>
+                <h2>Hard + Soft Events</h2>
+              </div>
+              <div className="main-actions">
+                <button className="ghost" onClick={() => setShowCalendar(false)}>Back to chat</button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setCalendarLoading(true);
+                    setCalendarError(null);
+                    fetchCalendarCombined({ days: 14 })
+                      .then((data) => setCalendarData(data))
+                      .catch((err: any) => setCalendarError(err.message || "Failed to load calendar"))
+                      .finally(() => setCalendarLoading(false));
+                  }}
+                >
+                  Refresh
+                </button>
+              </div>
+            </header>
+            {calendarError && <div className="alert">{calendarError}</div>}
+            {calendarLoading && <div className="muted">Loading calendar…</div>}
+            {!calendarLoading && calendarData && (
+              <div className="calendar-grid">
+                <div className="card">
+                  <div className="card-head">
+                    <div>
+                      <p className="eyebrow">Planned</p>
+                      <h3>Next two weeks</h3>
+                      <p className="muted small">
+                        Window {new Date(calendarData.window_start).toLocaleDateString()} –{" "}
+                        {new Date(calendarData.window_end).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="calendar-list">
+                    {[...calendarData.hard_events.map((e) => ({ ...e, type: "hard" as const })), ...calendarData.soft_slots.map((s) => ({
+                      id: s.id,
+                      title: s.title,
+                      start: s.start,
+                      end: s.end,
+                      status: s.status,
+                      type: "soft" as const,
+                      rationale: s.rationale,
+                      deferral_count: s.deferral_count,
+                      promoted: s.promoted,
+                    }))].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()).map((item) => {
+                      const start = new Date(item.start).toLocaleString();
+                      const end = new Date(item.end).toLocaleString();
+                      const isSoft = item.type === "soft";
+                      return (
+                        <div key={`${item.type}-${item.id}`} className="cal-row">
+                          <div className={`cal-badge ${isSoft ? "soft" : "hard"}`}>
+                            {isSoft ? "Soft" : "Hard"}
+                          </div>
+                          <div className="cal-body">
+                            <div className="cal-title">
+                              {item.title}
+                              {isSoft && item.promoted && <span className="pill" style={{ marginLeft: "0.5rem" }}>Promoted</span>}
+                            </div>
+                            <div className="cal-time">{start} → {end}</div>
+                            {"status" in item && item.status && (
+                              <div className="cal-meta muted small">
+                                Status: {item.status}
+                                {"deferral_count" in item && item.deferral_count ? ` · Deferrals: ${item.deferral_count}` : ""}
+                              </div>
+                            )}
+                            {"rationale" in item && item.rationale && (
+                              <div className="cal-note muted small">{item.rationale}</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {!calendarData.hard_events.length && !calendarData.soft_slots.length && (
+                      <div className="muted">No events scheduled.</div>
+                    )}
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-head">
+                    <div>
+                      <p className="eyebrow">Unscheduled soft</p>
+                      <h3>Need a slot</h3>
+                    </div>
+                  </div>
+                  {calendarData.soft_events_unscheduled.length ? (
+                    <div className="calendar-list">
+                      {calendarData.soft_events_unscheduled.map((se) => (
+                        <div key={se.id} className="cal-row">
+                          <div className="cal-badge soft">Soft</div>
+                          <div className="cal-body">
+                            <div className="cal-title">{se.title}</div>
+                            <div className="cal-meta muted small">
+                              Priority {se.priority}
+                              {se.soft_deadline && ` · Soft deadline ${new Date(se.soft_deadline).toLocaleDateString()}`}
+                              {se.hard_deadline && ` · Hard deadline ${new Date(se.hard_deadline).toLocaleDateString()}`}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">No unscheduled soft events.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
 }
