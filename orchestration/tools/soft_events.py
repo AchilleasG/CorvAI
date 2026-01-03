@@ -98,20 +98,41 @@ def create_soft_event(
     manifest_id="soft_events.list_soft_events",
     module="soft_events",
     name="soft_events.list_soft_events",
-    description="List soft events with optional status filter.",
+    description="List soft events with optional status filter and optional slot status filter.",
     params_schema={
         "type": "object",
         "properties": {
             "status": {"type": "string", "description": "Filter by status (active/paused/archived)"},
+            "slot_status": {"type": "string", "description": "Optional slot status filter (planned, completed, etc.)"},
         },
     },
 )
-def list_soft_events(status: Optional[str] = None):
+def list_soft_events(status: Optional[str] = None, slot_status: Optional[str] = None):
     qs = SoftEvent.objects.all().order_by("-created_at")
     if status:
         qs = qs.filter(status=status)
+
+    slot_map = {}
+    if slot_status:
+        slots = SoftEventSlot.objects.select_related("soft_event").filter(status=slot_status)
+        for slot in slots:
+            slot_map.setdefault(slot.soft_event_id, []).append(slot)
+        qs = qs.filter(id__in=slot_map.keys())
+
     out = []
     for se in qs:
+        event_slots = slot_map.get(se.id, [])
+        slot_payload = [
+            {
+                "id": str(sl.id),
+                "start_at": sl.start_at.isoformat(),
+                "end_at": sl.end_at.isoformat(),
+                "status": sl.status,
+                "deferral_count": sl.deferral_count,
+                "rationale": sl.rationale,
+            }
+            for sl in event_slots
+        ]
         out.append(
             {
                 "id": str(se.id),
@@ -121,6 +142,7 @@ def list_soft_events(status: Optional[str] = None):
                 "duration_minutes": se.duration_minutes,
                 "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
                 "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+                "slots": slot_payload,
             }
         )
     return {"events": out}
