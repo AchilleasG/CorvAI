@@ -864,215 +864,6 @@ export default function App() {
               </div>
             </div>
           </div>
-        ) : (
-          <>
-            <header className="main-header">
-              <div>
-                <p className="eyebrow">Chat</p>
-                <h2>{activeChat ? formatChatLabel(activeChat) : "Start a chat"}</h2>
-                {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user" || j.cancel_requested) && (
-                  <div
-                    className="job-indicator"
-                    style={{ marginTop: "0.4rem", position: "relative" }}
-                  >
-                    <span className="pulse" aria-hidden />
-                    {(() => {
-                      const latestJob = [...jobs].sort((a, b) => {
-                        const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-                        const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
-                        return bt - at;
-                      })[0];
-                      const statusText =
-                        latestJob?.status === "completed"
-                          ? "Last job completed"
-                          : latestJob?.status === "failed"
-                            ? "Last job failed"
-                            : latestJob?.status === "waiting_on_user"
-                              ? "Job waiting on you…"
-                              : "Job in progress…";
-                      return <span>{statusText}</span>;
-                    })()}
-                    {(() => {
-                      const latestJob = [...jobs]
-                        .sort((a, b) => {
-                          const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
-                          const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
-                          return bt - at;
-                        })[0];
-                      if (!latestJob) return null;
-                      return (
-                        <button
-                          type="button"
-                          className="ghost pill-action"
-                          style={{ marginLeft: "0.5rem" }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCancelJob(latestJob.id);
-                          }}
-                          disabled={
-                            latestJob.cancel_requested ||
-                            latestJob.status === "completed" ||
-                            latestJob.status === "failed"
-                          }
-                          title={
-                            latestJob.cancel_requested
-                              ? "Cancel requested"
-                              : latestJob.status === "completed" || latestJob.status === "failed"
-                                ? "Job finished"
-                                : "Cancel job"
-                          }
-                        >
-                          {latestJob.cancel_requested
-                            ? "Canceling…"
-                            : latestJob.status === "completed"
-                              ? "Done"
-                              : latestJob.status === "failed"
-                                ? "Failed"
-                                : "Cancel job"}
-                        </button>
-                      );
-                    })()}
-                  </div>
-            )}
-          </div>
-          <div className="header-actions">
-            <button
-              className="ghost"
-              onClick={() => {
-                setShowSettings(false);
-                setShowCalendar(true);
-              }}
-            >
-              Calendar
-            </button>
-            <button
-              className="ghost"
-              onClick={() => {
-                setShowCalendar(false);
-                setShowSettings(true);
-              }}
-            >
-              Settings
-            </button>
-            <button className="ghost" onClick={handleNewChat}>
-              Start fresh
-            </button>
-          </div>
-        </header>
-
-            <section className="chat-window">
-              {error && <div className="alert">{error}</div>}
-              {loadingMessages ? (
-                <div className="muted">Loading messages…</div>
-              ) : (
-                <div className="messages">
-                  {(() => {
-                    const visibleMessages = messages.filter(
-                      (m) => m.message_type === undefined || m.message_type === "user_visible",
-                    );
-                    const lastJobIndex: Record<string, number> = {};
-                    visibleMessages.forEach((m, idx) => {
-                      if (m.job_id) {
-                        lastJobIndex[m.job_id] = idx;
-                      }
-                    });
-                    return visibleMessages.map((m, idx) => {
-                      const isLastJobMessage = m.job_id ? lastJobIndex[m.job_id] === idx : false;
-                      return (
-                        <MessageBubble
-                          key={m.id}
-                          msg={m}
-                          jobLogMessages={jobLogMessages}
-                          jobLogAnchorId={jobLogAnchorId}
-                          showJobLog={showJobLog}
-                          isLastJobMessage={isLastJobMessage}
-                          onShowJobLog={(jobId) => {
-                            setShowJobLog(true);
-                            setJobLogAnchorId(jobId);
-                            loadJobLog(jobId);
-                          }}
-                          onHideJobLog={() => {
-                            setShowJobLog(false);
-                            setJobLogAnchorId(null);
-                          }}
-                        />
-                      );
-                    });
-                  })()}
-                  <div ref={messagesEndRef} />
-                  {!messages.length && (
-                    <div className="muted empty">
-                      <p>Ask Corv anything to begin.</p>
-                    </div>
-                  )}
-                </div>
-              )}
-            </section>
-
-            <form className="input-bar" onSubmit={handleSend}>
-              <textarea
-                placeholder="Send a message…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                disabled={sending}
-              />
-              <div className="input-actions">
-                <button
-                  type="button"
-                  className={`icon-btn ${recording ? "recording" : ""}`}
-                  onClick={toggleVoiceRecording}
-                  disabled={sending || voiceSending}
-                  aria-label={recording ? "Stop recording" : "Record voice"}
-                  title={recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
-                >
-                  {recording ? <span className="icon-square" /> : <MicIcon />}
-                </button>
-                <button
-                  type="submit"
-                  className="icon-btn send-btn"
-                  disabled={sending || !input.trim()}
-                  aria-label="Send message"
-                  title="Send"
-                >
-                  {sending ? "…" : <SendIcon />}
-                </button>
-              </div>
-              {showMicSettings && mics.length > 0 && (
-                <div className="muted mic-row">
-                  <span>Mic:</span>
-                  <select
-                    className="mic-select"
-                    value={selectedMicId}
-                    onChange={(e) => setSelectedMicId(e.target.value)}
-                    disabled={recording}
-                  >
-                    {mics.map((mic, idx) => (
-                      <option key={mic.deviceId} value={mic.deviceId}>
-                        {mic.label || `Microphone ${idx + 1}`}
-                      </option>
-                    ))}
-                  </select>
-                  {!micReady && !recording && !voiceSending && (
-                    <button
-                      type="button"
-                      className="ghost"
-                      style={{ padding: "0.25rem 0.5rem", minWidth: "auto" }}
-                      onClick={requestMicPermission}
-                      disabled={sending}
-                    >
-                      Give mic permission
-                    </button>
-                  )}
-                </div>
-              )}
-            </form>
-          </>
         ) : showCalendar ? (
           <div className="settings-panel">
             <header className="main-header">
@@ -1188,4 +979,215 @@ export default function App() {
           </div>
         ) : (
           <>
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Chat</p>
+                <h2>{activeChat ? formatChatLabel(activeChat) : "Start a chat"}</h2>
+                {jobs.some((j) => j.status === "running" || j.status === "waiting_on_user" || j.cancel_requested) && (
+                  <div
+                    className="job-indicator"
+                    style={{ marginTop: "0.4rem", position: "relative" }}
+                  >
+                    <span className="pulse" aria-hidden />
+                    {(() => {
+                      const latestJob = [...jobs].sort((a, b) => {
+                        const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                        const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                        return bt - at;
+                      })[0];
+                      const statusText =
+                        latestJob?.status === "completed"
+                          ? "Last job completed"
+                          : latestJob?.status === "failed"
+                            ? "Last job failed"
+                            : latestJob?.status === "waiting_on_user"
+                              ? "Job waiting on you…"
+                              : "Job in progress…";
+                      return <span>{statusText}</span>;
+                    })()}
+                    {(() => {
+                      const latestJob = [...jobs]
+                        .sort((a, b) => {
+                          const at = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+                          const bt = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+                          return bt - at;
+                        })[0];
+                      if (!latestJob) return null;
+                      return (
+                        <button
+                          type="button"
+                          className="ghost pill-action"
+                          style={{ marginLeft: "0.5rem" }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCancelJob(latestJob.id);
+                          }}
+                          disabled={
+                            latestJob.cancel_requested ||
+                            latestJob.status === "completed" ||
+                            latestJob.status === "failed"
+                          }
+                          title={
+                            latestJob.cancel_requested
+                              ? "Cancel requested"
+                              : latestJob.status === "completed" || latestJob.status === "failed"
+                                ? "Job finished"
+                                : "Cancel job"
+                          }
+                        >
+                          {latestJob.cancel_requested
+                            ? "Canceling…"
+                            : latestJob.status === "completed"
+                              ? "Done"
+                              : latestJob.status === "failed"
+                                ? "Failed"
+                                : "Cancel job"}
+                        </button>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+              <div className="header-actions">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowSettings(false);
+                    setShowCalendar(true);
+                  }}
+                >
+                  Calendar
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalendar(false);
+                    setShowSettings(true);
+                  }}
+                >
+                  Settings
+                </button>
+                <button className="ghost" onClick={handleNewChat}>
+                  Start fresh
+                </button>
+              </div>
+            </header>
+
+            <section className="chat-window">
+              {error && <div className="alert">{error}</div>}
+              {loadingMessages ? (
+                <div className="muted">Loading messages…</div>
+              ) : (
+                <div className="messages">
+                  {(() => {
+                    const visibleMessages = messages.filter(
+                      (m) => m.message_type === undefined || m.message_type === "user_visible",
+                    );
+                    const lastJobIndex: Record<string, number> = {};
+                    visibleMessages.forEach((m, idx) => {
+                      if (m.job_id) {
+                        lastJobIndex[m.job_id] = idx;
+                      }
+                    });
+                    return visibleMessages.map((m, idx) => {
+                      const isLastJobMessage = m.job_id ? lastJobIndex[m.job_id] === idx : false;
+                      return (
+                        <MessageBubble
+                          key={m.id}
+                          msg={m}
+                          jobLogMessages={jobLogMessages}
+                          jobLogAnchorId={jobLogAnchorId}
+                          showJobLog={showJobLog}
+                          isLastJobMessage={isLastJobMessage}
+                          onShowJobLog={(jobId) => {
+                            setShowJobLog(true);
+                            setJobLogAnchorId(jobId);
+                            loadJobLog(jobId);
+                          }}
+                          onHideJobLog={() => {
+                            setShowJobLog(false);
+                            setJobLogAnchorId(null);
+                          }}
+                        />
+                      );
+                    });
+                  })()}
+                  <div ref={messagesEndRef} />
+                  {!messages.length && (
+                    <div className="muted empty">
+                      <p>Ask Corv anything to begin.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <form className="input-bar" onSubmit={handleSend}>
+              <textarea
+                placeholder="Send a message…"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
+                disabled={sending}
+              />
+              <div className="input-actions">
+                <button
+                  type="button"
+                  className={`icon-btn ${recording ? "recording" : ""}`}
+                  onClick={toggleVoiceRecording}
+                  disabled={sending || voiceSending}
+                  aria-label={recording ? "Stop recording" : "Record voice"}
+                  title={recording ? "Stop recording" : voiceSending ? "Sending voice…" : "Record voice"}
+                >
+                  {recording ? <span className="icon-square" /> : <MicIcon />}
+                </button>
+                <button
+                  type="submit"
+                  className="icon-btn send-btn"
+                  disabled={sending || !input.trim()}
+                  aria-label="Send message"
+                  title="Send"
+                >
+                  {sending ? "…" : <SendIcon />}
+                </button>
+              </div>
+              {showMicSettings && mics.length > 0 && (
+                <div className="muted mic-row">
+                  <span>Mic:</span>
+                  <select
+                    className="mic-select"
+                    value={selectedMicId}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    disabled={recording}
+                  >
+                    {mics.map((mic, idx) => (
+                      <option key={mic.deviceId} value={mic.deviceId}>
+                        {mic.label || `Microphone ${idx + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                  {!micReady && !recording && !voiceSending && (
+                    <button
+                      type="button"
+                      className="ghost"
+                      style={{ padding: "0.25rem 0.5rem", minWidth: "auto" }}
+                      onClick={requestMicPermission}
+                      disabled={sending}
+                    >
+                      Give mic permission
+                    </button>
+                  )}
+                </div>
+              )}
+            </form>
+          </>
+        )}
+      </main>
+    </div>
+  );
 }
