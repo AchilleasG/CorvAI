@@ -190,6 +190,51 @@ def create_event(**kwargs):
 
 
 @register_function(
+    manifest_id="calendar_manager.update_event",
+    module="calendar_manager",
+    description="Update a hard calendar event (Google Calendar).",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "calendar_id": {"type": "string", "description": "Calendar id", "default": "primary"},
+            "event_id": {"type": "string", "description": "Event id to update"},
+            "summary": {"type": "string", "description": "Event title"},
+            "start": {"type": "string", "description": "Start datetime ISO 8601"},
+            "end": {"type": "string", "description": "End datetime ISO 8601"},
+            "timezone": {"type": "string", "description": "IANA timezone for start/end", "default": "UTC"},
+            "description": {"type": "string", "description": "Event description"},
+            "location": {"type": "string", "description": "Event location"},
+            "attendees": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Email addresses to invite",
+            },
+        },
+        "required": ["calendar_id", "event_id"],
+    },
+)
+def update_event(**kwargs):
+    return gcal.update_event(**kwargs)
+
+
+@register_function(
+    manifest_id="calendar_manager.delete_event",
+    module="calendar_manager",
+    description="Delete a hard calendar event (Google Calendar).",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "calendar_id": {"type": "string", "description": "Calendar id", "default": "primary"},
+            "event_id": {"type": "string", "description": "Event id to delete"},
+        },
+        "required": ["calendar_id", "event_id"],
+    },
+)
+def delete_event(**kwargs):
+    return gcal.delete_event(**kwargs)
+
+
+@register_function(
     manifest_id="calendar_manager.list_events",
     module="calendar_manager",
     description="List hard calendar events (Google Calendar).",
