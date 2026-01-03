@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from django.utils import timezone
 
-from orchestration.models import SoftEvent, Chat
+from orchestration.models import SoftEvent, SoftEventSlot, Chat
 from orchestration.registry import register_function
+from orchestration.services import SoftEventService
+from orchestration.soft_scheduler import collect_window_state
+from orchestration.soft_planner import plan_soft_window
+from orchestration.tools.calendar import list_events
 
 
 def _parse_dt(val: Optional[str]) -> Optional[datetime]:
@@ -88,3 +92,158 @@ def create_soft_event(
         status=SoftEvent.STATUS_ACTIVE,
     )
     return {"id": str(se.id), "title": se.title, "status": se.status}
+
+
+@register_function(
+    manifest_id="soft_events.list_soft_events",
+    module="soft_events",
+    name="soft_events.list_soft_events",
+    description="List soft events with optional status filter.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "description": "Filter by status (active/paused/archived)"},
+        },
+    },
+)
+def list_soft_events(status: Optional[str] = None):
+    qs = SoftEvent.objects.all().order_by("-created_at")
+    if status:
+        qs = qs.filter(status=status)
+    out = []
+    for se in qs:
+        out.append(
+            {
+                "id": str(se.id),
+                "title": se.title,
+                "status": se.status,
+                "priority": se.priority,
+                "duration_minutes": se.duration_minutes,
+                "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+                "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+            }
+        )
+    return {"events": out}
+
+
+@register_function(
+    manifest_id="soft_events.list_slots",
+    module="soft_events",
+    name="soft_events.list_slots",
+    description="List planned slots for soft events.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "description": "Filter by slot status"},
+        },
+    },
+)
+def list_slots(status: Optional[str] = None):
+    qs = SoftEventSlot.objects.select_related("soft_event").all().order_by("start_at")
+    if status:
+        qs = qs.filter(status=status)
+    out = []
+    for slot in qs:
+        out.append(
+            {
+                "id": str(slot.id),
+                "soft_event_id": str(slot.soft_event_id),
+                "title": slot.soft_event.title,
+                "start_at": slot.start_at.isoformat(),
+                "end_at": slot.end_at.isoformat(),
+                "status": slot.status,
+                "deferral_count": slot.deferral_count,
+                "rationale": slot.rationale,
+            }
+        )
+    return {"slots": out}
+
+
+@register_function(
+    manifest_id="soft_events.promote_slot",
+    module="soft_events",
+    name="soft_events.promote_slot",
+    description="Promote a planned soft event slot to a hard calendar event.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "slot_id": {"type": "string"},
+            "summary": {"type": "string", "description": "Optional override title"},
+            "description": {"type": "string", "description": "Optional description"},
+            "calendar_id": {"type": "string", "description": "Target calendar id"},
+            "timezone": {"type": "string", "description": "IANA timezone"},
+        },
+        "required": ["slot_id"],
+    },
+)
+def promote_slot(
+    slot_id: str,
+    summary: Optional[str] = None,
+    description: Optional[str] = None,
+    calendar_id: Optional[str] = None,
+    timezone_name: Optional[str] = None,
+):
+    actions = [
+        {
+            "type": "promote_slot",
+            "slot_id": slot_id,
+            "summary": summary,
+            "description": description,
+            "calendar_id": calendar_id,
+            "timezone": timezone_name,
+        }
+    ]
+    created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id="manual-promote")
+    return {"updated": updated}
+
+
+@register_function(
+    manifest_id="soft_events.replan_window",
+    module="soft_events",
+    name="soft_events.replan_window",
+    description="Manually trigger a replan of the next N days with an optional note.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "days": {"type": "integer", "default": 14},
+            "note": {"type": "string", "description": "Optional guidance for the planner (e.g., keep today free)."},
+        },
+    },
+)
+def replan_window(days: int = 14, note: Optional[str] = None):
+    now = timezone.now()
+    window_start = now
+    window_end = now + timedelta(days=max(days or 1, 1))
+
+    hard_resp = list_events(
+        time_min=window_start.isoformat(),
+        time_max=window_end.isoformat(),
+        max_results=2500,
+    )
+    hard_events = hard_resp.get("events", [])
+    soft_state = collect_window_state(window_start, window_end)
+
+    if note:
+        # Add a planner note as a pseudo event to steer scheduling.
+        hard_events = [
+            {
+                "id": "note",
+                "summary": f"Planner note: {note}",
+                "start": window_start.isoformat(),
+                "end": window_start.isoformat(),
+            }
+        ] + hard_events
+
+    actions, trace_id = plan_soft_window(
+        hard_events=hard_events,
+        soft_state=soft_state,
+        window_start=window_start,
+        window_end=window_end,
+    )
+    created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
+    return {
+        "actions": len(actions),
+        "created": created,
+        "updated": updated,
+        "trace_id": trace_id,
+    }

@@ -48,6 +48,101 @@ def seed_soft_events_module(apps, schema_editor):
         },
     )
 
+    ToolFunction.objects.update_or_create(
+        manifest_id="soft_events.list_soft_events",
+        defaults={
+            "module": module,
+            "name": "soft_events.list_soft_events",
+            "description": "List soft events.",
+            "params_schema": {
+                "type": "object",
+                "properties": {"status": {"type": "string"}},
+            },
+            "return_schema": {
+                "type": "object",
+                "properties": {
+                    "events": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+            "deprecated": False,
+            "handler_ref": "orchestration.tools.soft_events.list_soft_events",
+        },
+    )
+
+    ToolFunction.objects.update_or_create(
+        manifest_id="soft_events.list_slots",
+        defaults={
+            "module": module,
+            "name": "soft_events.list_slots",
+            "description": "List planned soft-event slots.",
+            "params_schema": {
+                "type": "object",
+                "properties": {"status": {"type": "string"}},
+            },
+            "return_schema": {
+                "type": "object",
+                "properties": {
+                    "slots": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+            "deprecated": False,
+            "handler_ref": "orchestration.tools.soft_events.list_slots",
+        },
+    )
+
+    ToolFunction.objects.update_or_create(
+        manifest_id="soft_events.promote_slot",
+        defaults={
+            "module": module,
+            "name": "soft_events.promote_slot",
+            "description": "Promote a soft-event slot to a calendar event.",
+            "params_schema": {
+                "type": "object",
+                "properties": {
+                    "slot_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "description": {"type": "string"},
+                    "calendar_id": {"type": "string"},
+                    "timezone": {"type": "string"},
+                },
+                "required": ["slot_id"],
+            },
+            "return_schema": {
+                "type": "object",
+                "properties": {"updated": {"type": "integer"}},
+            },
+            "deprecated": False,
+            "handler_ref": "orchestration.tools.soft_events.promote_slot",
+        },
+    )
+
+    ToolFunction.objects.update_or_create(
+        manifest_id="soft_events.replan_window",
+        defaults={
+            "module": module,
+            "name": "soft_events.replan_window",
+            "description": "Manually trigger a replan of the soft events window.",
+            "params_schema": {
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer", "default": 14},
+                    "note": {"type": "string"},
+                },
+            },
+            "return_schema": {
+                "type": "object",
+                "properties": {
+                    "actions": {"type": "integer"},
+                    "created": {"type": "integer"},
+                    "updated": {"type": "integer"},
+                    "trace_id": {"type": "string"},
+                },
+            },
+            "deprecated": False,
+            "handler_ref": "orchestration.tools.soft_events.replan_window",
+        },
+    )
+
 
 def noop_reverse(apps, schema_editor):
     # Keep module and function if rollback to avoid dangling data assumptions.
