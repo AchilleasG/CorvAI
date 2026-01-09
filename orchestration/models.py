@@ -561,3 +561,136 @@ class UserNote(models.Model):
 
     def __str__(self):
         return f"Note {self.id}"
+
+
+class PushToken(models.Model):
+    """
+    Stores device push tokens for notifications.
+    """
+
+    PLATFORM_CHOICES = [
+        ("ios", "iOS"),
+        ("android", "Android"),
+        ("web", "Web"),
+        ("unknown", "Unknown"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    token = models.TextField(unique=True)
+    platform = models.CharField(max_length=32, choices=PLATFORM_CHOICES, default="unknown")
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen_at"]
+        indexes = [
+            models.Index(fields=["platform"]),
+        ]
+
+    def __str__(self):
+        return f"{self.platform} {self.token[:12]}"
+
+
+class UserMessage(models.Model):
+    """
+    Standalone inbox messages not tied to chats.
+    """
+
+    KIND_INFO = "info"
+    KIND_CALL_MISSED = "call_missed"
+    KIND_CALL_TEXT = "call_text"
+
+    KIND_CHOICES = [
+        (KIND_INFO, "Info"),
+        (KIND_CALL_MISSED, "Call missed"),
+        (KIND_CALL_TEXT, "Call text"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.TextField(blank=True, default="")
+    body = models.TextField(blank=True, default="")
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES, default=KIND_INFO)
+    metadata = models.JSONField(default=dict, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at"]),
+            models.Index(fields=["read_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.kind}: {self.title or self.body[:40]}"
+
+
+class CallSession(models.Model):
+    """
+    In-app voice call session with a goal and transcript.
+    """
+
+    STATUS_SCHEDULED = "scheduled"
+    STATUS_RINGING = "ringing"
+    STATUS_IN_CALL = "in_call"
+    STATUS_MISSED = "missed"
+    STATUS_COMPLETED = "completed"
+    STATUS_CANCELED = "canceled"
+
+    STATUS_CHOICES = [
+        (STATUS_SCHEDULED, "Scheduled"),
+        (STATUS_RINGING, "Ringing"),
+        (STATUS_IN_CALL, "In call"),
+        (STATUS_MISSED, "Missed"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_CANCELED, "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal = models.TextField()
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_SCHEDULED)
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+    ringing_started_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    summary = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "scheduled_for"]),
+            models.Index(fields=["status", "ringing_started_at"]),
+        ]
+
+    def __str__(self):
+        return f"CallSession {self.id} [{self.status}]"
+
+
+class CallTranscriptEntry(models.Model):
+    """
+    Transcript lines for a call session.
+    """
+
+    ROLE_CHOICES = [
+        ("user", "User"),
+        ("assistant", "Assistant"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    session = models.ForeignKey(CallSession, on_delete=models.CASCADE, related_name="transcript_entries")
+    role = models.CharField(max_length=32, choices=ROLE_CHOICES, default="system")
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["session", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.session_id} {self.role}"

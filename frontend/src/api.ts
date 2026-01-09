@@ -28,4 +28,12 @@ export const {
   createScheduledTask,
   updateScheduledTask,
   fetchScheduledTaskRuns,
+  registerPushToken,
+  fetchMessages,
+  markMessageRead,
+  fetchCallSessions,
+  createCallSession,
+  updateCallSession,
+  addCallTranscriptEntry,
+  createRealtimeToken,
 } = api;

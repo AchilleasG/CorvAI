@@ -28,6 +28,14 @@ export const {
   createScheduledTask,
   updateScheduledTask,
   fetchScheduledTaskRuns,
+  registerPushToken,
+  fetchMessages,
+  markMessageRead,
+  fetchCallSessions,
+  createCallSession,
+  updateCallSession,
+  addCallTranscriptEntry,
+  createRealtimeToken,
 } = api;
 
 export async function sendVoice(chat_id: string, uri: string) {

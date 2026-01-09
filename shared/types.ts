@@ -140,3 +140,32 @@ export type ScheduledTaskRun = {
   error_summary: string;
   log_entries: ScheduledTaskLogEntry[];
 };
+
+export type UserMessage = {
+  id: string;
+  title: string;
+  body: string;
+  kind: "info" | "call_missed" | "call_text";
+  read_at?: string | null;
+  created_at?: string | null;
+};
+
+export type CallTranscriptEntry = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at?: string | null;
+};
+
+export type CallSession = {
+  id: string;
+  goal: string;
+  status: "scheduled" | "ringing" | "in_call" | "missed" | "completed" | "canceled";
+  scheduled_for?: string | null;
+  ringing_started_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  summary: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};

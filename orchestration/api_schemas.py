@@ -76,3 +76,40 @@ class ScheduledTaskRunOut(Schema):
     summary: str
     error_summary: str
     log_entries: list[ScheduledTaskLogOut]
+
+
+class PushTokenOut(Schema):
+    id: UUID
+    token: str
+    platform: str
+    created_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+
+
+class UserMessageOut(Schema):
+    id: UUID
+    title: str
+    body: str
+    kind: str
+    read_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CallTranscriptEntryOut(Schema):
+    id: UUID
+    role: str
+    content: str
+    created_at: Optional[str] = None
+
+
+class CallSessionOut(Schema):
+    id: UUID
+    goal: str
+    status: str
+    scheduled_for: Optional[str] = None
+    ringing_started_at: Optional[str] = None
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    summary: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None

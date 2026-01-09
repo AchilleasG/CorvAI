@@ -7,6 +7,7 @@ from celery import shared_task
 from django.core.management import call_command
 
 from orchestration.scheduler import poll_due_tasks
+from orchestration.call_processing import poll_call_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -32,4 +33,16 @@ def poll_scheduled_tasks():
         return poll_due_tasks()
     except Exception as exc:
         logger.exception("poll_scheduled_tasks failed: %s", exc)
+        raise
+
+
+@shared_task(name="orchestration.tasks.poll_call_sessions")
+def poll_call_sessions_task():
+    """
+    Check scheduled/ringing call sessions and dispatch notifications.
+    """
+    try:
+        return poll_call_sessions()
+    except Exception as exc:
+        logger.exception("poll_call_sessions failed: %s", exc)
         raise

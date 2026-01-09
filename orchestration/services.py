@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import importlib
 import uuid
 from typing import Any, Dict, Optional, List, Iterable, Tuple
 from datetime import datetime, timedelta
@@ -149,22 +148,15 @@ class FunctionRunnerService:
     ) -> FunctionResultPayload:
         try:
             func = FunctionRegistry.resolve_callable(payload.function_id)
-        except KeyError:
-            try:
-                tf = ToolFunction.objects.filter(manifest_id=payload.function_id).first()
-                if tf and tf.handler_ref:
-                    module_path = tf.handler_ref.rsplit(".", 1)[0]
-                    importlib.import_module(module_path)
-                func = FunctionRegistry.resolve_callable(payload.function_id)
-            except Exception as exc:
-                logger.exception("Function resolution failed for %s", payload.function_id)
-                return FunctionResultPayload(
-                    trace_id=payload.trace_id,
-                    call_id=payload.call_id,
-                    status="error",
-                    error_summary=str(exc),
-                    job_id=str(job.id) if job else None,
-                )
+        except KeyError as exc:
+            logger.exception("Function resolution failed for %s", payload.function_id)
+            return FunctionResultPayload(
+                trace_id=payload.trace_id,
+                call_id=payload.call_id,
+                status="error",
+                error_summary=str(exc),
+                job_id=str(job.id) if job else None,
+            )
 
         if job and (job.cancel_requested or job.status == Job.STATUS_CANCELED):
             return FunctionResultPayload(

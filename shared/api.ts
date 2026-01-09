@@ -8,6 +8,9 @@ import {
   CombinedCalendar,
   ScheduledTask,
   ScheduledTaskRun,
+  UserMessage,
+  CallSession,
+  CallTranscriptEntry,
 } from "./types";
 
 type TokenGetter = () => string | null | Promise<string | null>;
@@ -185,6 +188,56 @@ export function createApi(config: ApiConfig) {
         config,
         `/orchestration/scheduled_tasks/${task_id}/runs`,
       );
+    },
+    registerPushToken(payload: { token: string; platform?: string }) {
+      return request<{ id: string; token: string; platform: string }>(
+        config,
+        `/orchestration/push_tokens`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+    },
+    fetchMessages(params: { unread_only?: boolean } = {}) {
+      const qs = params.unread_only ? "?unread_only=true" : "";
+      return request<UserMessage[]>(config, `/orchestration/messages${qs}`);
+    },
+    markMessageRead(message_id: string) {
+      return request<UserMessage>(config, `/orchestration/messages/${message_id}/read`, {
+        method: "PATCH",
+      });
+    },
+    fetchCallSessions(status?: string) {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      return request<CallSession[]>(config, `/orchestration/call_sessions${qs}`);
+    },
+    createCallSession(payload: { goal: string; scheduled_for?: string }) {
+      return request<CallSession>(config, `/orchestration/call_sessions`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateCallSession(session_id: string, payload: { status?: string }) {
+      return request<CallSession>(config, `/orchestration/call_sessions/${session_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    addCallTranscriptEntry(session_id: string, payload: { role: string; content: string }) {
+      return request<CallTranscriptEntry>(
+        config,
+        `/orchestration/call_sessions/${session_id}/transcript`,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+    },
+    createRealtimeToken(session_id: string) {
+      return request<any>(config, `/orchestration/call_sessions/${session_id}/realtime_token`, {
+        method: "POST",
+      });
     },
   };
 }

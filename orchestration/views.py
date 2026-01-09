@@ -8,7 +8,16 @@ from datetime import timedelta
 from django.utils import timezone
 from datetime import datetime
 
-from orchestration.api_schemas import JobOut, ScheduledTaskOut, ScheduledTaskRunOut, ScheduledTaskLogOut
+from orchestration.api_schemas import (
+    JobOut,
+    ScheduledTaskOut,
+    ScheduledTaskRunOut,
+    ScheduledTaskLogOut,
+    PushTokenOut,
+    UserMessageOut,
+    CallSessionOut,
+    CallTranscriptEntryOut,
+)
 from orchestration.models import (
     Job,
     UsageEvent,
@@ -17,7 +26,20 @@ from orchestration.models import (
     ScheduledTask,
     ScheduledTaskRun,
     ScheduledTaskLogEntry,
+    PushToken,
+    UserMessage,
+    CallSession,
+    CallTranscriptEntry,
 )
+from orchestration.call_processing import (
+    create_call_session,
+    accept_call,
+    complete_call,
+    mark_call_missed,
+)
+from orchestration.notifications import send_push_to_all
+from Corv.config import settings as corv_settings
+import httpx
 from orchestration.services import JobService, ModelConfigService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
@@ -138,6 +160,200 @@ def get_settings(request):
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }
+
+
+@router.post("/push_tokens", response=PushTokenOut)
+def register_push_token(request, token: str, platform: str = "unknown"):
+    obj, _ = PushToken.objects.update_or_create(
+        token=token,
+        defaults={"platform": platform},
+    )
+    return PushTokenOut(
+        id=obj.id,
+        token=obj.token,
+        platform=obj.platform,
+        created_at=obj.created_at.isoformat() if obj.created_at else None,
+        last_seen_at=obj.last_seen_at.isoformat() if obj.last_seen_at else None,
+    )
+
+
+@router.get("/messages", response=List[UserMessageOut])
+def list_messages(request, unread_only: bool = False):
+    qs = UserMessage.objects.all()
+    if unread_only:
+        qs = qs.filter(read_at__isnull=True)
+    qs = qs.order_by("-created_at")[:100]
+    return [
+        UserMessageOut(
+            id=m.id,
+            title=m.title,
+            body=m.body,
+            kind=m.kind,
+            read_at=m.read_at.isoformat() if m.read_at else None,
+            created_at=m.created_at.isoformat() if m.created_at else None,
+        )
+        for m in qs
+    ]
+
+
+@router.patch("/messages/{message_id}/read", response=UserMessageOut)
+def mark_message_read(request, message_id: UUID):
+    try:
+        msg = UserMessage.objects.get(id=message_id)
+    except UserMessage.DoesNotExist:
+        raise HttpError(404, "Message not found")
+    if not msg.read_at:
+        msg.read_at = timezone.now()
+        msg.save(update_fields=["read_at"])
+    return UserMessageOut(
+        id=msg.id,
+        title=msg.title,
+        body=msg.body,
+        kind=msg.kind,
+        read_at=msg.read_at.isoformat() if msg.read_at else None,
+        created_at=msg.created_at.isoformat() if msg.created_at else None,
+    )
+
+
+@router.get("/call_sessions", response=List[CallSessionOut])
+def list_call_sessions(request, status: Optional[str] = None):
+    qs = CallSession.objects.all()
+    if status:
+        qs = qs.filter(status=status)
+    qs = qs.order_by("-created_at")[:100]
+    return [
+        CallSessionOut(
+            id=s.id,
+            goal=s.goal,
+            status=s.status,
+            scheduled_for=s.scheduled_for.isoformat() if s.scheduled_for else None,
+            ringing_started_at=s.ringing_started_at.isoformat() if s.ringing_started_at else None,
+            started_at=s.started_at.isoformat() if s.started_at else None,
+            ended_at=s.ended_at.isoformat() if s.ended_at else None,
+            summary=s.summary or "",
+            created_at=s.created_at.isoformat() if s.created_at else None,
+            updated_at=s.updated_at.isoformat() if s.updated_at else None,
+        )
+        for s in qs
+    ]
+
+
+@router.post("/call_sessions", response=CallSessionOut)
+def create_call(request, goal: str, scheduled_for: Optional[str] = None):
+    dt = _parse_dt(scheduled_for) if scheduled_for else None
+    session = create_call_session(goal=goal, scheduled_for=dt)
+    return CallSessionOut(
+        id=session.id,
+        goal=session.goal,
+        status=session.status,
+        scheduled_for=session.scheduled_for.isoformat() if session.scheduled_for else None,
+        ringing_started_at=session.ringing_started_at.isoformat() if session.ringing_started_at else None,
+        started_at=session.started_at.isoformat() if session.started_at else None,
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+        summary=session.summary or "",
+        created_at=session.created_at.isoformat() if session.created_at else None,
+        updated_at=session.updated_at.isoformat() if session.updated_at else None,
+    )
+
+
+@router.patch("/call_sessions/{session_id}", response=CallSessionOut)
+def update_call_session(
+    request,
+    session_id: UUID,
+    status: Optional[str] = None,
+):
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        raise HttpError(404, "Call session not found")
+
+    if status:
+        if status == CallSession.STATUS_IN_CALL:
+            accept_call(session)
+        elif status == CallSession.STATUS_COMPLETED:
+            complete_call(session)
+        elif status == CallSession.STATUS_MISSED:
+            mark_call_missed(session)
+        else:
+            session.status = status
+            session.save(update_fields=["status", "updated_at"])
+
+    return CallSessionOut(
+        id=session.id,
+        goal=session.goal,
+        status=session.status,
+        scheduled_for=session.scheduled_for.isoformat() if session.scheduled_for else None,
+        ringing_started_at=session.ringing_started_at.isoformat() if session.ringing_started_at else None,
+        started_at=session.started_at.isoformat() if session.started_at else None,
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+        summary=session.summary or "",
+        created_at=session.created_at.isoformat() if session.created_at else None,
+        updated_at=session.updated_at.isoformat() if session.updated_at else None,
+    )
+
+
+@router.post("/call_sessions/{session_id}/transcript", response=CallTranscriptEntryOut)
+def add_transcript_entry(
+    request,
+    session_id: UUID,
+    role: str,
+    content: str,
+):
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        raise HttpError(404, "Call session not found")
+    entry = CallTranscriptEntry.objects.create(session=session, role=role, content=content)
+    return CallTranscriptEntryOut(
+        id=entry.id,
+        role=entry.role,
+        content=entry.content,
+        created_at=entry.created_at.isoformat() if entry.created_at else None,
+    )
+
+
+@router.post("/call_sessions/{session_id}/notify")
+def notify_call_session(request, session_id: UUID):
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        raise HttpError(404, "Call session not found")
+    send_push_to_all(
+        title="Incoming call from Corv",
+        body=session.goal[:120],
+        data={"call_session_id": str(session.id), "type": "call_incoming"},
+    )
+    return {"ok": True}
+
+
+@router.post("/call_sessions/{session_id}/realtime_token")
+def create_realtime_token(request, session_id: UUID, model: Optional[str] = None):
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        raise HttpError(404, "Call session not found")
+
+    api_key = corv_settings.openai_key
+    if not api_key:
+        raise HttpError(500, "OpenAI key not configured")
+
+    model_name = model or "gpt-4o-realtime-preview-2024-12-17"
+    payload = {
+        "model": model_name,
+        "voice": "alloy",
+        "instructions": f"Call goal: {session.goal}. Be concise and helpful.",
+    }
+    try:
+        with httpx.Client(timeout=15) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/realtime/sessions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        raise HttpError(502, f"Failed to create realtime session: {exc}")
 
 
 @router.get("/scheduled_tasks", response=List[ScheduledTaskOut])

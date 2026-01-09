@@ -190,4 +190,8 @@ CELERY_BEAT_SCHEDULE = {
         "task": "orchestration.tasks.poll_scheduled_tasks",
         "schedule": 60.0,  # every minute
     },
+    "poll-call-sessions": {
+        "task": "orchestration.tasks.poll_call_sessions",
+        "schedule": 15.0,  # every 15 seconds
+    },
 }

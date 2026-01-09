@@ -18,6 +18,14 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
+import * as Notifications from "expo-notifications";
+import * as Device from "expo-device";
+import Constants from "expo-constants";
+import {
+  RTCPeerConnection,
+  RTCSessionDescription,
+  mediaDevices,
+} from "react-native-webrtc";
 import {
   cancelJob,
   createChat,
@@ -38,6 +46,14 @@ import {
   createScheduledTask,
   updateScheduledTask,
   fetchScheduledTaskRuns,
+  registerPushToken,
+  fetchMessages,
+  markMessageRead,
+  fetchCallSessions,
+  createCallSession,
+  updateCallSession,
+  addCallTranscriptEntry,
+  createRealtimeToken,
 } from "./src/api";
 import {
   ChatListItem,
@@ -49,11 +65,13 @@ import {
   UsageSummary,
   ScheduledTask,
   ScheduledTaskRun,
+  UserMessage,
+  CallSession,
 } from "./src/types";
 import { Audio } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 
-type TabKey = "chat" | "settings" | "calendar" | "scheduler";
+type TabKey = "chat" | "settings" | "calendar" | "scheduler" | "messages" | "calls";
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -146,6 +164,16 @@ function InnerApp() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskRuns, setTaskRuns] = useState<ScheduledTaskRun[]>([]);
   const [taskRunsLoading, setTaskRunsLoading] = useState(false);
+  const [messagesInbox, setMessagesInbox] = useState<UserMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [callSessions, setCallSessions] = useState<CallSession[]>([]);
+  const [callsLoading, setCallsLoading] = useState(false);
+  const [incomingCall, setIncomingCall] = useState<CallSession | null>(null);
+  const [activeCall, setActiveCall] = useState<CallSession | null>(null);
+  const [callConnecting, setCallConnecting] = useState(false);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const dataChannelRef = useRef<any>(null);
+  const localStreamRef = useRef<any>(null);
   const [summaryModalVisible, setSummaryModalVisible] = useState(false);
   const [summaryModalText, setSummaryModalText] = useState("");
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
@@ -188,6 +216,43 @@ function InnerApp() {
       })
       .finally(() => setAuthLoading(false));
   }, []);
+
+  useEffect(() => {
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldPlaySound: true,
+        shouldSetBadge: true,
+      }),
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!authed) return;
+    (async () => {
+      try {
+        if (!Device.isDevice) return;
+        const { status: existingStatus } = await Notifications.getPermissionsAsync();
+        let finalStatus = existingStatus;
+        if (existingStatus !== "granted") {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        if (finalStatus !== "granted") return;
+        const projectId =
+          Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
+        const token = await Notifications.getExpoPushTokenAsync({
+          projectId,
+        });
+        await registerPushToken({
+          token: token.data,
+          platform: Platform.OS,
+        });
+      } catch (err) {
+        // ignore push registration errors
+      }
+    })();
+  }, [authed]);
 
   useEffect(() => {
     if (!authed) return;
@@ -245,6 +310,26 @@ function InnerApp() {
     if (activeTab !== "scheduler") return;
     refreshScheduledTasks();
   }, [activeTab, authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (activeTab !== "messages") return;
+    refreshMessages();
+  }, [activeTab, authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (activeTab !== "calls") return;
+    refreshCallSessions();
+  }, [activeTab, authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    const id = setInterval(() => {
+      refreshCallSessions();
+    }, 15000);
+    return () => clearInterval(id);
+  }, [authed]);
 
   useEffect(() => {
     if (!authed) return;
@@ -539,6 +624,12 @@ function InnerApp() {
     }
   }
 
+  useEffect(() => {
+    return () => {
+      stopRealtimeCall();
+    };
+  }, []);
+
   async function handleToggleScheduledTask(task: ScheduledTask) {
     const nextStatus = task.status === "paused" ? "active" : "paused";
     try {
@@ -562,6 +653,147 @@ function InnerApp() {
       setSchedulerError(err.message || "Failed to load task runs");
     } finally {
       setTaskRunsLoading(false);
+    }
+  }
+
+  async function refreshMessages() {
+    try {
+      setMessagesLoading(true);
+      const msgs = await fetchMessages();
+      setMessagesInbox(msgs);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setError(err.message || "Failed to load messages");
+    } finally {
+      setMessagesLoading(false);
+    }
+  }
+
+  async function refreshCallSessions() {
+    try {
+      setCallsLoading(true);
+      const sessions = await fetchCallSessions();
+      setCallSessions(sessions);
+      const ringing = sessions.find((s) => s.status === "ringing");
+      if (ringing) {
+        setIncomingCall(ringing);
+      } else {
+        setIncomingCall(null);
+      }
+      if (activeCall && !sessions.find((s) => s.id === activeCall.id && s.status === "in_call")) {
+        setActiveCall(null);
+        await stopRealtimeCall();
+      }
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setError(err.message || "Failed to load call sessions");
+    } finally {
+      setCallsLoading(false);
+    }
+  }
+
+  async function stopRealtimeCall() {
+    dataChannelRef.current?.close?.();
+    dataChannelRef.current = null;
+    if (peerConnectionRef.current) {
+      peerConnectionRef.current.getSenders?.().forEach((sender: any) => {
+        sender.track?.stop?.();
+      });
+      peerConnectionRef.current.close();
+      peerConnectionRef.current = null;
+    }
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks?.().forEach((track: any) => track.stop());
+      localStreamRef.current = null;
+    }
+  }
+
+  function handleRealtimeMessage(sessionId: string, raw: string) {
+    try {
+      const evt = JSON.parse(raw);
+      const type = evt?.type || "";
+      const transcript =
+        evt?.transcript ||
+        evt?.text ||
+        evt?.delta ||
+        evt?.response?.text ||
+        evt?.response?.output_text;
+      if (type.includes("transcript") && transcript) {
+        addCallTranscriptEntry(sessionId, { role: "assistant", content: String(transcript) }).catch(() => undefined);
+      }
+      if (type.includes("input_audio_transcription") && transcript) {
+        addCallTranscriptEntry(sessionId, { role: "user", content: String(transcript) }).catch(() => undefined);
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  async function startRealtimeCall(session: CallSession) {
+    try {
+      setCallConnecting(true);
+      const tokenResp = await createRealtimeToken(session.id);
+      const clientSecret =
+        tokenResp?.client_secret?.value ||
+        tokenResp?.client_secret ||
+        tokenResp?.client_secret?.client_secret ||
+        tokenResp?.ephemeral_key ||
+        tokenResp?.token;
+      if (!clientSecret) {
+        throw new Error("Realtime token missing");
+      }
+
+      const pc = new RTCPeerConnection();
+      peerConnectionRef.current = pc;
+
+      pc.ondatachannel = (event: any) => {
+        dataChannelRef.current = event.channel;
+        event.channel.onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
+      };
+
+      const localStream = await mediaDevices.getUserMedia({ audio: true, video: false });
+      localStreamRef.current = localStream;
+      localStream.getTracks().forEach((track: any) => {
+        pc.addTrack(track, localStream);
+      });
+
+      const dataChannel = pc.createDataChannel("oai-events");
+      dataChannelRef.current = dataChannel;
+      dataChannel.onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
+
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+
+      const sdpResp = await fetch(
+        `https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${clientSecret}`,
+            "Content-Type": "application/sdp",
+          },
+          body: offer.sdp,
+        },
+      );
+      const answerSdp = await sdpResp.text();
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: answerSdp }));
+
+      dataChannel.onopen = () => {
+        dataChannel.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `Call goal: ${session.goal}. Be concise and helpful.`,
+            },
+          }),
+        );
+      };
+    } catch (err: any) {
+      setError(err.message || "Failed to start call");
+      await stopRealtimeCall();
+    } finally {
+      setCallConnecting(false);
     }
   }
 
@@ -704,7 +936,12 @@ function InnerApp() {
         onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
       >
         <Text style={styles.headerTitle}>Corv</Text>
-        <View style={styles.headerTabs}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.headerTabs}
+          contentContainerStyle={styles.headerTabsContent}
+        >
           <TouchableOpacity
             style={[styles.tabButton, activeTab === "chat" && styles.tabButtonActive]}
             onPress={() => setActiveTab("chat")}
@@ -743,7 +980,27 @@ function InnerApp() {
               Scheduler
             </Text>
           </TouchableOpacity>
-        </View>
+          <TouchableOpacity
+            style={[styles.tabButton, activeTab === "messages" && styles.tabButtonActive]}
+            onPress={() => setActiveTab("messages")}
+          >
+            <Text
+              style={[styles.tabButtonText, activeTab === "messages" && styles.tabButtonTextActive]}
+            >
+              Messages
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabButton, activeTab === "calls" && styles.tabButtonActive]}
+            onPress={() => setActiveTab("calls")}
+          >
+            <Text
+              style={[styles.tabButtonText, activeTab === "calls" && styles.tabButtonTextActive]}
+            >
+              Calls
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
       </View>
 
       {activeTab === "chat" ? (
@@ -1102,6 +1359,98 @@ function InnerApp() {
             <Text style={styles.muted}>Select a task to view logs.</Text>
           )}
         </ScrollView>
+      ) : activeTab === "messages" ? (
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <Text style={styles.sectionTitle}>Messages</Text>
+          {messagesLoading ? (
+            <ActivityIndicator />
+          ) : messagesInbox.length ? (
+            messagesInbox.map((msg) => (
+              <TouchableOpacity
+                key={msg.id}
+                style={[
+                  styles.calendarRow,
+                  !msg.read_at && styles.unreadCard,
+                ]}
+                onPress={async () => {
+                  if (!msg.read_at) {
+                    await markMessageRead(msg.id);
+                    await refreshMessages();
+                  }
+                }}
+              >
+                <Text style={styles.calendarTitle}>
+                  {msg.title || "Message"}
+                </Text>
+                <Text style={styles.muted}>{msg.body}</Text>
+                {msg.created_at && (
+                  <Text style={styles.muted}>{formatDateTime(msg.created_at)}</Text>
+                )}
+              </TouchableOpacity>
+            ))
+          ) : (
+            <Text style={styles.muted}>No messages yet.</Text>
+          )}
+        </ScrollView>
+      ) : activeTab === "calls" ? (
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <Text style={styles.sectionTitle}>Calls</Text>
+          {callsLoading ? (
+            <ActivityIndicator />
+          ) : callSessions.length ? (
+            callSessions.map((session) => (
+              <View key={session.id} style={styles.calendarRow}>
+                <Text style={styles.calendarTitle}>{session.goal}</Text>
+                <Text style={styles.muted}>Status: {session.status}</Text>
+                {session.scheduled_for && (
+                  <Text style={styles.muted}>
+                    Scheduled: {formatDateTime(session.scheduled_for)}
+                  </Text>
+                )}
+                {session.summary ? (
+                  <Text style={styles.muted}>TL;DR: {session.summary}</Text>
+                ) : null}
+                <View style={styles.rowActions}>
+                  {session.status === "ringing" && (
+                    <>
+                      <TouchableOpacity
+                        style={[styles.secondaryButton, styles.rowActionButton]}
+                        onPress={async () => {
+                          await updateCallSession(session.id, { status: "in_call" });
+                          setActiveCall(session);
+                          await startRealtimeCall(session);
+                          await refreshCallSessions();
+                        }}
+                      >
+                        <Text style={styles.secondaryButtonText}>Answer</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.secondaryButton}
+                        onPress={async () => {
+                          await updateCallSession(session.id, { status: "missed" });
+                          await refreshCallSessions();
+                        }}
+                      >
+                        <Text style={styles.secondaryButtonText}>Decline</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.muted}>No call sessions yet.</Text>
+          )}
+              <TouchableOpacity
+                style={styles.primaryButton}
+                onPress={async () => {
+                  await createCallSession({ goal: "Quick check-in call" });
+                  await refreshCallSessions();
+                }}
+              >
+                <Text style={styles.primaryButtonText}>Start test call</Text>
+              </TouchableOpacity>
+        </ScrollView>
       ) : (
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <Text style={styles.sectionTitle}>Calendar</Text>
@@ -1316,6 +1665,65 @@ function InnerApp() {
         </View>
       </Modal>
 
+      <Modal visible={!!incomingCall} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Incoming call</Text>
+            <Text style={styles.muted}>{incomingCall?.goal || "Call from Corv"}</Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.rowActionButton]}
+                onPress={async () => {
+                  if (!incomingCall) return;
+                  await updateCallSession(incomingCall.id, { status: "missed" });
+                  setIncomingCall(null);
+                  await refreshCallSessions();
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Decline</Text>
+              </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={async () => {
+                    if (!incomingCall) return;
+                    await updateCallSession(incomingCall.id, { status: "in_call" });
+                    setActiveCall(incomingCall);
+                    await startRealtimeCall(incomingCall);
+                    setIncomingCall(null);
+                    await refreshCallSessions();
+                  }}
+                >
+                <Text style={styles.primaryButtonText}>Answer</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!activeCall} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Call in progress</Text>
+            <Text style={styles.muted}>{activeCall?.goal || ""}</Text>
+            {callConnecting && <Text style={styles.muted}>Connecting…</Text>}
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={async () => {
+                  if (!activeCall) return;
+                  await updateCallSession(activeCall.id, { status: "completed" });
+                  await stopRealtimeCall();
+                  setActiveCall(null);
+                  await refreshCallSessions();
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>End call</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <StatusBar style="auto" />
     </SafeAreaView>
   );
@@ -1379,7 +1787,11 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   headerTabs: {
+    maxHeight: 42,
+  },
+  headerTabsContent: {
     flexDirection: "row",
+    paddingRight: 8,
   },
   tabButton: {
     paddingVertical: 8,
@@ -1735,6 +2147,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#1f2937",
     marginTop: 8,
+  },
+  unreadCard: {
+    borderColor: "#2ad1a3",
   },
   calendarLegend: {
     flexDirection: "row",

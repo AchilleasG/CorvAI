@@ -302,6 +302,54 @@ class ChatAIService:
         return ""
 
     @staticmethod
+    def summarize_call(context_text: str, model: str | None = None) -> str:
+        """
+        Summarize a call transcript and outcome in 1-2 sentences.
+        """
+        instructions = (
+            "You are Frontman. Summarize the call transcript and whether the goal was achieved. "
+            "Be short, concise, and human-readable. Limit to 1-2 sentences."
+        )
+
+        model_name = model or ModelConfigService.get_frontman_model()
+        provider = resolve_provider(model_name)
+
+        if provider == "openai":
+            input_seq = [
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": instructions}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": context_text}],
+                },
+            ]
+            resp = get_client("openai").responses.create(
+                model=model_name,
+                input=input_seq,
+                text={"format": {"type": "text"}, "verbosity": "low"},
+                reasoning={"effort": "low"},
+                tools=[],
+                store=False,
+                timeout=30,
+            )
+            return (getattr(resp, "output_text", None) or "").strip()
+
+        messages = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": context_text},
+        ]
+        resp = get_client("xai").chat.completions.create(
+            model=model_name,
+            messages=messages,
+            timeout=30,
+        )
+        if getattr(resp, "choices", None):
+            return (resp.choices[0].message.content or "").strip()  # type: ignore[assignment]
+        return ""
+
+    @staticmethod
     def transcribe_audio(
         audio_file_path: str,
         model: str = "whisper-1",
