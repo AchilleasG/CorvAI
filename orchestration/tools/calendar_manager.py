@@ -12,6 +12,7 @@ from orchestration.soft_scheduler import collect_window_state
 from orchestration.soft_planner import plan_soft_window
 from orchestration.services import SoftEventService
 
+from orchestration.models import SoftEvent, SoftEventSlot
 
 @register_function(
     manifest_id="calendar_manager.list_combined",
@@ -232,6 +233,29 @@ def update_event(**kwargs):
 )
 def delete_event(**kwargs):
     return gcal.delete_event(**kwargs)
+
+
+@register_function(
+    manifest_id="calendar_manager.delete_soft_event",
+    module="calendar_manager",
+    description="Delete (archive) a soft event and cancel its planned slots.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "soft_event_id": {"type": "string"},
+        },
+        "required": ["soft_event_id"],
+    },
+)
+def delete_soft_event(soft_event_id: str):
+    try:
+        se = SoftEvent.objects.get(id=soft_event_id)
+    except SoftEvent.DoesNotExist:
+        return {"deleted": 0, "canceled_slots": 0}
+    canceled = SoftEventSlot.objects.filter(soft_event=se).update(status=SoftEventSlot.STATUS_CANCELED)
+    se.status = SoftEvent.STATUS_ARCHIVED
+    se.save(update_fields=["status", "updated_at"])
+    return {"deleted": 1, "canceled_slots": canceled}
 
 
 @register_function(
