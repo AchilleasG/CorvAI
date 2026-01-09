@@ -10,6 +10,7 @@ from django.utils import timezone
 from orchestration.function_caller import FunctionCallOrchestrator
 from orchestration.schemas import FunctionCallPayload
 from orchestration.services import FunctionRunnerService, ModuleDirectory
+from openai_integration.services import ChatAIService
 from orchestration.models import (
     ScheduledTask,
     ScheduledTaskRun,
@@ -58,6 +59,26 @@ def _summarize_results(prior_results: List[Dict[str, Any]], summary: Any) -> str
     lines = [summary_text or "Completed calls."]
     lines.extend(f"- {r.get('function_id')}: {r.get('status')}" for r in prior_results)
     return "\n".join(lines)
+
+
+def _format_summary_context(
+    *,
+    prompt: str,
+    decision_summary: str,
+    prior_results: List[Dict[str, Any]],
+    max_chars: int = 6000,
+) -> str:
+    import json
+
+    payload = {
+        "prompt": prompt,
+        "decision_summary": decision_summary,
+        "function_caller_results": prior_results,
+    }
+    text = json.dumps(payload, ensure_ascii=False, default=str)
+    if len(text) > max_chars:
+        return f"{text[:max_chars]}... [truncated]"
+    return text
 
 
 def _plan_with_no_clarifications(
@@ -136,6 +157,15 @@ def execute_task(task: ScheduledTask, *, max_steps: int = 5) -> ScheduledTaskRun
 
         if not run.summary:
             run.summary = _summarize_results(prior_results, "Completed.")
+        try:
+            context = _format_summary_context(
+                prompt=task.prompt,
+                decision_summary=run.summary,
+                prior_results=prior_results,
+            )
+            run.summary = ChatAIService.summarize_scheduled_task(context)
+        except Exception:
+            pass
         run.status = ScheduledTaskRun.STATUS_COMPLETED
         log_run(run, f"TL;DR: {run.summary}", role="frontman")
     except Exception as exc:  # pragma: no cover

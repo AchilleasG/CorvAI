@@ -146,6 +146,8 @@ function InnerApp() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskRuns, setTaskRuns] = useState<ScheduledTaskRun[]>([]);
   const [taskRunsLoading, setTaskRunsLoading] = useState(false);
+  const [summaryModalVisible, setSummaryModalVisible] = useState(false);
+  const [summaryModalText, setSummaryModalText] = useState("");
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
@@ -1069,7 +1071,19 @@ function InnerApp() {
                   {run.started_at && (
                     <Text style={styles.muted}>{formatDateTime(run.started_at)}</Text>
                   )}
-                  {run.summary ? <Text style={styles.muted}>{run.summary}</Text> : null}
+                  {run.summary ? (
+                    <View style={styles.rowActions}>
+                      <TouchableOpacity
+                        style={[styles.secondaryButton, styles.rowActionButton]}
+                        onPress={() => {
+                          setSummaryModalText(run.summary);
+                          setSummaryModalVisible(true);
+                        }}
+                      >
+                        <Text style={styles.secondaryButtonText}>TL;DR</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
                   {run.log_entries?.length ? (
                     run.log_entries.map((entry) => (
                       <View key={entry.id} style={styles.jobLogRow}>
@@ -1273,6 +1287,26 @@ function InnerApp() {
                   setJobLogVisible(false);
                   setJobLogAnchorId(null);
                   setJobLogMessages([]);
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={summaryModalVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>TL;DR</Text>
+            <Text style={styles.muted}>{summaryModalText || "No summary yet."}</Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={() => {
+                  setSummaryModalVisible(false);
+                  setSummaryModalText("");
                 }}
               >
                 <Text style={styles.secondaryButtonText}>Close</Text>
