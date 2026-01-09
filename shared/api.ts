@@ -199,7 +199,7 @@ export function createApi(config: ApiConfig) {
         },
       );
     },
-    fetchMessages(params: { unread_only?: boolean } = {}) {
+    fetchInboxMessages(params: { unread_only?: boolean } = {}) {
       const qs = params.unread_only ? "?unread_only=true" : "";
       return request<UserMessage[]>(config, `/orchestration/messages${qs}`);
     },
@@ -213,15 +213,22 @@ export function createApi(config: ApiConfig) {
       return request<CallSession[]>(config, `/orchestration/call_sessions${qs}`);
     },
     createCallSession(payload: { goal: string; scheduled_for?: string }) {
-      return request<CallSession>(config, `/orchestration/call_sessions`, {
+      const params = new URLSearchParams({ goal: payload.goal });
+      if (payload.scheduled_for) {
+        params.set("scheduled_for", payload.scheduled_for);
+      }
+      return request<CallSession>(config, `/orchestration/call_sessions?${params.toString()}`, {
         method: "POST",
-        body: JSON.stringify(payload),
       });
     },
     updateCallSession(session_id: string, payload: { status?: string }) {
-      return request<CallSession>(config, `/orchestration/call_sessions/${session_id}`, {
+      const params = new URLSearchParams();
+      if (payload.status) {
+        params.set("status", payload.status);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return request<CallSession>(config, `/orchestration/call_sessions/${session_id}${suffix}`, {
         method: "PATCH",
-        body: JSON.stringify(payload),
       });
     },
     addCallTranscriptEntry(session_id: string, payload: { role: string; content: string }) {

@@ -47,7 +47,7 @@ import {
   updateScheduledTask,
   fetchScheduledTaskRuns,
   registerPushToken,
-  fetchMessages,
+  fetchInboxMessages,
   markMessageRead,
   fetchCallSessions,
   createCallSession,
@@ -659,7 +659,7 @@ function InnerApp() {
   async function refreshMessages() {
     try {
       setMessagesLoading(true);
-      const msgs = await fetchMessages();
+      const msgs = await fetchInboxMessages();
       setMessagesInbox(msgs);
     } catch (err: any) {
       if (handleAuthError(err)) return;
@@ -1444,8 +1444,12 @@ function InnerApp() {
               <TouchableOpacity
                 style={styles.primaryButton}
                 onPress={async () => {
-                  await createCallSession({ goal: "Quick check-in call" });
-                  await refreshCallSessions();
+                  try {
+                    await createCallSession({ goal: "Quick check-in call" });
+                    await refreshCallSessions();
+                  } catch (error: any) {
+                    Alert.alert("Call failed", error?.message || "Unable to create call session.");
+                  }
                 }}
               >
                 <Text style={styles.primaryButtonText}>Start test call</Text>
@@ -1709,12 +1713,16 @@ function InnerApp() {
             <View style={styles.modalActions}>
               <TouchableOpacity
                 style={styles.secondaryButton}
-                onPress={async () => {
+                onPress={() => {
                   if (!activeCall) return;
-                  await updateCallSession(activeCall.id, { status: "completed" });
-                  await stopRealtimeCall();
+                  const sessionId = activeCall.id;
                   setActiveCall(null);
-                  await refreshCallSessions();
+                  setCallConnecting(false);
+                  void stopRealtimeCall();
+                  void updateCallSession(sessionId, { status: "completed" }).catch((err: any) =>
+                    setError(err?.message || "Failed to end call"),
+                  );
+                  void refreshCallSessions();
                 }}
               >
                 <Text style={styles.secondaryButtonText}>End call</Text>
