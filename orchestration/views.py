@@ -8,8 +8,16 @@ from datetime import timedelta
 from django.utils import timezone
 from datetime import datetime
 
-from orchestration.api_schemas import JobOut
-from orchestration.models import Job, UsageEvent, SoftEvent, SoftEventSlot
+from orchestration.api_schemas import JobOut, ScheduledTaskOut, ScheduledTaskRunOut, ScheduledTaskLogOut
+from orchestration.models import (
+    Job,
+    UsageEvent,
+    SoftEvent,
+    SoftEventSlot,
+    ScheduledTask,
+    ScheduledTaskRun,
+    ScheduledTaskLogEntry,
+)
 from orchestration.services import JobService, ModelConfigService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
@@ -130,6 +138,105 @@ def get_settings(request):
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }
+
+
+@router.get("/scheduled_tasks", response=List[ScheduledTaskOut])
+def list_scheduled_tasks(request):
+    tasks = ScheduledTask.objects.all().order_by("status", "next_run_at", "-created_at")
+    return [ScheduledTaskOut.from_model(t) for t in tasks]
+
+
+@router.post("/scheduled_tasks", response=ScheduledTaskOut)
+def create_scheduled_task(
+    request,
+    prompt: str,
+    start_at: Optional[str] = None,
+    recurrence: str = ScheduledTask.RECURRENCE_ONCE,
+):
+    if recurrence not in dict(ScheduledTask.RECURRENCE_CHOICES):
+        raise HttpError(400, "Invalid recurrence value")
+    start_dt = _parse_dt(start_at) or timezone.now()
+    task = ScheduledTask.objects.create(
+        prompt=prompt,
+        recurrence=recurrence,
+        start_at=start_dt,
+        next_run_at=start_dt,
+        status=ScheduledTask.STATUS_ACTIVE,
+    )
+    return ScheduledTaskOut.from_model(task)
+
+
+@router.patch("/scheduled_tasks/{task_id}", response=ScheduledTaskOut)
+def update_scheduled_task(
+    request,
+    task_id: UUID,
+    prompt: Optional[str] = None,
+    start_at: Optional[str] = None,
+    recurrence: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    try:
+        task = ScheduledTask.objects.get(id=task_id)
+    except ScheduledTask.DoesNotExist:
+        raise HttpError(404, "Scheduled task not found")
+
+    if recurrence and recurrence not in dict(ScheduledTask.RECURRENCE_CHOICES):
+        raise HttpError(400, "Invalid recurrence value")
+    if status and status not in dict(ScheduledTask.STATUS_CHOICES):
+        raise HttpError(400, "Invalid status value")
+
+    if prompt is not None:
+        task.prompt = prompt
+    if recurrence is not None:
+        task.recurrence = recurrence
+    if start_at is not None:
+        dt = _parse_dt(start_at)
+        if not dt:
+            raise HttpError(400, "Invalid start_at datetime")
+        task.start_at = dt
+        task.next_run_at = dt if task.status == ScheduledTask.STATUS_ACTIVE else task.next_run_at
+    if status is not None:
+        task.status = status
+        if status == ScheduledTask.STATUS_ACTIVE and task.next_run_at is None:
+            task.next_run_at = task.start_at
+        if status != ScheduledTask.STATUS_ACTIVE:
+            task.is_running = False
+
+    task.save(update_fields=["prompt", "recurrence", "start_at", "next_run_at", "status", "is_running", "updated_at"])
+    return ScheduledTaskOut.from_model(task)
+
+
+@router.get("/scheduled_tasks/{task_id}/runs", response=List[ScheduledTaskRunOut])
+def list_scheduled_task_runs(request, task_id: UUID):
+    try:
+        task = ScheduledTask.objects.get(id=task_id)
+    except ScheduledTask.DoesNotExist:
+        raise HttpError(404, "Scheduled task not found")
+    runs = ScheduledTaskRun.objects.filter(task=task).order_by("-started_at")[:50]
+    out = []
+    for run in runs:
+        logs = ScheduledTaskLogEntry.objects.filter(run=run).order_by("created_at")
+        out.append(
+            ScheduledTaskRunOut(
+                id=run.id,
+                status=run.status,
+                started_at=run.started_at.isoformat() if run.started_at else None,
+                finished_at=run.finished_at.isoformat() if run.finished_at else None,
+                summary=run.summary or "",
+                error_summary=run.error_summary or "",
+                log_entries=[
+                    ScheduledTaskLogOut(
+                        id=entry.id,
+                        role=entry.role,
+                        level=entry.level,
+                        message=entry.message,
+                        created_at=entry.created_at.isoformat() if entry.created_at else None,
+                    )
+                    for entry in logs
+                ],
+            )
+        )
+    return out
 
 
 @router.post("/settings")

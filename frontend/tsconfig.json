@@ -13,5 +13,5 @@
     "strict": true,
     "baseUrl": "."
   },
-  "include": ["src"]
+  "include": ["src", "../shared"]
 }

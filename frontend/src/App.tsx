@@ -15,8 +15,22 @@ import {
   fetchSettings,
   updateSettings,
   fetchCalendarCombined,
+  fetchScheduledTasks,
+  createScheduledTask,
+  updateScheduledTask,
+  fetchScheduledTaskRuns,
 } from "./api";
-import { ChatListItem, Message, Job, UsageEvent, UsageSummary, SettingsPayload, CombinedCalendar } from "./types";
+import {
+  ChatListItem,
+  Message,
+  Job,
+  UsageEvent,
+  UsageSummary,
+  SettingsPayload,
+  CombinedCalendar,
+  ScheduledTask,
+  ScheduledTaskRun,
+} from "./types";
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -132,6 +146,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [showScheduler, setShowScheduler] = useState(false);
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -159,6 +174,12 @@ export default function App() {
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
+  const [schedulerError, setSchedulerError] = useState<string | null>(null);
+  const [schedulerLoading, setSchedulerLoading] = useState(false);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [taskRuns, setTaskRuns] = useState<ScheduledTaskRun[]>([]);
+  const [taskRunsLoading, setTaskRunsLoading] = useState(false);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -204,6 +225,12 @@ export default function App() {
       })
       .finally(() => setCalendarLoading(false));
   }, [authed, showCalendar]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showScheduler) return;
+    refreshScheduledTasks();
+  }, [authed, showScheduler]);
 
   useEffect(() => {
     if (!authed) return;
@@ -313,6 +340,74 @@ export default function App() {
     setSavingSettings(false);
   }
 }
+
+  async function refreshScheduledTasks() {
+    try {
+      setSchedulerLoading(true);
+      setSchedulerError(null);
+      const data = await fetchScheduledTasks();
+      setScheduledTasks(data);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSchedulerError(err.message || "Failed to load scheduled tasks");
+    } finally {
+      setSchedulerLoading(false);
+    }
+  }
+
+  async function handleCreateScheduledTask(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setSchedulerError(null);
+    const formData = new FormData(e.currentTarget);
+    const prompt = (formData.get("prompt") as string) || "";
+    const recurrence = (formData.get("recurrence") as string) || "once";
+    const startRaw = (formData.get("start_at") as string) || "";
+    if (!prompt.trim()) {
+      setSchedulerError("Prompt is required");
+      return;
+    }
+    try {
+      const payload: { prompt: string; recurrence: string; start_at?: string } = {
+        prompt: prompt.trim(),
+        recurrence,
+      };
+      if (startRaw) {
+        payload.start_at = new Date(startRaw).toISOString();
+      }
+      await createScheduledTask(payload);
+      e.currentTarget.reset();
+      await refreshScheduledTasks();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSchedulerError(err.message || "Failed to create scheduled task");
+    }
+  }
+
+  async function handleToggleScheduledTask(task: ScheduledTask) {
+    const nextStatus = task.status === "paused" ? "active" : "paused";
+    try {
+      await updateScheduledTask(task.id, { status: nextStatus });
+      await refreshScheduledTasks();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSchedulerError(err.message || "Failed to update scheduled task");
+    }
+  }
+
+  async function handleLoadRuns(taskId: string) {
+    try {
+      setTaskRunsLoading(true);
+      setTaskRuns([]);
+      setSelectedTaskId(taskId);
+      const runs = await fetchScheduledTaskRuns(taskId);
+      setTaskRuns(runs);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSchedulerError(err.message || "Failed to load task runs");
+    } finally {
+      setTaskRunsLoading(false);
+    }
+  }
 
   async function refreshChats(preferredActiveId?: string | null) {
     try {
@@ -657,6 +752,7 @@ export default function App() {
                         setActiveChatId(chat.chat_id);
                         setShowSettings(false);
                         setShowCalendar(false);
+                        setShowScheduler(false);
                       }}
                     >
                       <span>{formatChatLabel(chat)}</span>
@@ -977,6 +1073,140 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : showScheduler ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Scheduler</p>
+                <h2>Scheduled tasks</h2>
+              </div>
+              <div className="main-actions">
+                <button className="ghost" onClick={() => setShowScheduler(false)}>Back to chat</button>
+              </div>
+            </header>
+            <div className="settings-grid">
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">New</p>
+                    <h3>Create task</h3>
+                    <p className="muted small">Tasks run without user clarification.</p>
+                  </div>
+                </div>
+                <form onSubmit={handleCreateScheduledTask} className="settings-form">
+                  {schedulerError && <div className="error-banner">{schedulerError}</div>}
+                  <label className="field">
+                    <span>Prompt</span>
+                    <textarea name="prompt" rows={5} placeholder="Describe the task..." />
+                  </label>
+                  <label className="field">
+                    <span>Start time (local)</span>
+                    <input name="start_at" type="datetime-local" />
+                  </label>
+                  <label className="field">
+                    <span>Recurrence</span>
+                    <select name="recurrence" defaultValue="once">
+                      <option value="once">once</option>
+                      <option value="daily">daily</option>
+                      <option value="weekly">weekly</option>
+                      <option value="monthly">monthly</option>
+                    </select>
+                  </label>
+                  <div className="actions-row">
+                    <button className="primary" type="submit">Schedule</button>
+                  </div>
+                </form>
+              </div>
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Tasks</p>
+                    <h3>Upcoming</h3>
+                  </div>
+                  <button className="ghost" onClick={refreshScheduledTasks} disabled={schedulerLoading}>
+                    {schedulerLoading ? "Refreshing…" : "Refresh"}
+                  </button>
+                </div>
+                {scheduledTasks.length ? (
+                  <div className="calendar-list">
+                    {scheduledTasks.map((task) => (
+                      <div key={task.id} className="cal-row">
+                        <div style={{ flex: 1 }}>
+                          <div className="cal-title">{task.prompt.slice(0, 80)}</div>
+                          <div className="cal-time muted">
+                            Next: {task.next_run_at ? new Date(task.next_run_at).toLocaleString() : "—"}
+                          </div>
+                          <div className="muted small">Recurrence: {task.recurrence}</div>
+                        </div>
+                        <div className="chat-actions">
+                          <button className="ghost pill-action" onClick={() => handleLoadRuns(task.id)}>
+                            Logs
+                          </button>
+                          {task.status !== "completed" && (
+                            <button className="ghost pill-action" onClick={() => handleToggleScheduledTask(task)}>
+                              {task.status === "paused" ? "Resume" : "Pause"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No scheduled tasks yet.</p>
+                )}
+              </div>
+              <div className="card full">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Runs</p>
+                    <h3>Task logs</h3>
+                  </div>
+                </div>
+                {taskRunsLoading ? (
+                  <div className="muted">Loading runs…</div>
+                ) : selectedTaskId ? (
+                  taskRuns.length ? (
+                    <div className="calendar-list">
+                      {taskRuns.map((run) => (
+                        <div key={run.id} className="cal-row">
+                          <div style={{ flex: 1 }}>
+                            <div className="cal-title">{run.status.toUpperCase()}</div>
+                            <div className="cal-time muted">
+                              {run.started_at ? new Date(run.started_at).toLocaleString() : "—"}
+                            </div>
+                            {run.summary && <div className="muted small">{run.summary}</div>}
+                            {run.error_summary && <div className="alert">{run.error_summary}</div>}
+                            {run.log_entries?.length ? (
+                              <div className="messages" style={{ marginTop: "0.5rem" }}>
+                                {run.log_entries.map((entry) => (
+                                  <div key={entry.id} className="message tool">
+                                    <div className="message-meta">
+                                      <span className="badge badge-system">{entry.role}</span>
+                                      {entry.created_at && (
+                                        <span className="timestamp">
+                                          {new Date(entry.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                        </span>
+                                      )}
+                                      <span className="tag">{entry.level}</span>
+                                    </div>
+                                    <div className="message-text">{entry.message}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">No runs yet.</p>
+                  )
+                ) : (
+                  <p className="muted">Select a task to view its logs.</p>
+                )}
+              </div>
+            </div>
+          </div>
         ) : (
           <>
             <header className="main-header">
@@ -1054,6 +1284,7 @@ export default function App() {
                   onClick={() => {
                     setShowSettings(false);
                     setShowCalendar(true);
+                    setShowScheduler(false);
                   }}
                 >
                   Calendar
@@ -1062,7 +1293,18 @@ export default function App() {
                   className="ghost"
                   onClick={() => {
                     setShowCalendar(false);
+                    setShowSettings(false);
+                    setShowScheduler(true);
+                  }}
+                >
+                  Scheduler
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalendar(false);
                     setShowSettings(true);
+                    setShowScheduler(false);
                   }}
                 >
                   Settings

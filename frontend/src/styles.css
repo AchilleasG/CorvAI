@@ -326,7 +326,8 @@ body {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   background: var(--panel);
   border: 1px solid var(--border);
   color: var(--text);
@@ -336,7 +337,8 @@ body {
 }
 
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   outline: 1px solid var(--accent);
 }
 

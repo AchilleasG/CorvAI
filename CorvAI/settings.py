@@ -186,4 +186,8 @@ CELERY_BEAT_SCHEDULE = {
         "task": "orchestration.tasks.poll_soft_events_task",
         "schedule": 300.0,  # every 5 minutes
     },
+    "poll-scheduled-tasks": {
+        "task": "orchestration.tasks.poll_scheduled_tasks",
+        "schedule": 60.0,  # every minute
+    },
 }

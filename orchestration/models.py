@@ -374,6 +374,117 @@ class SoftEventSlot(models.Model):
         return f"{self.soft_event.title} @ {self.start_at}"
 
 
+class ScheduledTask(models.Model):
+    """
+    Prompt-driven tasks executed by the Function Caller at a future time.
+    """
+
+    STATUS_ACTIVE = "active"
+    STATUS_PAUSED = "paused"
+    STATUS_COMPLETED = "completed"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_PAUSED, "Paused"),
+        (STATUS_COMPLETED, "Completed"),
+    ]
+
+    RECURRENCE_ONCE = "once"
+    RECURRENCE_DAILY = "daily"
+    RECURRENCE_WEEKLY = "weekly"
+    RECURRENCE_MONTHLY = "monthly"
+
+    RECURRENCE_CHOICES = [
+        (RECURRENCE_ONCE, "Once"),
+        (RECURRENCE_DAILY, "Daily"),
+        (RECURRENCE_WEEKLY, "Weekly"),
+        (RECURRENCE_MONTHLY, "Monthly"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    prompt = models.TextField()
+    recurrence = models.CharField(
+        max_length=16, choices=RECURRENCE_CHOICES, default=RECURRENCE_ONCE
+    )
+    start_at = models.DateTimeField()
+    next_run_at = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    is_running = models.BooleanField(default=False)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["next_run_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["status", "next_run_at"]),
+            models.Index(fields=["is_running"]),
+        ]
+
+    def __str__(self):
+        return f"ScheduledTask {self.id}"
+
+
+class ScheduledTaskRun(models.Model):
+    """
+    Execution record for a scheduled task.
+    """
+
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_RUNNING, "Running"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(ScheduledTask, on_delete=models.CASCADE, related_name="runs")
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+    summary = models.TextField(blank=True, default="")
+    error_summary = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+        indexes = [
+            models.Index(fields=["task", "started_at"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"ScheduledTaskRun {self.id}"
+
+
+class ScheduledTaskLogEntry(models.Model):
+    """
+    Append-only log entries for scheduled task runs.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(
+        ScheduledTaskRun, on_delete=models.CASCADE, related_name="log_entries"
+    )
+    role = models.CharField(max_length=32, blank=True, default="system")
+    level = models.CharField(max_length=16, blank=True, default="info")
+    message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["run", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id} {self.level}"
+
+
 class FrontmanPersona(models.Model):
     """
     Stores persona/instructions for the Front Man layer.
