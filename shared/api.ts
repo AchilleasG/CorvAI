@@ -232,12 +232,15 @@ export function createApi(config: ApiConfig) {
       });
     },
     addCallTranscriptEntry(session_id: string, payload: { role: string; content: string }) {
+      const params = new URLSearchParams({
+        role: payload.role,
+        content: payload.content,
+      });
       return request<CallTranscriptEntry>(
         config,
-        `/orchestration/call_sessions/${session_id}/transcript`,
+        `/orchestration/call_sessions/${session_id}/transcript?${params.toString()}`,
         {
           method: "POST",
-          body: JSON.stringify(payload),
         },
       );
     },

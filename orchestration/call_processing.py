@@ -105,7 +105,7 @@ def should_end_call(session: CallSession, max_entries: int = 12) -> bool:
     for entry in entries:
         lines.append(f"{entry.role}: {entry.content}")
     context = f"Goal: {session.goal}\n\nTranscript:\n" + "\n".join(lines)
-    decision = ChatAIService.should_end_call(context)
+    decision = ChatAIService.should_end_call(context, model="gpt-5-micro")
     logger.info(
         "call_monitor decision=%s session=%s transcript=%s",
         decision,

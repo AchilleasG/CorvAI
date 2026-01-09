@@ -171,12 +171,16 @@ function InnerApp() {
   const [incomingCall, setIncomingCall] = useState<CallSession | null>(null);
   const [activeCall, setActiveCall] = useState<CallSession | null>(null);
   const [callConnecting, setCallConnecting] = useState(false);
+  const [callLiveTranscript, setCallLiveTranscript] = useState<string[]>([]);
+  const [callTranscriptError, setCallTranscriptError] = useState<string | null>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
   const endCallRef = useRef(false);
   const endSignalReceivedRef = useRef(false);
   const endSignalPromptedRef = useRef(false);
+  const outputTextBufferRef = useRef("");
+  const lastAssistantTextRef = useRef("");
   const [summaryModalVisible, setSummaryModalVisible] = useState(false);
   const [summaryModalText, setSummaryModalText] = useState("");
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
@@ -727,6 +731,23 @@ function InnerApp() {
     }, 1000);
   }
 
+  function appendLiveTranscript(line: string) {
+    setCallLiveTranscript((prev) => {
+      const next = [...prev, line];
+      if (next.length > 20) {
+        return next.slice(next.length - 20);
+      }
+      return next;
+    });
+  }
+
+  function recordTranscriptError(err: any) {
+    if (!err) return;
+    const status = err?.status ? ` (status ${err.status})` : "";
+    const message = err?.message || "Transcript post failed";
+    setCallTranscriptError(`${message}${status}`);
+  }
+
   function handleRealtimeMessage(sessionId: string, raw: string) {
     try {
       const evt = JSON.parse(raw);
@@ -768,13 +789,41 @@ function InnerApp() {
         const text = String(transcript);
         const cleaned = text.replace(/\[END_CALL\]/g, "").trim();
         if (cleaned) {
+          appendLiveTranscript(`assistant: ${cleaned}`);
           addCallTranscriptEntry(sessionId, { role: "assistant", content: cleaned })
             .then((resp) => {
               if (resp?.end_call) {
                 endCallNow(sessionId);
               }
             })
-            .catch(() => undefined);
+            .catch(recordTranscriptError);
+        }
+      }
+      const isOutputDelta = type.includes("output_text.delta");
+      const isOutputDone =
+        type.includes("output_text.done") ||
+        type.includes("response.completed") ||
+        type.includes("response.done");
+      if (isOutputDelta && typeof outputText === "string") {
+        outputTextBufferRef.current += outputText;
+      }
+      if (isOutputDone) {
+        const buffered = outputTextBufferRef.current;
+        const text = (buffered || (typeof outputText === "string" ? outputText : "")).trim();
+        outputTextBufferRef.current = "";
+        if (text && text !== lastAssistantTextRef.current) {
+          lastAssistantTextRef.current = text;
+          const cleaned = text.replace(/\[END_CALL\]/g, "").trim();
+          if (cleaned) {
+            appendLiveTranscript(`assistant: ${cleaned}`);
+            addCallTranscriptEntry(sessionId, { role: "assistant", content: cleaned })
+              .then((resp) => {
+                if (resp?.end_call) {
+                  endCallNow(sessionId);
+                }
+              })
+              .catch(recordTranscriptError);
+          }
         }
       }
       if (endSignal) {
@@ -783,7 +832,13 @@ function InnerApp() {
         return;
       }
       if (type.includes("input_audio_transcription") && transcript) {
-        addCallTranscriptEntry(sessionId, { role: "user", content: String(transcript) }).catch(() => undefined);
+        const text = String(transcript).trim();
+        if (text) {
+          appendLiveTranscript(`user: ${text}`);
+        }
+        addCallTranscriptEntry(sessionId, { role: "user", content: String(transcript) }).catch(
+          recordTranscriptError,
+        );
       }
       if (
         (type.includes("response.completed") || type.includes("response.done")) &&
@@ -811,6 +866,10 @@ function InnerApp() {
       setCallConnecting(true);
       endSignalReceivedRef.current = false;
       endSignalPromptedRef.current = false;
+      outputTextBufferRef.current = "";
+      lastAssistantTextRef.current = "";
+      setCallLiveTranscript([]);
+      setCallTranscriptError(null);
       const tokenResp = await createRealtimeToken(session.id);
       const clientSecret =
         tokenResp?.client_secret?.value ||
@@ -1792,6 +1851,20 @@ function InnerApp() {
             <Text style={styles.sectionTitle}>Call in progress</Text>
             <Text style={styles.muted}>{activeCall?.goal || ""}</Text>
             {callConnecting && <Text style={styles.muted}>Connecting…</Text>}
+            {callTranscriptError && (
+              <Text style={styles.errorText}>Transcript error: {callTranscriptError}</Text>
+            )}
+            {callLiveTranscript.length > 0 && (
+              <View style={styles.callTranscriptBox}>
+                <ScrollView>
+                  {callLiveTranscript.map((line, idx) => (
+                    <Text key={`${line}-${idx}`} style={styles.callTranscriptLine}>
+                      {line}
+                    </Text>
+                  ))}
+                </ScrollView>
+              </View>
+            )}
             <View style={styles.modalActions}>
               <TouchableOpacity
                 style={styles.secondaryButton}
@@ -2351,6 +2424,20 @@ const styles = StyleSheet.create({
     padding: 20,
     borderWidth: 1,
     borderColor: "#1f2937",
+  },
+  callTranscriptBox: {
+    marginTop: 12,
+    maxHeight: 160,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#1f2937",
+    padding: 10,
+    backgroundColor: "#0b1220",
+  },
+  callTranscriptLine: {
+    color: "#d7ddea",
+    fontSize: 12,
+    marginBottom: 6,
   },
   jobLogList: {
     marginTop: 10,
