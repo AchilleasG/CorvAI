@@ -51,10 +51,11 @@ def log_run(run: ScheduledTaskRun, message: str, *, role: str = "system", level:
     ScheduledTaskLogEntry.objects.create(run=run, role=role, level=level, message=message)
 
 
-def _summarize_results(prior_results: List[Dict[str, Any]], summary: str) -> str:
+def _summarize_results(prior_results: List[Dict[str, Any]], summary: Any) -> str:
+    summary_text = summary if isinstance(summary, str) else (str(summary) if summary is not None else "")
     if not prior_results:
-        return summary or "No actions taken."
-    lines = [summary or "Completed calls."]
+        return summary_text or "No actions taken."
+    lines = [summary_text or "Completed calls."]
     lines.extend(f"- {r.get('function_id')}: {r.get('status')}" for r in prior_results)
     return "\n".join(lines)
 
