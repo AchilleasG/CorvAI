@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
+import logging
 from django.utils import timezone
 
 from orchestration.function_caller import FunctionCallOrchestrator
@@ -15,6 +16,7 @@ from orchestration.schemas import FunctionCallPayload
 from orchestration.services import FunctionRunnerService, ModuleDirectory
 from openai_integration.services import ChatAIService
 
+logger = logging.getLogger(__name__)
 
 NO_CLARIFICATION_NOTE = (
     "No user clarifications are available. Do not ask the user; make reasonable "
@@ -103,7 +105,14 @@ def should_end_call(session: CallSession, max_entries: int = 12) -> bool:
     for entry in entries:
         lines.append(f"{entry.role}: {entry.content}")
     context = f"Goal: {session.goal}\n\nTranscript:\n" + "\n".join(lines)
-    return ChatAIService.should_end_call(context)
+    decision = ChatAIService.should_end_call(context)
+    logger.info(
+        "call_monitor decision=%s session=%s transcript=%s",
+        decision,
+        session.id,
+        "\\n".join(lines),
+    )
+    return decision
 
 
 def _plan_with_no_clarifications(

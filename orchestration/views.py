@@ -1,4 +1,5 @@
 from typing import List, Optional
+import logging
 from uuid import UUID
 from ninja import Router
 from ninja.errors import HttpError
@@ -47,6 +48,7 @@ from chat.schemas import MessageOut
 from orchestration.tools.calendar import list_events
 
 router = Router(tags=["orchestration"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/jobs", response=List[JobOut])
@@ -305,6 +307,7 @@ def add_transcript_entry(
     except CallSession.DoesNotExist:
         raise HttpError(404, "Call session not found")
     entry = CallTranscriptEntry.objects.create(session=session, role=role, content=content)
+    logger.info("call_transcript session=%s role=%s content=%s", session.id, role, content)
     end_call = False
     if session.status == CallSession.STATUS_IN_CALL and role == "assistant":
         try:
@@ -313,6 +316,7 @@ def add_transcript_entry(
             end_call = False
         if end_call:
             complete_call(session)
+    logger.info("call_monitor_result session=%s end_call=%s", session.id, end_call)
     return CallTranscriptEntryOut(
         id=entry.id,
         role=entry.role,
