@@ -34,7 +34,7 @@ class FunctionCallOrchestrator:
         user_request: str,
         tool_catalog: List[Dict[str, Any]],
         prior_results: List[Dict[str, Any]],
-        model: str = "gpt-5.2",
+        model: str = "gpt-5-mini",
         cache_mode: str = "off",
         job: Optional[Job] = None,
         chat_id: Optional[str] = None,

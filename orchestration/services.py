@@ -555,8 +555,8 @@ class ModelConfigService:
     Accessor for dynamic model selection stored in OrchestrationSetting.
     """
 
-    DEFAULT_FRONTMAN_MODEL = "gpt-5.2"
-    DEFAULT_CALLER_MODEL = "gpt-5.2"
+    DEFAULT_FRONTMAN_MODEL = "gpt-5-mini"
+    DEFAULT_CALLER_MODEL = "gpt-5-mini"
     DEFAULT_CACHE_MODE = "off"
     DEFAULT_PRICING_JSON = "{}"
     DEFAULT_USER_INFO_EMBED_MODEL = "text-embedding-3-small"

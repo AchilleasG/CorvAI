@@ -827,8 +827,8 @@ export default function App() {
                     <p className="muted small">Tune how Corv routes requests between Frontman and Caller.</p>
                   </div>
                   <div className="pill-stack">
-                    <span className="pill">Frontman: {settings.frontman_model || "gpt-5.2"}</span>
-                    <span className="pill">Caller: {settings.caller_model || "gpt-5.2"}</span>
+                    <span className="pill">Frontman: {settings.frontman_model || "gpt-5-mini"}</span>
+                    <span className="pill">Caller: {settings.caller_model || "gpt-5-mini"}</span>
                     <span className="pill">Cache: {settings.cache_mode || "off"}</span>
                     <span className="pill">
                       Max result: {settings.max_function_result_chars ?? "6000"} chars
@@ -840,11 +840,11 @@ export default function App() {
                   <div className="form-grid">
                     <label className="field">
                       <span>Frontman model</span>
-                      <input name="frontman_model" defaultValue={settings.frontman_model || "gpt-5.2"} />
+                      <input name="frontman_model" defaultValue={settings.frontman_model || "gpt-5-mini"} />
                     </label>
                     <label className="field">
                       <span>Caller model</span>
-                      <input name="caller_model" defaultValue={settings.caller_model || "gpt-5.2"} />
+                      <input name="caller_model" defaultValue={settings.caller_model || "gpt-5-mini"} />
                     </label>
                     <label className="field">
                       <span>Cache mode</span>

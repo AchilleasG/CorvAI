@@ -174,6 +174,7 @@ function InnerApp() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
+  const endCallRef = useRef(false);
   const [summaryModalVisible, setSummaryModalVisible] = useState(false);
   const [summaryModalText, setSummaryModalText] = useState("");
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
@@ -708,6 +709,21 @@ function InnerApp() {
     }
   }
 
+  function endCallNow(sessionId: string) {
+    if (endCallRef.current) return;
+    endCallRef.current = true;
+    setActiveCall(null);
+    setCallConnecting(false);
+    void stopRealtimeCall();
+    void updateCallSession(sessionId, { status: "completed" }).catch((err: any) =>
+      setError(err?.message || "Failed to end call"),
+    );
+    void refreshCallSessions();
+    setTimeout(() => {
+      endCallRef.current = false;
+    }, 1000);
+  }
+
   function handleRealtimeMessage(sessionId: string, raw: string) {
     try {
       const evt = JSON.parse(raw);
@@ -719,7 +735,16 @@ function InnerApp() {
         evt?.response?.text ||
         evt?.response?.output_text;
       if (type.includes("transcript") && transcript) {
-        addCallTranscriptEntry(sessionId, { role: "assistant", content: String(transcript) }).catch(() => undefined);
+        const text = String(transcript);
+        const cleaned = text.replace(/\[END_CALL\]/g, "").trim();
+        if (cleaned) {
+          addCallTranscriptEntry(sessionId, { role: "assistant", content: cleaned }).catch(
+            () => undefined,
+          );
+        }
+        if (text.includes("[END_CALL]")) {
+          endCallNow(sessionId);
+        }
       }
       if (type.includes("input_audio_transcription") && transcript) {
         addCallTranscriptEntry(sessionId, { role: "user", content: String(transcript) }).catch(() => undefined);
@@ -784,7 +809,10 @@ function InnerApp() {
             type: "response.create",
             response: {
               modalities: ["audio", "text"],
-              instructions: `Call goal: ${session.goal}. Be concise and helpful.`,
+              instructions:
+                `Call goal: ${session.goal}. Be concise and helpful.` +
+                " When the goal is achieved and it sounds like the conversation can end, " +
+                "send a final message that includes [END_CALL].",
             },
           }),
         );
@@ -1143,7 +1171,7 @@ function InnerApp() {
             onChangeText={(value) =>
               setSettingsDraft((prev) => ({ ...prev, frontman_model: value }))
             }
-            placeholder="gpt-5.2"
+            placeholder="gpt-5-mini"
           />
           <Text style={styles.label}>Caller model</Text>
           <TextInput
@@ -1152,7 +1180,7 @@ function InnerApp() {
             onChangeText={(value) =>
               setSettingsDraft((prev) => ({ ...prev, caller_model: value }))
             }
-            placeholder="gpt-5.2"
+            placeholder="gpt-5-mini"
           />
           <Text style={styles.label}>Cache mode</Text>
           <View style={styles.cacheRow}>
