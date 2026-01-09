@@ -100,6 +100,7 @@ class CallTranscriptEntryOut(Schema):
     role: str
     content: str
     created_at: Optional[str] = None
+    end_call: Optional[bool] = None
 
 
 class CallSessionOut(Schema):

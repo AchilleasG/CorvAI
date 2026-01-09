@@ -94,6 +94,18 @@ def summarize_call(session: CallSession):
     session.save(update_fields=["summary", "updated_at"])
 
 
+def should_end_call(session: CallSession, max_entries: int = 12) -> bool:
+    entries = list(session.transcript_entries.all().order_by("-created_at")[:max_entries])
+    if not entries:
+        return False
+    entries = list(reversed(entries))
+    lines = []
+    for entry in entries:
+        lines.append(f"{entry.role}: {entry.content}")
+    context = f"Goal: {session.goal}\n\nTranscript:\n" + "\n".join(lines)
+    return ChatAIService.should_end_call(context)
+
+
 def _plan_with_no_clarifications(
     *,
     user_request: str,

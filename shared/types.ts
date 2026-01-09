@@ -155,6 +155,7 @@ export type CallTranscriptEntry = {
   role: "user" | "assistant" | "system";
   content: string;
   created_at?: string | null;
+  end_call?: boolean | null;
 };
 
 export type CallSession = {

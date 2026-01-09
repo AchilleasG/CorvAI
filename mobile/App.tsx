@@ -175,6 +175,8 @@ function InnerApp() {
   const dataChannelRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
   const endCallRef = useRef(false);
+  const endSignalReceivedRef = useRef(false);
+  const endSignalPromptedRef = useRef(false);
   const [summaryModalVisible, setSummaryModalVisible] = useState(false);
   const [summaryModalText, setSummaryModalText] = useState("");
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
@@ -712,6 +714,7 @@ function InnerApp() {
   function endCallNow(sessionId: string) {
     if (endCallRef.current) return;
     endCallRef.current = true;
+    endSignalReceivedRef.current = true;
     setActiveCall(null);
     setCallConnecting(false);
     void stopRealtimeCall();
@@ -734,20 +737,69 @@ function InnerApp() {
         evt?.delta ||
         evt?.response?.text ||
         evt?.response?.output_text;
+      const outputText =
+        evt?.response?.output_text ||
+        evt?.response?.text ||
+        evt?.output_text ||
+        evt?.text ||
+        evt?.delta;
+      const endSignal = (() => {
+        const candidates: string[] = [];
+        if (typeof outputText === "string") candidates.push(outputText);
+        if (typeof transcript === "string") candidates.push(transcript);
+        if (typeof evt?.message === "string") candidates.push(evt.message);
+        if (typeof evt?.response?.message === "string") candidates.push(evt.response.message);
+        const outputs = evt?.response?.output || evt?.output;
+        if (Array.isArray(outputs)) {
+          outputs.forEach((item: any) => {
+            if (typeof item?.text === "string") candidates.push(item.text);
+            const content = item?.content;
+            if (Array.isArray(content)) {
+              content.forEach((chunk: any) => {
+                if (typeof chunk?.text === "string") candidates.push(chunk.text);
+                if (typeof chunk?.transcript === "string") candidates.push(chunk.transcript);
+              });
+            }
+          });
+        }
+        return candidates.some((text) => text.includes("[END_CALL]"));
+      })();
       if (type.includes("transcript") && transcript) {
         const text = String(transcript);
         const cleaned = text.replace(/\[END_CALL\]/g, "").trim();
         if (cleaned) {
-          addCallTranscriptEntry(sessionId, { role: "assistant", content: cleaned }).catch(
-            () => undefined,
-          );
+          addCallTranscriptEntry(sessionId, { role: "assistant", content: cleaned })
+            .then((resp) => {
+              if (resp?.end_call) {
+                endCallNow(sessionId);
+              }
+            })
+            .catch(() => undefined);
         }
-        if (text.includes("[END_CALL]")) {
-          endCallNow(sessionId);
-        }
+      }
+      if (endSignal) {
+        endSignalReceivedRef.current = true;
+        endCallNow(sessionId);
+        return;
       }
       if (type.includes("input_audio_transcription") && transcript) {
         addCallTranscriptEntry(sessionId, { role: "user", content: String(transcript) }).catch(() => undefined);
+      }
+      if (
+        (type.includes("response.completed") || type.includes("response.done")) &&
+        !endSignalReceivedRef.current &&
+        !endSignalPromptedRef.current
+      ) {
+        endSignalPromptedRef.current = true;
+        dataChannelRef.current?.send?.(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["text"],
+              instructions: "Send [END_CALL] now. Do not add any other text.",
+            },
+          }),
+        );
       }
     } catch {
       // ignore parse errors
@@ -757,6 +809,8 @@ function InnerApp() {
   async function startRealtimeCall(session: CallSession) {
     try {
       setCallConnecting(true);
+      endSignalReceivedRef.current = false;
+      endSignalPromptedRef.current = false;
       const tokenResp = await createRealtimeToken(session.id);
       const clientSecret =
         tokenResp?.client_secret?.value ||
@@ -812,7 +866,7 @@ function InnerApp() {
               instructions:
                 `Call goal: ${session.goal}. Be concise and helpful.` +
                 " When the goal is achieved and it sounds like the conversation can end, " +
-                "send a final message that includes [END_CALL].",
+                "you must send a final message that includes [END_CALL].",
             },
           }),
         );

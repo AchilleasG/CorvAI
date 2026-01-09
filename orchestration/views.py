@@ -36,6 +36,7 @@ from orchestration.call_processing import (
     accept_call,
     complete_call,
     mark_call_missed,
+    should_end_call,
 )
 from orchestration.notifications import send_push_to_all
 from Corv.config import settings as corv_settings
@@ -304,11 +305,20 @@ def add_transcript_entry(
     except CallSession.DoesNotExist:
         raise HttpError(404, "Call session not found")
     entry = CallTranscriptEntry.objects.create(session=session, role=role, content=content)
+    end_call = False
+    if session.status == CallSession.STATUS_IN_CALL and role == "assistant":
+        try:
+            end_call = should_end_call(session)
+        except Exception:
+            end_call = False
+        if end_call:
+            complete_call(session)
     return CallTranscriptEntryOut(
         id=entry.id,
         role=entry.role,
         content=entry.content,
         created_at=entry.created_at.isoformat() if entry.created_at else None,
+        end_call=end_call,
     )
 
 
