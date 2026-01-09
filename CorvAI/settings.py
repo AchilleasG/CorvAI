@@ -53,7 +53,7 @@ INSTALLED_APPS = [
     'input',
     'api',
     'chat',
-    'orchestration',
+    'orchestration.apps.OrchestrationConfig',
     'openai_integration',
 ]
 
