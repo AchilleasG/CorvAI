@@ -128,6 +128,73 @@ def list_soft_events(**kwargs):
 
 
 @register_function(
+    manifest_id="calendar_manager.get_soft_event",
+    module="calendar_manager",
+    description="Get a soft event by id with its slots.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "soft_event_id": {"type": "string"},
+            "slot_status": {"type": "string", "description": "Optional slot status filter (planned, completed, etc.)"},
+            "time_min": {"type": "string", "description": "ISO lower bound to filter slots"},
+            "time_max": {"type": "string", "description": "ISO upper bound to filter slots"},
+        },
+        "required": ["soft_event_id"],
+    },
+)
+def get_soft_event(
+    soft_event_id: str,
+    slot_status: Optional[str] = None,
+    time_min: Optional[str] = None,
+    time_max: Optional[str] = None,
+):
+    try:
+        se = SoftEvent.objects.get(id=soft_event_id)
+    except (SoftEvent.DoesNotExist, ValueError):
+        return {"found": False}
+
+    slots_qs = SoftEventSlot.objects.filter(soft_event=se).order_by("start_at")
+    if slot_status:
+        slots_qs = slots_qs.filter(status=slot_status)
+    if time_min:
+        dt = soft_events._parse_dt(time_min)
+        if dt:
+            slots_qs = slots_qs.filter(start_at__gte=dt)
+    if time_max:
+        dt = soft_events._parse_dt(time_max)
+        if dt:
+            slots_qs = slots_qs.filter(end_at__lte=dt)
+
+    slots = [
+        {
+            "id": str(sl.id),
+            "start_at": sl.start_at.isoformat(),
+            "end_at": sl.end_at.isoformat(),
+            "notify_at": sl.notify_at.isoformat() if sl.notify_at else None,
+            "status": sl.status,
+            "deferral_count": sl.deferral_count,
+            "rationale": sl.rationale,
+        }
+        for sl in slots_qs
+    ]
+
+    return {
+        "found": True,
+        "event": {
+            "id": str(se.id),
+            "title": se.title,
+            "description": se.description,
+            "status": se.status,
+            "priority": se.priority,
+            "duration_minutes": se.duration_minutes,
+            "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+            "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+        },
+        "slots": slots,
+    }
+
+
+@register_function(
     manifest_id="calendar_manager.promote_slot",
     module="calendar_manager",
     description="Promote a planned soft-event slot to a hard calendar event.",

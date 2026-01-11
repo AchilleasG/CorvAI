@@ -699,6 +699,27 @@ class SoftEventService:
         )
 
     @staticmethod
+    def _build_soft_event_call_prompt(soft_event: "SoftEvent", slot: "SoftEventSlot") -> str:
+        description = (soft_event.description or "").strip()
+        goal = f"Time to do: {soft_event.title}."
+        if description:
+            goal = f"{goal} {description}"
+        start_at = slot.start_at.isoformat()
+        end_at = slot.end_at.isoformat()
+        return (
+            "Reminder task for a soft event.\n"
+            f"soft_event_id: {soft_event.id}\n"
+            f"slot_id: {slot.id}\n"
+            f"slot_start_at: {start_at}\n"
+            f"slot_end_at: {end_at}\n\n"
+            "Steps:\n"
+            '1) Call calendar_manager.get_soft_event with soft_event_id and slot_status="planned".\n'
+            "2) Find a slot with id == slot_id and matching start/end.\n"
+            f'3) If found, call call_sessions.create_session with goal: "{goal}".\n'
+            "4) If not found, do nothing and finish."
+        )
+
+    @staticmethod
     def apply_planner_actions(
         actions: Iterable[dict], planner_trace_id: str = ""
     ) -> Tuple[int, int]:
@@ -710,7 +731,7 @@ class SoftEventService:
           - {"type": "promote_slot", "slot_id": str, "summary": str?, "description": str?, "calendar_id"?, "timezone"?}
         Returns (created, updated) counts.
         """
-        from orchestration.models import SoftEvent, SoftEventSlot
+        from orchestration.models import SoftEvent, SoftEventSlot, ScheduledTask
         from orchestration.tools import calendar as cal
 
         created = updated = 0
@@ -739,6 +760,26 @@ class SoftEventService:
                 SoftEventService.logger.info(
                     "Created soft slot %s for %s", slot.id, se.id
                 )
+                if se.status == SoftEvent.STATUS_ACTIVE:
+                    try:
+                        ScheduledTask.objects.create(
+                            prompt=SoftEventService._build_soft_event_call_prompt(se, slot),
+                            recurrence=ScheduledTask.RECURRENCE_ONCE,
+                            start_at=start_at,
+                            next_run_at=start_at,
+                            status=ScheduledTask.STATUS_ACTIVE,
+                            metadata={
+                                "type": "soft_event_slot_call",
+                                "soft_event_id": str(se.id),
+                                "slot_id": str(slot.id),
+                                "slot_start_at": start_at.isoformat(),
+                                "slot_end_at": end_at.isoformat(),
+                            },
+                        )
+                    except Exception:
+                        SoftEventService.logger.exception(
+                            "Failed to schedule reminder for soft slot %s", slot.id
+                        )
             elif atype == "cancel_slot":
                 try:
                     slot = SoftEventSlot.objects.get(id=action["slot_id"])

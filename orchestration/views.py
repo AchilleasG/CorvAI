@@ -39,7 +39,7 @@ from orchestration.call_processing import (
     mark_call_missed,
     should_end_call,
 )
-from orchestration.notifications import send_push_to_all
+from orchestration.notifications import send_call_push_to_all, send_push_to_all
 from Corv.config import settings as corv_settings
 import httpx
 from orchestration.services import JobService, ModelConfigService
@@ -332,7 +332,7 @@ def notify_call_session(request, session_id: UUID):
         session = CallSession.objects.get(id=session_id)
     except CallSession.DoesNotExist:
         raise HttpError(404, "Call session not found")
-    send_push_to_all(
+    send_call_push_to_all(
         title="Incoming call from Corv",
         body=session.goal[:120],
         data={"call_session_id": str(session.id), "type": "call_incoming"},

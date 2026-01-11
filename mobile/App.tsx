@@ -21,6 +21,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
+import messaging from "@react-native-firebase/messaging";
 import {
   RTCPeerConnection,
   RTCSessionDescription,
@@ -55,6 +56,14 @@ import {
   addCallTranscriptEntry,
   createRealtimeToken,
 } from "./src/api";
+import {
+  bringAppToForeground,
+  clearSessionIdForCallUUID,
+  ensureCallKeepSetup,
+  getSessionIdForCallUUID,
+  registerCallKeepHandlers,
+} from "./src/callkeep";
+import { handleIncomingCallMessage, registerFcmPushToken } from "./src/push";
 import {
   ChatListItem,
   CombinedCalendar,
@@ -255,11 +264,75 @@ function InnerApp() {
           token: token.data,
           platform: Platform.OS,
         });
+        await registerFcmPushToken();
       } catch (err) {
         // ignore push registration errors
       }
     })();
   }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    let mounted = true;
+    void ensureCallKeepSetup();
+
+    const unsubscribeMessage = messaging().onMessage(async (remoteMessage) => {
+      await handleIncomingCallMessage(remoteMessage?.data);
+      if (mounted) {
+        await refreshCallSessions();
+      }
+    });
+
+    const unsubscribeOpened = messaging().onNotificationOpenedApp(async (remoteMessage) => {
+      if (remoteMessage?.data?.type === "call_incoming") {
+        await refreshCallSessions();
+      }
+    });
+
+    messaging()
+      .getInitialNotification()
+      .then((remoteMessage) => {
+        if (!mounted) return;
+        if (remoteMessage?.data?.type === "call_incoming") {
+          void refreshCallSessions();
+        }
+      });
+
+    const unregisterCallKeep = registerCallKeepHandlers({
+      onAnswer: async (callUUID) => {
+        const sessionId = await getSessionIdForCallUUID(callUUID);
+        if (!sessionId) return;
+        bringAppToForeground();
+        await updateCallSession(sessionId, { status: "in_call" });
+        const sessions = await fetchCallSessions();
+        const target = sessions.find((s) => s.id === sessionId);
+        if (target) {
+          setActiveCall(target);
+          await startRealtimeCall(target);
+        }
+        await refreshCallSessions();
+        await clearSessionIdForCallUUID(callUUID);
+      },
+      onEnd: async (callUUID) => {
+        const sessionId = await getSessionIdForCallUUID(callUUID);
+        if (!sessionId) return;
+        if (activeCall?.id === sessionId) {
+          endCallNow(sessionId);
+        } else {
+          await updateCallSession(sessionId, { status: "missed" });
+          await refreshCallSessions();
+        }
+        await clearSessionIdForCallUUID(callUUID);
+      },
+    });
+
+    return () => {
+      mounted = false;
+      unsubscribeMessage();
+      unsubscribeOpened();
+      unregisterCallKeep();
+    };
+  }, [authed, activeCall]);
 
   useEffect(() => {
     if (!authed) return;
