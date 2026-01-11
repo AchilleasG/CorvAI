@@ -23,6 +23,7 @@ services:
       - VITE_BACKEND_URL=http://web:8000
     volumes:
       - ./frontend:/app
+      - ./shared:/shared
       - /app/node_modules
     depends_on:
       - web
