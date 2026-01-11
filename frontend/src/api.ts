@@ -29,7 +29,7 @@ export const {
   updateScheduledTask,
   fetchScheduledTaskRuns,
   registerPushToken,
-  fetchMessages,
+  fetchInboxMessages,
   markMessageRead,
   fetchCallSessions,
   createCallSession,
