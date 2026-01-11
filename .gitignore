@@ -7,3 +7,4 @@ managed_files/
 media/voices/
 .env
 frontend/.vite/
+celerybeat-schedule
