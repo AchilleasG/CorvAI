@@ -19,6 +19,7 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
     try:
         dt = datetime.fromisoformat(val)
     except Exception:
+        logger.warning("call_sessions._parse_dt failed value=%s", val)
         return None
     if timezone.is_naive(dt):
         dt = timezone.make_aware(dt, timezone=timezone.utc)
@@ -46,6 +47,11 @@ def create_session(goal: str, scheduled_for: Optional[str] = None):
         scheduled_for,
     )
     dt = _parse_dt(scheduled_for)
+    if scheduled_for and not dt:
+        logger.warning(
+            "call_sessions.create_session invalid scheduled_for value=%s",
+            scheduled_for,
+        )
     logger.info(
         "call_sessions.create_session parsed scheduled_for=%s",
         dt.isoformat() if dt else None,
@@ -104,16 +110,26 @@ def list_sessions(status: Optional[str] = None):
     },
 )
 def update_session(session_id: str, status: str):
-    session = CallSession.objects.get(id=session_id)
-    if status == CallSession.STATUS_IN_CALL:
-        accept_call(session)
-    elif status == CallSession.STATUS_COMPLETED:
-        complete_call(session)
-    elif status == CallSession.STATUS_MISSED:
-        mark_call_missed(session)
-    else:
-        session.status = status
-        session.save(update_fields=["status", "updated_at"])
+    logger.info("call_sessions.update_session invoked id=%s status=%s", session_id, status)
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        logger.error("call_sessions.update_session missing session id=%s", session_id)
+        raise
+    try:
+        if status == CallSession.STATUS_IN_CALL:
+            accept_call(session)
+        elif status == CallSession.STATUS_COMPLETED:
+            complete_call(session)
+        elif status == CallSession.STATUS_MISSED:
+            mark_call_missed(session)
+        else:
+            session.status = status
+            session.save(update_fields=["status", "updated_at"])
+    except Exception:
+        logger.exception("call_sessions.update_session failed id=%s status=%s", session_id, status)
+        raise
+    logger.info("call_sessions.update_session done id=%s status=%s", session.id, session.status)
     return {"id": str(session.id), "status": session.status}
 
 

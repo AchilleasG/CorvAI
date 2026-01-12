@@ -66,30 +66,36 @@ def notify_incoming_call(session: CallSession):
         token_count,
         session.goal,
     )
-    send_call_push_to_all(
-        title="Incoming call from Corv",
-        body=session.goal[:120],
-        data={"call_session_id": str(session.id), "type": "call_incoming"},
-    )
-    logger.info("call_session notify_incoming dispatched id=%s", session.id)
+    try:
+        send_call_push_to_all(
+            title="Incoming call from Corv",
+            body=session.goal[:120],
+            data={"call_session_id": str(session.id), "type": "call_incoming"},
+        )
+        logger.info("call_session notify_incoming dispatched id=%s", session.id)
+    except Exception:
+        logger.exception("call_session notify_incoming failed id=%s", session.id)
 
 
 def mark_call_missed(session: CallSession):
     logger.info("call_session mark_missed id=%s status=%s", session.id, session.status)
-    session.status = CallSession.STATUS_MISSED
-    session.ended_at = timezone.now()
-    session.save(update_fields=["status", "ended_at", "updated_at"])
-    UserMessage.objects.create(
-        title="Corv text",
-        body=f"Missed call: {session.goal}",
-        kind=UserMessage.KIND_CALL_TEXT,
-        metadata={"call_session_id": str(session.id)},
-    )
-    send_push_to_all(
-        title="Missed call from Corv",
-        body=session.goal[:120],
-        data={"call_session_id": str(session.id), "type": "call_missed"},
-    )
+    try:
+        session.status = CallSession.STATUS_MISSED
+        session.ended_at = timezone.now()
+        session.save(update_fields=["status", "ended_at", "updated_at"])
+        UserMessage.objects.create(
+            title="Corv text",
+            body=f"Missed call: {session.goal}",
+            kind=UserMessage.KIND_CALL_TEXT,
+            metadata={"call_session_id": str(session.id)},
+        )
+        send_push_to_all(
+            title="Missed call from Corv",
+            body=session.goal[:120],
+            data={"call_session_id": str(session.id), "type": "call_missed"},
+        )
+    except Exception:
+        logger.exception("call_session mark_missed failed id=%s", session.id)
 
 
 def accept_call(session: CallSession):
