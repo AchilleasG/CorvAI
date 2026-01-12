@@ -190,13 +190,14 @@ export function createApi(config: ApiConfig) {
       );
     },
     registerPushToken(payload: { token: string; platform?: string }) {
+      const params = new URLSearchParams({ token: payload.token });
+      if (payload.platform) {
+        params.set("platform", payload.platform);
+      }
       return request<{ id: string; token: string; platform: string }>(
         config,
-        `/orchestration/push_tokens`,
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-        },
+        `/orchestration/push_tokens?${params.toString()}`,
+        { method: "POST" },
       );
     },
     fetchInboxMessages(params: { unread_only?: boolean } = {}) {

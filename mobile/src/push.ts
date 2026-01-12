@@ -14,12 +14,15 @@ const CALL_TYPE = "call_incoming";
 export async function registerFcmPushToken() {
   if (Platform.OS !== "android") return;
   try {
-    await messaging().requestPermission();
+    await messaging().registerDeviceForRemoteMessages();
+    const status = await messaging().requestPermission();
     const token = await messaging().getToken();
     if (!token) return;
     await registerPushToken({ token, platform: "android_fcm" });
-  } catch {
-    // ignore token failures
+    console.log("[push] registered fcm token", token, "status", status);
+    return token;
+  } catch (err) {
+    console.warn("[push] failed to register fcm token", err);
   }
 }
 

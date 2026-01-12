@@ -82,6 +82,7 @@ def send_fcm(
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
+    include_notification: bool = True,
 ) -> None:
     project_id, creds = _load_fcm_credentials()
     if not project_id or not creds:
@@ -97,16 +98,17 @@ def send_fcm(
             "message": {
                 "token": token,
                 "data": safe_data,
-                "notification": {"title": title, "body": body},
                 "android": {
                     "priority": "HIGH",
-                    "notification": {
-                        "channel_id": "corv_calls",
-                        "sound": "default",
-                    },
                 },
             }
         }
+        if include_notification:
+            payload["message"]["notification"] = {"title": title, "body": body}
+            payload["message"]["android"]["notification"] = {
+                "channel_id": "corv_calls",
+                "sound": "default",
+            }
         try:
             with httpx.Client(timeout=10) as client:
                 resp = client.post(url, headers=headers, json=payload)
@@ -117,4 +119,4 @@ def send_fcm(
 
 def send_call_push_to_all(*, title: str, body: str, data: Optional[Dict[str, Any]] = None) -> None:
     tokens = PushToken.objects.filter(platform="android_fcm").values_list("token", flat=True)
-    send_fcm(tokens=tokens, title=title, body=body, data=data)
+    send_fcm(tokens=tokens, title=title, body=body, data=data, include_notification=False)

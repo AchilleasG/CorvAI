@@ -246,27 +246,32 @@ function InnerApp() {
   useEffect(() => {
     if (!authed) return;
     (async () => {
+      if (!Device.isDevice) return;
       try {
-        if (!Device.isDevice) return;
         const { status: existingStatus } = await Notifications.getPermissionsAsync();
         let finalStatus = existingStatus;
         if (existingStatus !== "granted") {
           const { status } = await Notifications.requestPermissionsAsync();
           finalStatus = status;
         }
-        if (finalStatus !== "granted") return;
-        const projectId =
-          Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
-        const token = await Notifications.getExpoPushTokenAsync({
-          projectId,
-        });
-        await registerPushToken({
-          token: token.data,
-          platform: Platform.OS,
-        });
-        await registerFcmPushToken();
+        if (finalStatus === "granted") {
+          const projectId =
+            Constants.easConfig?.projectId || Constants.expoConfig?.extra?.eas?.projectId;
+          if (projectId) {
+            const token = await Notifications.getExpoPushTokenAsync({ projectId });
+            await registerPushToken({
+              token: token.data,
+              platform: Platform.OS,
+            });
+          }
+        }
       } catch (err) {
-        // ignore push registration errors
+        // ignore expo push registration errors
+      }
+      try {
+        await registerFcmPushToken();
+      } catch {
+        // ignore fcm registration errors
       }
     })();
   }, [authed]);
