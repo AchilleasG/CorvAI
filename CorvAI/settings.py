@@ -188,12 +188,23 @@ LOGGING = {
             "filename": os.path.join(BASE_DIR, "call_monitor.log"),
             "formatter": "simple",
         },
+        "fcm_push_file": {
+            "level": "INFO",
+            "class": "logging.FileHandler",
+            "filename": os.path.join(BASE_DIR, "fcm_push.log"),
+            "formatter": "simple",
+        },
     },
     "loggers": {
         "orchestration": {
             "handlers": ["call_monitor_file"],
             "level": "INFO",
             "propagate": True,
+        },
+        "orchestration.notifications": {
+            "handlers": ["fcm_push_file"],
+            "level": "INFO",
+            "propagate": False,
         },
     },
 }
