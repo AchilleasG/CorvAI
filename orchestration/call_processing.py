@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 
 import logging
 from django.utils import timezone
+from django.db import connection
 
 from orchestration.function_caller import FunctionCallOrchestrator
 from orchestration.models import (
@@ -197,7 +198,22 @@ def process_call_actions(session: CallSession, max_steps: int = 6):
 def poll_call_sessions(ring_timeout_seconds: int = 45, limit: int = 25) -> int:
     now = timezone.now()
     ran = 0
-    logger.info("poll_call_sessions start now=%s limit=%s", now.isoformat(), limit)
+    db_name = connection.settings_dict.get("NAME")
+    scheduled_total = CallSession.objects.filter(status=CallSession.STATUS_SCHEDULED).count()
+    next_scheduled = (
+        CallSession.objects.filter(status=CallSession.STATUS_SCHEDULED)
+        .order_by("scheduled_for")
+        .first()
+    )
+    logger.info(
+        "poll_call_sessions start now=%s limit=%s db=%s scheduled_total=%s next_scheduled_id=%s next_scheduled_for=%s",
+        now.isoformat(),
+        limit,
+        db_name,
+        scheduled_total,
+        next_scheduled.id if next_scheduled else None,
+        next_scheduled.scheduled_for.isoformat() if next_scheduled and next_scheduled.scheduled_for else None,
+    )
     scheduled = (
         CallSession.objects.filter(status=CallSession.STATUS_SCHEDULED, scheduled_for__lte=now)
         .order_by("scheduled_for")[:limit]
