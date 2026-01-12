@@ -112,6 +112,10 @@ def send_fcm(
         try:
             with httpx.Client(timeout=10) as client:
                 resp = client.post(url, headers=headers, json=payload)
+                if resp.is_error:
+                    logger.error("FCM send failed for token %s: %s", token, resp.text)
+                else:
+                    logger.info("FCM send ok for token %s", token)
                 resp.raise_for_status()
         except Exception as exc:
             logger.exception("FCM notification failed: %s", exc)
