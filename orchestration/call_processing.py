@@ -11,7 +11,7 @@ from orchestration.models import (
     CallSession,
     UserMessage,
 )
-from orchestration.notifications import send_push_to_all
+from orchestration.notifications import send_call_push_to_all, send_push_to_all
 from orchestration.schemas import FunctionCallPayload
 from orchestration.services import FunctionRunnerService, ModuleDirectory
 from openai_integration.services import ChatAIService
@@ -50,7 +50,7 @@ def create_call_session(goal: str, scheduled_for: Optional[datetime] = None) -> 
 
 
 def notify_incoming_call(session: CallSession):
-    send_push_to_all(
+    send_call_push_to_all(
         title="Incoming call from Corv",
         body=session.goal[:120],
         data={"call_session_id": str(session.id), "type": "call_incoming"},
