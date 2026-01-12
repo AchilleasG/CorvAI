@@ -2,12 +2,7 @@ import messaging from "@react-native-firebase/messaging";
 import { Platform } from "react-native";
 
 import { registerPushToken } from "./api";
-import {
-  createCallUUID,
-  ensureCallKeepSetup,
-  showIncomingCall,
-  storeCallSessionMapping,
-} from "./callkeep";
+import { showIncomingCallNotification } from "./notifications";
 
 const CALL_TYPE = "call_incoming";
 
@@ -35,11 +30,5 @@ type IncomingCallPayload = {
 
 export async function handleIncomingCallMessage(data: IncomingCallPayload | undefined | null) {
   if (!data || data.type !== CALL_TYPE) return;
-  const sessionId = data.call_session_id;
-  if (!sessionId) return;
-  const callerName = data.title || "Incoming call";
-  const callUUID = createCallUUID();
-  await ensureCallKeepSetup();
-  await storeCallSessionMapping(callUUID, sessionId);
-  showIncomingCall(callUUID, callerName);
+  await showIncomingCallNotification(data);
 }

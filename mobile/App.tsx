@@ -22,6 +22,7 @@ import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 import messaging from "@react-native-firebase/messaging";
+import notifee, { EventType } from "@notifee/react-native";
 import {
   RTCPeerConnection,
   RTCSessionDescription,
@@ -56,13 +57,6 @@ import {
   addCallTranscriptEntry,
   createRealtimeToken,
 } from "./src/api";
-import {
-  bringAppToForeground,
-  clearSessionIdForCallUUID,
-  ensureCallKeepSetup,
-  getSessionIdForCallUUID,
-  registerCallKeepHandlers,
-} from "./src/callkeep";
 import { handleIncomingCallMessage, registerFcmPushToken } from "./src/push";
 import {
   ChatListItem,
@@ -279,7 +273,6 @@ function InnerApp() {
   useEffect(() => {
     if (!authed) return;
     let mounted = true;
-    void ensureCallKeepSetup();
 
     const unsubscribeMessage = messaging().onMessage(async (remoteMessage) => {
       await handleIncomingCallMessage(remoteMessage?.data);
@@ -303,39 +296,30 @@ function InnerApp() {
         }
       });
 
-    const unregisterCallKeep = registerCallKeepHandlers({
-      onAnswer: async (callUUID) => {
-        const sessionId = await getSessionIdForCallUUID(callUUID);
-        if (!sessionId) return;
-        bringAppToForeground();
-        await updateCallSession(sessionId, { status: "in_call" });
-        const sessions = await fetchCallSessions();
-        const target = sessions.find((s) => s.id === sessionId);
-        if (target) {
-          setActiveCall(target);
-          await startRealtimeCall(target);
-        }
+    const unsubscribeNotifee = notifee.onForegroundEvent(async ({ type, detail }) => {
+      if (detail?.notification?.data?.type !== "call_incoming") return;
+      if (type === EventType.DISMISSED) {
+        return;
+      }
+      if (type === EventType.PRESS) {
         await refreshCallSessions();
-        await clearSessionIdForCallUUID(callUUID);
-      },
-      onEnd: async (callUUID) => {
-        const sessionId = await getSessionIdForCallUUID(callUUID);
-        if (!sessionId) return;
-        if (activeCall?.id === sessionId) {
-          endCallNow(sessionId);
-        } else {
-          await updateCallSession(sessionId, { status: "missed" });
+      }
+      if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
+        await refreshCallSessions();
+      }
+      if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
+        if (incomingCall) {
+          await updateCallSession(incomingCall.id, { status: "missed" });
           await refreshCallSessions();
         }
-        await clearSessionIdForCallUUID(callUUID);
-      },
+      }
     });
 
     return () => {
       mounted = false;
       unsubscribeMessage();
       unsubscribeOpened();
-      unregisterCallKeep();
+      unsubscribeNotifee();
     };
   }, [authed, activeCall]);
 
@@ -1889,36 +1873,35 @@ function InnerApp() {
       </Modal>
 
       <Modal visible={!!incomingCall} transparent animationType="fade">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.sectionTitle}>Incoming call</Text>
-            <Text style={styles.muted}>{incomingCall?.goal || "Call from Corv"}</Text>
-            <View style={styles.modalActions}>
-              <TouchableOpacity
-                style={[styles.secondaryButton, styles.rowActionButton]}
-                onPress={async () => {
-                  if (!incomingCall) return;
-                  await updateCallSession(incomingCall.id, { status: "missed" });
-                  setIncomingCall(null);
-                  await refreshCallSessions();
-                }}
-              >
-                <Text style={styles.secondaryButtonText}>Decline</Text>
-              </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.primaryButton}
-                  onPress={async () => {
-                    if (!incomingCall) return;
-                    await updateCallSession(incomingCall.id, { status: "in_call" });
-                    setActiveCall(incomingCall);
-                    await startRealtimeCall(incomingCall);
-                    setIncomingCall(null);
-                    await refreshCallSessions();
-                  }}
-                >
-                <Text style={styles.primaryButtonText}>Answer</Text>
-              </TouchableOpacity>
-            </View>
+        <View style={styles.callScreen}>
+          <View style={styles.callOrb} />
+          <Text style={styles.callTitle}>Incoming call</Text>
+          <Text style={styles.callSubtitle}>{incomingCall?.goal || "Call from Corv"}</Text>
+          <View style={styles.callButtonRow}>
+            <TouchableOpacity
+              style={styles.callDeclineButton}
+              onPress={async () => {
+                if (!incomingCall) return;
+                await updateCallSession(incomingCall.id, { status: "missed" });
+                setIncomingCall(null);
+                await refreshCallSessions();
+              }}
+            >
+              <Text style={styles.callDeclineText}>Decline</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.callAnswerButton}
+              onPress={async () => {
+                if (!incomingCall) return;
+                await updateCallSession(incomingCall.id, { status: "in_call" });
+                setActiveCall(incomingCall);
+                await startRealtimeCall(incomingCall);
+                setIncomingCall(null);
+                await refreshCallSessions();
+              }}
+            >
+              <Text style={styles.callAnswerText}>Answer</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -2502,6 +2485,67 @@ const styles = StyleSheet.create({
     padding: 20,
     borderWidth: 1,
     borderColor: "#1f2937",
+  },
+  callScreen: {
+    flex: 1,
+    backgroundColor: "#0b1018",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+  },
+  callOrb: {
+    width: 180,
+    height: 180,
+    borderRadius: 90,
+    backgroundColor: "#132033",
+    borderWidth: 2,
+    borderColor: "#2ad1a3",
+    shadowColor: "#2ad1a3",
+    shadowOpacity: 0.35,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  callTitle: {
+    color: "#e5e7eb",
+    fontSize: 28,
+    fontWeight: "700",
+    marginTop: 24,
+  },
+  callSubtitle: {
+    color: "#9fb0c3",
+    fontSize: 16,
+    textAlign: "center",
+    marginTop: 8,
+    marginBottom: 40,
+  },
+  callButtonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  callDeclineButton: {
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#d14b4b",
+    backgroundColor: "#241517",
+    marginRight: 14,
+  },
+  callAnswerButton: {
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "#2ad1a3",
+    backgroundColor: "#14392f",
+  },
+  callDeclineText: {
+    color: "#f6b5b5",
+    fontWeight: "600",
+  },
+  callAnswerText: {
+    color: "#d9fdf1",
+    fontWeight: "700",
   },
   callTranscriptBox: {
     marginTop: 12,
