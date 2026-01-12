@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -57,7 +58,9 @@ import {
   addCallTranscriptEntry,
   createRealtimeToken,
 } from "./src/api";
-import { handleIncomingCallMessage, registerFcmPushToken } from "./src/push";
+import { registerFcmPushToken } from "./src/push";
+import { cancelIncomingCallNotification, showIncomingCallNotification } from "./src/notifications";
+import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
   CombinedCalendar,
@@ -176,6 +179,7 @@ function InnerApp() {
   const [callConnecting, setCallConnecting] = useState(false);
   const [callLiveTranscript, setCallLiveTranscript] = useState<string[]>([]);
   const [callTranscriptError, setCallTranscriptError] = useState<string | null>(null);
+  const appStateRef = useRef<string>(AppState.currentState);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
@@ -273,10 +277,13 @@ function InnerApp() {
   useEffect(() => {
     if (!authed) return;
     let mounted = true;
+    const appStateSub = AppState.addEventListener("change", (state) => {
+      appStateRef.current = state;
+    });
 
     const unsubscribeMessage = messaging().onMessage(async (remoteMessage) => {
-      await handleIncomingCallMessage(remoteMessage?.data);
-      if (mounted) {
+      if (remoteMessage?.data?.type === "call_incoming" && mounted) {
+        await showIncomingCallNotification(remoteMessage?.data);
         await refreshCallSessions();
       }
     });
@@ -305,12 +312,15 @@ function InnerApp() {
         await refreshCallSessions();
       }
       if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
-        await refreshCallSessions();
+        const sessionId = detail.notification?.data?.call_session_id;
+        if (sessionId) {
+          await answerCallSession(sessionId);
+        }
       }
       if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
-        if (incomingCall) {
-          await updateCallSession(incomingCall.id, { status: "missed" });
-          await refreshCallSessions();
+        const sessionId = detail.notification?.data?.call_session_id;
+        if (sessionId) {
+          await declineCallSession(sessionId);
         }
       }
     });
@@ -320,8 +330,26 @@ function InnerApp() {
       unsubscribeMessage();
       unsubscribeOpened();
       unsubscribeNotifee();
+      appStateSub.remove();
     };
   }, [authed, activeCall]);
+
+  useEffect(() => {
+    if (!authed) return;
+    let canceled = false;
+    (async () => {
+      const pendingId = await consumePendingAnswerSession();
+      if (!pendingId || canceled) return;
+      const session = await fetchCallById(pendingId);
+      if (session) {
+        setActiveCall(session);
+        await startRealtimeCall(session);
+      }
+    })();
+    return () => {
+      canceled = true;
+    };
+  }, [authed]);
 
   useEffect(() => {
     if (!authed) return;
@@ -759,6 +787,26 @@ function InnerApp() {
     } finally {
       setCallsLoading(false);
     }
+  }
+
+  async function answerCallSession(sessionId: string) {
+    await updateCallSession(sessionId, { status: "in_call" });
+    const sessions = await fetchCallSessions();
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target) {
+      setActiveCall(target);
+      await startRealtimeCall(target);
+    }
+    setIncomingCall(null);
+    await cancelIncomingCallNotification();
+    await refreshCallSessions();
+  }
+
+  async function declineCallSession(sessionId: string) {
+    await updateCallSession(sessionId, { status: "missed" });
+    setIncomingCall(null);
+    await cancelIncomingCallNotification();
+    await refreshCallSessions();
   }
 
   async function stopRealtimeCall() {
@@ -1882,9 +1930,7 @@ function InnerApp() {
               style={styles.callDeclineButton}
               onPress={async () => {
                 if (!incomingCall) return;
-                await updateCallSession(incomingCall.id, { status: "missed" });
-                setIncomingCall(null);
-                await refreshCallSessions();
+                await declineCallSession(incomingCall.id);
               }}
             >
               <Text style={styles.callDeclineText}>Decline</Text>
@@ -1893,11 +1939,7 @@ function InnerApp() {
               style={styles.callAnswerButton}
               onPress={async () => {
                 if (!incomingCall) return;
-                await updateCallSession(incomingCall.id, { status: "in_call" });
-                setActiveCall(incomingCall);
-                await startRealtimeCall(incomingCall);
-                setIncomingCall(null);
-                await refreshCallSessions();
+                await answerCallSession(incomingCall.id);
               }}
             >
               <Text style={styles.callAnswerText}>Answer</Text>

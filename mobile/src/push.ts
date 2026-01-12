@@ -32,3 +32,7 @@ export async function handleIncomingCallMessage(data: IncomingCallPayload | unde
   if (!data || data.type !== CALL_TYPE) return;
   await showIncomingCallNotification(data);
 }
+
+export async function handleIncomingCallInForeground() {
+  // no notification when app is active; app UI will handle the call
+}

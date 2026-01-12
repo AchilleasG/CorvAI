@@ -114,6 +114,16 @@ def send_fcm(
                 resp = client.post(url, headers=headers, json=payload)
                 if resp.is_error:
                     logger.error("FCM send failed for token %s: %s", token, resp.text)
+                    try:
+                        data = resp.json()
+                        details = (data.get("error") or {}).get("details") or []
+                        for item in details:
+                            if item.get("errorCode") == "UNREGISTERED":
+                                PushToken.objects.filter(token=token).delete()
+                                logger.info("FCM token removed as UNREGISTERED: %s", token)
+                                break
+                    except Exception:
+                        logger.exception("Failed parsing FCM error response")
                 else:
                     logger.info("FCM send ok for token %s", token)
                 resp.raise_for_status()

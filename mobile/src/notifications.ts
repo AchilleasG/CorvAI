@@ -5,6 +5,7 @@ import notifee, {
 } from "@notifee/react-native";
 
 const CALL_CHANNEL_ID = "corv_calls";
+const CALL_NOTIFICATION_ID = "corv_incoming_call";
 
 export type CallNotificationPayload = {
   call_session_id?: string;
@@ -34,6 +35,7 @@ export async function showIncomingCallNotification(payload: CallNotificationPayl
     }
   });
   await notifee.displayNotification({
+    id: CALL_NOTIFICATION_ID,
     title,
     body,
     data,
@@ -59,4 +61,12 @@ export async function showIncomingCallNotification(payload: CallNotificationPayl
       ],
     },
   });
+}
+
+export async function cancelIncomingCallNotification() {
+  try {
+    await notifee.cancelNotification(CALL_NOTIFICATION_ID);
+  } catch {
+    // ignore cancel failures
+  }
 }

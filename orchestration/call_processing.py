@@ -178,11 +178,14 @@ def process_call_actions(session: CallSession, max_steps: int = 6):
 def poll_call_sessions(ring_timeout_seconds: int = 45, limit: int = 25) -> int:
     now = timezone.now()
     ran = 0
+    logger.info("poll_call_sessions start now=%s limit=%s", now.isoformat(), limit)
     scheduled = (
         CallSession.objects.filter(status=CallSession.STATUS_SCHEDULED, scheduled_for__lte=now)
         .order_by("scheduled_for")[:limit]
     )
+    logger.info("poll_call_sessions due=%s", len(scheduled))
     for session in scheduled:
+        logger.info("poll_call_sessions ringing session=%s scheduled_for=%s", session.id, session.scheduled_for)
         session.status = CallSession.STATUS_RINGING
         session.ringing_started_at = now
         session.save(update_fields=["status", "ringing_started_at", "updated_at"])
@@ -193,7 +196,10 @@ def poll_call_sessions(ring_timeout_seconds: int = 45, limit: int = 25) -> int:
     ringing = CallSession.objects.filter(
         status=CallSession.STATUS_RINGING, ringing_started_at__lte=cutoff
     )[:limit]
+    logger.info("poll_call_sessions timeout_candidates=%s cutoff=%s", len(ringing), cutoff.isoformat())
     for session in ringing:
+        logger.info("poll_call_sessions mark_missed session=%s", session.id)
         mark_call_missed(session)
         ran += 1
+    logger.info("poll_call_sessions end ran=%s", ran)
     return ran
