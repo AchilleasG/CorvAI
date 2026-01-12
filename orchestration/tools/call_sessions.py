@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from typing import Optional
 
 from django.utils import timezone
@@ -8,6 +9,8 @@ from django.utils import timezone
 from orchestration.models import CallSession, UserMessage
 from orchestration.registry import register_function
 from orchestration.call_processing import create_call_session, accept_call, complete_call, mark_call_missed
+
+logger = logging.getLogger("orchestration.call_processing")
 
 
 def _parse_dt(val: Optional[str]) -> Optional[datetime]:
@@ -37,8 +40,22 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
     },
 )
 def create_session(goal: str, scheduled_for: Optional[str] = None):
+    logger.info(
+        "call_sessions.create_session invoked goal=%s scheduled_for=%s",
+        goal,
+        scheduled_for,
+    )
     dt = _parse_dt(scheduled_for)
+    logger.info(
+        "call_sessions.create_session parsed scheduled_for=%s",
+        dt.isoformat() if dt else None,
+    )
     session = create_call_session(goal=goal, scheduled_for=dt)
+    logger.info(
+        "call_sessions.create_session created id=%s status=%s",
+        session.id,
+        session.status,
+    )
     return {"id": str(session.id), "status": session.status}
 
 

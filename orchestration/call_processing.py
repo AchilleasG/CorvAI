@@ -9,6 +9,7 @@ from django.utils import timezone
 from orchestration.function_caller import FunctionCallOrchestrator
 from orchestration.models import (
     CallSession,
+    PushToken,
     UserMessage,
 )
 from orchestration.notifications import send_call_push_to_all, send_push_to_all
@@ -38,26 +39,42 @@ def create_call_session(goal: str, scheduled_for: Optional[datetime] = None) -> 
         status = CallSession.STATUS_RINGING
     elif not scheduled_for:
         status = CallSession.STATUS_RINGING
+    logger.info(
+        "call_session create request goal=%s scheduled_for=%s computed_status=%s",
+        goal,
+        scheduled_for.isoformat() if scheduled_for else None,
+        status,
+    )
     session = CallSession.objects.create(
         goal=goal,
         status=status,
         scheduled_for=scheduled_for,
         ringing_started_at=timezone.now() if status == CallSession.STATUS_RINGING else None,
     )
+    logger.info("call_session created id=%s status=%s", session.id, session.status)
     if status == CallSession.STATUS_RINGING:
         notify_incoming_call(session)
     return session
 
 
 def notify_incoming_call(session: CallSession):
+    token_count = PushToken.objects.filter(platform="android_fcm").count()
+    logger.info(
+        "call_session notify_incoming id=%s token_count=%s goal=%s",
+        session.id,
+        token_count,
+        session.goal,
+    )
     send_call_push_to_all(
         title="Incoming call from Corv",
         body=session.goal[:120],
         data={"call_session_id": str(session.id), "type": "call_incoming"},
     )
+    logger.info("call_session notify_incoming dispatched id=%s", session.id)
 
 
 def mark_call_missed(session: CallSession):
+    logger.info("call_session mark_missed id=%s status=%s", session.id, session.status)
     session.status = CallSession.STATUS_MISSED
     session.ended_at = timezone.now()
     session.save(update_fields=["status", "ended_at", "updated_at"])
@@ -75,12 +92,14 @@ def mark_call_missed(session: CallSession):
 
 
 def accept_call(session: CallSession):
+    logger.info("call_session accept id=%s status=%s", session.id, session.status)
     session.status = CallSession.STATUS_IN_CALL
     session.started_at = timezone.now()
     session.save(update_fields=["status", "started_at", "updated_at"])
 
 
 def complete_call(session: CallSession):
+    logger.info("call_session complete id=%s status=%s", session.id, session.status)
     session.status = CallSession.STATUS_COMPLETED
     session.ended_at = timezone.now()
     session.save(update_fields=["status", "ended_at", "updated_at"])
