@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { PermissionsAndroid, Platform } from "react-native";
 import RNCallKeep from "react-native-callkeep";
 
 const CALLKEEP_MAP_KEY = "callkeepSessionMap";
@@ -25,6 +26,13 @@ const callKeepOptions = {
 export async function ensureCallKeepSetup() {
   if (callKeepReady) return;
   try {
+    if (Platform.OS === "android") {
+      await PermissionsAndroid.requestMultiple([
+        PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        PermissionsAndroid.PERMISSIONS.CALL_PHONE,
+      ]);
+    }
     await RNCallKeep.setup(callKeepOptions);
     RNCallKeep.setAvailable(true);
     callKeepReady = true;
