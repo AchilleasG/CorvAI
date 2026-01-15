@@ -137,3 +137,20 @@ def send_call_push_to_all(*, title: str, body: str, data: Optional[Dict[str, Any
     )
     logger.info("FCM call push token_count=%s", len(tokens))
     send_fcm(tokens=tokens, title=title, body=body, data=data, include_notification=False)
+
+
+def send_message_push_to_all(
+    *, title: str, body: str, data: Optional[Dict[str, Any]] = None
+) -> None:
+    payload = dict(data or {})
+    payload.setdefault("type", "user_message")
+    payload.setdefault("title", title)
+    payload.setdefault("body", body)
+    send_push_to_all(title=title, body=body, data=payload)
+    tokens = list(
+        PushToken.objects.filter(platform="android_fcm").values_list("token", flat=True)
+    )
+    if not tokens:
+        return
+    logger.info("FCM message push token_count=%s", len(tokens))
+    send_fcm(tokens=tokens, title=title, body=body, data=payload, include_notification=True)

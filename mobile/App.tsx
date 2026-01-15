@@ -59,7 +59,11 @@ import {
   createRealtimeToken,
 } from "./src/api";
 import { registerFcmPushToken } from "./src/push";
-import { cancelIncomingCallNotification, showIncomingCallNotification } from "./src/notifications";
+import {
+  cancelIncomingCallNotification,
+  showIncomingCallNotification,
+  showMessageNotification,
+} from "./src/notifications";
 import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
@@ -243,6 +247,32 @@ function InnerApp() {
 
   useEffect(() => {
     if (!authed) return;
+    const receivedSub = Notifications.addNotificationReceivedListener((notification) => {
+      const data = notification.request.content.data as { type?: string } | undefined;
+      if (data?.type === "call_incoming") {
+        void refreshCallSessions();
+      }
+      if (data?.type === "user_message") {
+        void refreshMessages();
+      }
+    });
+    const responseSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data as { type?: string } | undefined;
+      if (data?.type === "call_incoming") {
+        void refreshCallSessions();
+      }
+      if (data?.type === "user_message") {
+        void refreshMessages();
+      }
+    });
+    return () => {
+      receivedSub.remove();
+      responseSub.remove();
+    };
+  }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
     (async () => {
       if (!Device.isDevice) return;
       try {
@@ -282,15 +312,36 @@ function InnerApp() {
     });
 
     const unsubscribeMessage = messaging().onMessage(async (remoteMessage) => {
-      if (remoteMessage?.data?.type === "call_incoming" && mounted) {
+      const messageType = remoteMessage?.data?.type;
+      if (messageType === "call_incoming" && mounted) {
         await showIncomingCallNotification(remoteMessage?.data);
         await refreshCallSessions();
+      }
+      if (messageType === "user_message" && mounted) {
+        const title =
+          remoteMessage?.notification?.title ||
+          remoteMessage?.data?.title ||
+          "New message";
+        const body =
+          remoteMessage?.notification?.body ||
+          remoteMessage?.data?.body ||
+          "You have a new message.";
+        await showMessageNotification({
+          message_id: remoteMessage?.data?.message_id,
+          title,
+          body,
+          type: "user_message",
+        });
+        await refreshMessages();
       }
     });
 
     const unsubscribeOpened = messaging().onNotificationOpenedApp(async (remoteMessage) => {
       if (remoteMessage?.data?.type === "call_incoming") {
         await refreshCallSessions();
+      }
+      if (remoteMessage?.data?.type === "user_message") {
+        await refreshMessages();
       }
     });
 
@@ -301,26 +352,38 @@ function InnerApp() {
         if (remoteMessage?.data?.type === "call_incoming") {
           void refreshCallSessions();
         }
+        if (remoteMessage?.data?.type === "user_message") {
+          void refreshMessages();
+        }
       });
 
     const unsubscribeNotifee = notifee.onForegroundEvent(async ({ type, detail }) => {
-      if (detail?.notification?.data?.type !== "call_incoming") return;
+      const dataType = detail?.notification?.data?.type;
+      if (!dataType) return;
       if (type === EventType.DISMISSED) {
         return;
       }
-      if (type === EventType.PRESS) {
-        await refreshCallSessions();
-      }
-      if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
-        const sessionId = detail.notification?.data?.call_session_id;
-        if (sessionId) {
-          await answerCallSession(sessionId);
+      if (dataType === "call_incoming") {
+        if (type === EventType.PRESS) {
+          await refreshCallSessions();
         }
+        if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
+          const sessionId = detail.notification?.data?.call_session_id;
+          if (sessionId) {
+            await answerCallSession(sessionId);
+          }
+        }
+        if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
+          const sessionId = detail.notification?.data?.call_session_id;
+          if (sessionId) {
+            await declineCallSession(sessionId);
+          }
+        }
+        return;
       }
-      if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
-        const sessionId = detail.notification?.data?.call_session_id;
-        if (sessionId) {
-          await declineCallSession(sessionId);
+      if (dataType === "user_message") {
+        if (type === EventType.PRESS) {
+          await refreshMessages();
         }
       }
     });

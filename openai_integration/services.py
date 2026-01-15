@@ -400,6 +400,65 @@ class ChatAIService:
         return False
 
     @staticmethod
+    def phrase_inbox_message(
+        body: str,
+        *,
+        title: str = "",
+        kind: str = "info",
+        model: str | None = None,
+    ) -> str:
+        """
+        Rephrase a draft inbox message in the Frontman voice without changing meaning.
+        """
+        if not body or not body.strip():
+            return body
+        persona_text = PersonaService.build_persona_prompt()
+        instructions = (
+            f"{persona_text}\n\n"
+            "Rewrite the draft message in the Frontman voice. Keep the meaning and facts. "
+            "Be short and to the point (1-2 sentences). Do not add new info. "
+            "Return only the final message text."
+        )
+        context_text = f"Kind: {kind}\nTitle: {title}\nDraft: {body}"
+        model_name = model or ModelConfigService.get_frontman_model()
+        provider = resolve_provider(model_name)
+
+        if provider == "openai":
+            input_seq = [
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": instructions}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": context_text}],
+                },
+            ]
+            resp = get_client("openai").responses.create(
+                model=model_name,
+                input=input_seq,
+                text={"format": {"type": "text"}, "verbosity": "low"},
+                reasoning={"effort": "low"},
+                tools=[],
+                store=False,
+                timeout=20,
+            )
+            return (getattr(resp, "output_text", None) or "").strip() or body
+
+        messages = [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": context_text},
+        ]
+        resp = get_client("xai").chat.completions.create(
+            model=model_name,
+            messages=messages,
+            timeout=20,
+        )
+        if getattr(resp, "choices", None):
+            return (resp.choices[0].message.content or "").strip() or body  # type: ignore[assignment]
+        return body
+
+    @staticmethod
     def transcribe_audio(
         audio_file_path: str,
         model: str = "whisper-1",

@@ -9,6 +9,8 @@ from django.utils import timezone
 from orchestration.models import CallSession, UserMessage
 from orchestration.registry import register_function
 from orchestration.call_processing import create_call_session, accept_call, complete_call, mark_call_missed
+from orchestration.notifications import send_message_push_to_all
+from openai_integration.services import ChatAIService
 
 logger = logging.getLogger("orchestration.call_processing")
 
@@ -149,5 +151,14 @@ def update_session(session_id: str, status: str):
     },
 )
 def send_message(title: str = "", body: str = "", kind: str = "info"):
-    msg = UserMessage.objects.create(title=title, body=body, kind=kind)
+    phrased_body = ChatAIService.phrase_inbox_message(body, title=title, kind=kind)
+    msg = UserMessage.objects.create(title=title, body=phrased_body, kind=kind)
+    try:
+        send_message_push_to_all(
+            title=title or "Corv message",
+            body=phrased_body,
+            data={"message_id": str(msg.id)},
+        )
+    except Exception:
+        logger.exception("call_sessions.send_message push failed id=%s", msg.id)
     return {"id": str(msg.id)}

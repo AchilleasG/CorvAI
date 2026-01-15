@@ -6,9 +6,17 @@ import notifee, {
 
 const CALL_CHANNEL_ID = "corv_calls";
 const CALL_NOTIFICATION_ID = "corv_incoming_call";
+const MESSAGE_CHANNEL_ID = "corv_messages";
 
 export type CallNotificationPayload = {
   call_session_id?: string;
+  title?: string;
+  body?: string;
+  type?: string;
+};
+
+export type MessageNotificationPayload = {
+  message_id?: string;
   title?: string;
   body?: string;
   type?: string;
@@ -59,6 +67,39 @@ export async function showIncomingCallNotification(payload: CallNotificationPayl
           pressAction: { id: "decline" },
         },
       ],
+    },
+  });
+}
+
+export async function ensureMessageChannel() {
+  return notifee.createChannel({
+    id: MESSAGE_CHANNEL_ID,
+    name: "Corv Messages",
+    importance: AndroidImportance.DEFAULT,
+  });
+}
+
+export async function showMessageNotification(payload: MessageNotificationPayload) {
+  const channelId = await ensureMessageChannel();
+  const title = payload.title || "New message";
+  const body = payload.body || "You have a new message.";
+  const data: Record<string, string> = {};
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      data[key] = String(value);
+    }
+  });
+  await notifee.displayNotification({
+    title,
+    body,
+    data,
+    android: {
+      channelId,
+      importance: AndroidImportance.DEFAULT,
+      category: AndroidCategory.MESSAGE,
+      visibility: AndroidVisibility.PRIVATE,
+      pressAction: { id: "default" },
+      autoCancel: true,
     },
   });
 }

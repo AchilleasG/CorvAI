@@ -84,9 +84,9 @@ def mark_call_missed(session: CallSession):
         session.ended_at = timezone.now()
         session.save(update_fields=["status", "ended_at", "updated_at"])
         UserMessage.objects.create(
-            title="Corv text",
+            title="Missed call",
             body=f"Missed call: {session.goal}",
-            kind=UserMessage.KIND_CALL_TEXT,
+            kind=UserMessage.KIND_CALL_MISSED,
             metadata={"call_session_id": str(session.id)},
         )
         send_push_to_all(
@@ -172,7 +172,8 @@ def process_call_actions(session: CallSession, max_steps: int = 6):
         "Decide if follow-up actions are needed. You may create scheduled tasks or "
         "schedule a follow-up call session when appropriate. "
         "If the user agreed to do something, schedule a confirmation call about 10 minutes "
-        "after the estimated completion time if you can infer it."
+        "after the estimated completion time if you can infer it." \
+        "If the user can't speak right now send him a text message instead immediately."
     )
     tool_catalog = ModuleDirectory.function_catalog()
     prior_results: List[Dict[str, Any]] = []

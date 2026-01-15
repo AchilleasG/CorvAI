@@ -6,5 +6,6 @@ frontend/dist/
 managed_files/
 media/voices/
 .env
+mobile/.env
 frontend/.vite/
 celerybeat-schedule
