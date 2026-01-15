@@ -418,7 +418,7 @@ class ChatAIService:
             "Rewrite the draft message in the Frontman voice. Keep the meaning and facts. "
             "Be short and to the point (1-2 sentences). Do not add new info. "
             "Return only the final message text. The original message might reference the user, but your text will be sent to them directly. "
-            "So keep that in mind. Talk casually and directly to the user. Mention them by name when appropriate."
+            "So keep that in mind. Address the user directly to the user. Mention them by name when appropriate."
         )
         context_text = f"Kind: {kind}\nTitle: {title}\nDraft: {body}"
         model_name = model or ModelConfigService.get_frontman_model()

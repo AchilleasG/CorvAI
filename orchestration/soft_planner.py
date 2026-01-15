@@ -39,7 +39,11 @@ def plan_soft_window(
     instructions = (
         "You are the Soft Event Planner. Given hard calendar events and flexible soft events, propose scheduling changes within the window.\n"
         "Hard events are fixed. Soft events have duration, deadlines, and deferral limits. Existing soft slots may already be planned.\n"
-        "Return JSON with 'actions' (array) and an optional 'summary'.\n"
+        "Return JSON with 'actions' (array) and an optional 'summary'.\n" \
+        "If a soft event is reaching its deadline and you deem the user might not get another good chance to do it later, promote it to a hard event.\n" \
+        "If no changes are needed, return an empty 'actions' array.\n" \
+        "When planning events please consider the timing of each task, how long it will take, and any deadlines or priorities associated with it, as well as what energy levels are required and how those usually fluctuate throughout the day.\n" \
+        "Also consider possible time for commune if the task is implied to benefit from it.\n As well as any other context you have about the user and their typical schedule and habits.\n Or any other buffers that might be needed.\n"
         "Actions allowed:\n"
         "- create_slot: {type, soft_event_id, start_at, end_at, notify_at?, rationale?, metadata?}\n"
         "- update_slot: {type, slot_id, start_at?, end_at?, notify_at?, status?, rationale?, metadata?}\n"
