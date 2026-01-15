@@ -229,7 +229,7 @@ def replan_window(days: int = 14, note: Optional[str] = None):
         hard_events = [
             {
                 "id": "note",
-                "summary": f"Planner note: {note}",
+                "summary": f"User scheduling constraint (highest priority): {note}",
                 "start": window_start.isoformat(),
                 "end": window_start.isoformat(),
             }

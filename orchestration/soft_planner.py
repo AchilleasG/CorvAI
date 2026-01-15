@@ -40,6 +40,7 @@ def plan_soft_window(
     instructions = (
         "You are the Soft Event Planner. Given hard calendar events and flexible soft events, propose scheduling changes within the window.\n"
         "Hard events are fixed. Soft events have duration, deadlines, deferral limits, and may include notes/description. Existing soft slots may already be planned.\n"
+        "If a user scheduling constraint is provided, treat it as a hard requirement.\n"
         "Return JSON with 'actions' (array) and an optional 'summary'.\n" \
         "If a soft event is reaching its deadline and you deem the user might not get another good chance to do it later, promote it to a hard event.\n" \
         "If no changes are needed, return an empty 'actions' array.\n" \
