@@ -135,13 +135,21 @@ def list_events(
 
     events: List[Dict[str, object]] = []
     for item in items:
+        start_block = item.get("start") or {}
+        end_block = item.get("end") or {}
+        start_dt = start_block.get("dateTime")
+        end_dt = end_block.get("dateTime")
+        start_date = start_block.get("date")
+        end_date = end_block.get("date")
+        all_day = bool(start_date and not start_dt)
         events.append(
             {
                 "id": item.get("id"),
                 "status": item.get("status"),
                 "summary": item.get("summary"),
-                "start": (item.get("start") or {}).get("dateTime") or (item.get("start") or {}).get("date"),
-                "end": (item.get("end") or {}).get("dateTime") or (item.get("end") or {}).get("date"),
+                "start": start_dt or start_date,
+                "end": end_dt or end_date,
+                "all_day": all_day,
                 "htmlLink": item.get("htmlLink"),
                 "location": item.get("location"),
             }

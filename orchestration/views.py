@@ -579,6 +579,7 @@ def calendar_combined(
                 "title": ev.get("summary") or "(no title)",
                 "start": ev.get("start"),
                 "end": ev.get("end"),
+                "all_day": ev.get("all_day", False),
                 "source": "hard",
             }
         )

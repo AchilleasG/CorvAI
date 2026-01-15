@@ -79,6 +79,7 @@ export type HardCalendarEvent = {
   title: string;
   start: string;
   end: string;
+  all_day?: boolean;
   source: "hard";
 };
 

@@ -2080,9 +2080,13 @@ function InnerApp() {
                             {selected.hard.map((event) => (
                               <View key={event.id} style={styles.calendarRow}>
                                 <Text style={styles.calendarTitle}>{event.title}</Text>
-                                <Text style={styles.muted}>
-                                  {formatDateTime(event.start)} - {formatDateTime(event.end)}
-                                </Text>
+                                {event.all_day ? (
+                                  <Text style={styles.muted}>All day</Text>
+                                ) : (
+                                  <Text style={styles.muted}>
+                                    {formatDateTime(event.start)} - {formatDateTime(event.end)}
+                                  </Text>
+                                )}
                               </View>
                             ))}
                           </>
