@@ -13,7 +13,7 @@ from orchestration.models import (
     PushToken,
     UserMessage,
 )
-from orchestration.notifications import send_call_push_to_all, send_push_to_all
+from orchestration.notifications import send_call_push_to_all, send_message_push_to_all
 from orchestration.schemas import FunctionCallPayload
 from orchestration.services import FunctionRunnerService, ModuleDirectory
 from openai_integration.services import ChatAIService
@@ -83,16 +83,26 @@ def mark_call_missed(session: CallSession):
         session.status = CallSession.STATUS_MISSED
         session.ended_at = timezone.now()
         session.save(update_fields=["status", "ended_at", "updated_at"])
-        UserMessage.objects.create(
-            title="Missed call",
-            body=f"Missed call: {session.goal}",
+        title = "Corv"
+        draft_body = f"Looks like we missed each other about: {session.goal}"
+        phrased_body = ChatAIService.phrase_inbox_message(
+            draft_body,
+            title=title,
+            kind=UserMessage.KIND_CALL_MISSED,
+        )
+        msg = UserMessage.objects.create(
+            title=title,
+            body=phrased_body,
             kind=UserMessage.KIND_CALL_MISSED,
             metadata={"call_session_id": str(session.id)},
         )
-        send_push_to_all(
-            title="Missed call from Corv",
-            body=session.goal[:120],
-            data={"call_session_id": str(session.id), "type": "call_missed"},
+        send_message_push_to_all(
+            title=title,
+            body=phrased_body,
+            data={
+                "call_session_id": str(session.id),
+                "message_id": str(msg.id),
+            },
         )
     except Exception:
         logger.exception("call_session mark_missed failed id=%s", session.id)

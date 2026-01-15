@@ -214,6 +214,7 @@ function InnerApp() {
   const [jobLogAnchorId, setJobLogAnchorId] = useState<string | null>(null);
   const messagesListRef = useRef<FlatList<Message> | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const callSeqRef = useRef(0);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -873,6 +874,7 @@ function InnerApp() {
   }
 
   async function stopRealtimeCall() {
+    callSeqRef.current += 1;
     dataChannelRef.current?.close?.();
     dataChannelRef.current = null;
     if (peerConnectionRef.current) {
@@ -1035,6 +1037,7 @@ function InnerApp() {
   }
 
   async function startRealtimeCall(session: CallSession) {
+    const callSeq = ++callSeqRef.current;
     try {
       setCallConnecting(true);
       endSignalReceivedRef.current = false;
@@ -1044,6 +1047,7 @@ function InnerApp() {
       setCallLiveTranscript([]);
       setCallTranscriptError(null);
       const tokenResp = await createRealtimeToken(session.id);
+      if (callSeq !== callSeqRef.current) return;
       const clientSecret =
         tokenResp?.client_secret?.value ||
         tokenResp?.client_secret ||
@@ -1063,6 +1067,10 @@ function InnerApp() {
       };
 
       const localStream = await mediaDevices.getUserMedia({ audio: true, video: false });
+      if (callSeq !== callSeqRef.current) {
+        localStream.getTracks().forEach((track: any) => track.stop?.());
+        return;
+      }
       localStreamRef.current = localStream;
       localStream.getTracks().forEach((track: any) => {
         pc.addTrack(track, localStream);
@@ -1073,6 +1081,7 @@ function InnerApp() {
       dataChannel.onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
 
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      if (callSeq !== callSeqRef.current) return;
       await pc.setLocalDescription(offer);
 
       const sdpResp = await fetch(
@@ -1086,7 +1095,15 @@ function InnerApp() {
           body: offer.sdp,
         },
       );
+      if (callSeq !== callSeqRef.current) return;
+      if (!sdpResp.ok) {
+        throw new Error(`Realtime SDP failed (${sdpResp.status})`);
+      }
       const answerSdp = await sdpResp.text();
+      if (callSeq !== callSeqRef.current) return;
+      if (peerConnectionRef.current !== pc || pc.signalingState === "closed") {
+        return;
+      }
       await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: answerSdp }));
 
       dataChannel.onopen = () => {
