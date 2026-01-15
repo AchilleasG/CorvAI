@@ -192,7 +192,6 @@ export function createApi(config: ApiConfig) {
     updateSoftEvent(
       soft_event_id: string,
       payload: Partial<SoftEventDetail> & {
-        preferred_dayparts?: string[];
         soft_deadline?: string | null;
         hard_deadline?: string | null;
       },

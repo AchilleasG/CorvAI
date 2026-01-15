@@ -24,6 +24,7 @@ import * as Device from "expo-device";
 import Constants from "expo-constants";
 import messaging from "@react-native-firebase/messaging";
 import notifee, { EventType } from "@notifee/react-native";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import {
   RTCPeerConnection,
   RTCSessionDescription,
@@ -98,7 +99,6 @@ type SoftEventDraft = {
   soft_deadline: string;
   hard_deadline: string;
   frequency: string;
-  preferred_dayparts: string;
   deferral_limit: string;
   priority: string;
   status: SoftEventDetail["status"];
@@ -222,12 +222,18 @@ function InnerApp() {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null);
   const [replanLoading, setReplanLoading] = useState(false);
+  const [replanNoteVisible, setReplanNoteVisible] = useState(false);
+  const [replanNote, setReplanNote] = useState("");
   const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
   const [softEventModalVisible, setSoftEventModalVisible] = useState(false);
   const [softEventLoading, setSoftEventLoading] = useState(false);
   const [softEventError, setSoftEventError] = useState<string | null>(null);
   const [softEventDraft, setSoftEventDraft] = useState<SoftEventDraft | null>(null);
   const [softEventMode, setSoftEventMode] = useState<SoftEventMode>("edit");
+  const [datePickerField, setDatePickerField] = useState<"soft_deadline" | "hard_deadline" | null>(
+    null,
+  );
+  const [datePickerValue, setDatePickerValue] = useState<Date>(new Date());
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -574,6 +580,9 @@ function InnerApp() {
       label: string;
       hard: CombinedCalendar["hard_events"];
       soft: CombinedCalendar["soft_slots"];
+      hasSoftWarning: boolean;
+      hasSoftWarningRed: boolean;
+      hasSoftWarningOrange: boolean;
       isPlaceholder?: boolean;
     }[] = [];
     const cursor = new Date(start);
@@ -588,6 +597,9 @@ function InnerApp() {
         label: "",
         hard: [],
         soft: [],
+        hasSoftWarning: false,
+        hasSoftWarningRed: false,
+        hasSoftWarningOrange: false,
         isPlaceholder: true,
       });
     }
@@ -605,12 +617,29 @@ function InnerApp() {
         const evEnd = new Date(slot.end);
         return evStart <= dayEnd && evEnd >= dayStart;
       });
+      let hasSoftWarningRed = false;
+      let hasSoftWarningOrange = false;
+      soft.forEach((slot) => {
+        const slotEnd = new Date(slot.end).getTime();
+        const hardDeadline = slot.hard_deadline ? new Date(slot.hard_deadline).getTime() : null;
+        const softDeadline = slot.soft_deadline ? new Date(slot.soft_deadline).getTime() : null;
+        if (hardDeadline && slotEnd > hardDeadline) {
+          hasSoftWarningRed = true;
+          return;
+        }
+        if (softDeadline && slotEnd > softDeadline) {
+          hasSoftWarningOrange = true;
+        }
+      });
       days.push({
         key: dayStart.toISOString().slice(0, 10),
         date: dayStart,
         label: dayStart.toLocaleDateString([], { weekday: "short", day: "2-digit" }),
         hard,
         soft,
+        hasSoftWarning: hasSoftWarningRed || hasSoftWarningOrange,
+        hasSoftWarningRed,
+        hasSoftWarningOrange,
       });
       cursor.setDate(cursor.getDate() + 1);
     }
@@ -879,7 +908,6 @@ function InnerApp() {
       soft_deadline: detail.soft_deadline || "",
       hard_deadline: detail.hard_deadline || "",
       frequency: detail.frequency || "",
-      preferred_dayparts: (detail.preferred_dayparts || []).join(", "),
       deferral_limit: String(detail.deferral_limit ?? ""),
       priority: String(detail.priority ?? ""),
       status: detail.status,
@@ -896,7 +924,6 @@ function InnerApp() {
       soft_deadline: "",
       hard_deadline: "",
       frequency: "",
-      preferred_dayparts: "",
       deferral_limit: "3",
       priority: "0",
       status: "active",
@@ -937,10 +964,6 @@ function InnerApp() {
       const duration = parseInt(softEventDraft.duration_minutes, 10);
       const deferral = parseInt(softEventDraft.deferral_limit, 10);
       const priority = parseInt(softEventDraft.priority, 10);
-      const preferred = softEventDraft.preferred_dayparts
-        .split(",")
-        .map((val) => val.trim())
-        .filter(Boolean);
       const payload = {
         title: softEventDraft.title,
         description: softEventDraft.description,
@@ -949,7 +972,6 @@ function InnerApp() {
         soft_deadline: softEventDraft.soft_deadline.trim() ? softEventDraft.soft_deadline.trim() : null,
         hard_deadline: softEventDraft.hard_deadline.trim() ? softEventDraft.hard_deadline.trim() : null,
         frequency: softEventDraft.frequency,
-        preferred_dayparts: preferred,
         deferral_limit: Number.isFinite(deferral) ? deferral : undefined,
         priority: Number.isFinite(priority) ? priority : undefined,
         status: softEventDraft.status,
@@ -986,7 +1008,8 @@ function InnerApp() {
   async function handleReplanCalendar() {
     try {
       setReplanLoading(true);
-      await replanCalendar({ days: 14 });
+      const note = replanNote.trim();
+      await replanCalendar({ days: 14, note: note || undefined });
       await refreshCalendar();
     } catch (err: any) {
       if (handleAuthError(err)) return;
@@ -994,6 +1017,19 @@ function InnerApp() {
     } finally {
       setReplanLoading(false);
     }
+  }
+
+  function openReplanPrompt() {
+    setReplanNote("");
+    setReplanNoteVisible(true);
+  }
+
+  function openDatePicker(field: "soft_deadline" | "hard_deadline") {
+    if (!softEventDraft) return;
+    const raw = softEventDraft[field];
+    const parsed = raw ? new Date(raw) : null;
+    setDatePickerValue(parsed && !isNaN(parsed.getTime()) ? parsed : new Date());
+    setDatePickerField(field);
   }
 
   async function refreshCallSessions() {
@@ -1966,7 +2002,7 @@ function InnerApp() {
               <View style={styles.rowActions}>
                 <TouchableOpacity
                   style={styles.secondaryButton}
-                  onPress={handleReplanCalendar}
+                  onPress={openReplanPrompt}
                   disabled={replanLoading}
                 >
                   <Text style={styles.secondaryButtonText}>
@@ -2001,13 +2037,25 @@ function InnerApp() {
                     return <View key={day.key} style={[styles.calendarCell, styles.calendarCellPlaceholder]} />;
                   }
                   const isActive = day.key === selectedDayKey;
+                  const dayWarningStyle = day.hasSoftWarningRed
+                    ? styles.calendarCellWarningRed
+                    : day.hasSoftWarningOrange
+                      ? styles.calendarCellWarningOrange
+                      : null;
                   return (
                     <TouchableOpacity
                       key={day.key}
-                      style={[styles.calendarCell, isActive && styles.calendarCellActive]}
+                      style={[
+                        styles.calendarCell,
+                        dayWarningStyle,
+                        isActive && styles.calendarCellActive,
+                      ]}
                       onPress={() => setSelectedDayKey(day.key)}
                     >
                       <Text style={styles.calendarCellLabel}>{day.label}</Text>
+                      {day.hasSoftWarning && (
+                        <View style={styles.calendarCellWarningDot} />
+                      )}
                       {!!day.hard.length && (
                         <Text style={styles.calendarCellBadgeHard}>{day.hard.length} hard</Text>
                       )}
@@ -2048,7 +2096,37 @@ function InnerApp() {
                                 style={styles.calendarRow}
                                 onPress={() => openSoftEventEditor(slot.soft_event_id)}
                               >
-                                <Text style={styles.calendarTitle}>{slot.title}</Text>
+                                <View style={styles.rowBetween}>
+                                  <Text style={styles.calendarTitle}>{slot.title}</Text>
+                                  {(() => {
+                                    const slotEnd = new Date(slot.end).getTime();
+                                    const hardDeadline = slot.hard_deadline
+                                      ? new Date(slot.hard_deadline).getTime()
+                                      : null;
+                                    const softDeadline = slot.soft_deadline
+                                      ? new Date(slot.soft_deadline).getTime()
+                                      : null;
+                                    if (hardDeadline && slotEnd > hardDeadline) {
+                                      return (
+                                        <Ionicons
+                                          name="alert-circle"
+                                          size={18}
+                                          color="#ef4444"
+                                        />
+                                      );
+                                    }
+                                    if (softDeadline && slotEnd > softDeadline) {
+                                      return (
+                                        <Ionicons
+                                          name="alert-circle-outline"
+                                          size={18}
+                                          color="#f59e0b"
+                                        />
+                                      );
+                                    }
+                                    return null;
+                                  })()}
+                                </View>
                                 <Text style={styles.muted}>
                                   {formatDateTime(slot.start)} - {formatDateTime(slot.end)}
                                 </Text>
@@ -2227,22 +2305,26 @@ function InnerApp() {
                   placeholder="Duration minutes"
                   keyboardType="numeric"
                 />
-                <TextInput
-                  style={styles.input}
-                  value={softEventDraft.soft_deadline}
-                  onChangeText={(value) =>
-                    setSoftEventDraft((prev) => (prev ? { ...prev, soft_deadline: value } : prev))
-                  }
-                  placeholder="Soft deadline (ISO)"
-                />
-                <TextInput
-                  style={styles.input}
-                  value={softEventDraft.hard_deadline}
-                  onChangeText={(value) =>
-                    setSoftEventDraft((prev) => (prev ? { ...prev, hard_deadline: value } : prev))
-                  }
-                  placeholder="Hard deadline (ISO)"
-                />
+                <TouchableOpacity
+                  style={styles.inputButton}
+                  onPress={() => openDatePicker("soft_deadline")}
+                >
+                  <Text style={styles.inputButtonText}>
+                    {softEventDraft.soft_deadline
+                      ? formatDateTime(softEventDraft.soft_deadline)
+                      : "Soft deadline (tap to pick)"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.inputButton}
+                  onPress={() => openDatePicker("hard_deadline")}
+                >
+                  <Text style={styles.inputButtonText}>
+                    {softEventDraft.hard_deadline
+                      ? formatDateTime(softEventDraft.hard_deadline)
+                      : "Hard deadline (tap to pick)"}
+                  </Text>
+                </TouchableOpacity>
                 <TextInput
                   style={styles.input}
                   value={softEventDraft.frequency}
@@ -2250,16 +2332,6 @@ function InnerApp() {
                     setSoftEventDraft((prev) => (prev ? { ...prev, frequency: value } : prev))
                   }
                   placeholder="Frequency"
-                />
-                <TextInput
-                  style={styles.input}
-                  value={softEventDraft.preferred_dayparts}
-                  onChangeText={(value) =>
-                    setSoftEventDraft((prev) =>
-                      prev ? { ...prev, preferred_dayparts: value } : prev
-                    )
-                  }
-                  placeholder="Preferred dayparts (comma-separated)"
                 />
                 <TextInput
                   style={styles.input}
@@ -2279,38 +2351,73 @@ function InnerApp() {
                   placeholder="Priority"
                   keyboardType="numeric"
                 />
-                <TextInput
-                  style={styles.input}
-                  value={softEventDraft.status}
-                  onChangeText={(value) =>
-                    setSoftEventDraft((prev) =>
-                      prev ? { ...prev, status: value as SoftEventDetail["status"] } : prev
-                    )
-                  }
-                  placeholder="Status (active/paused/archived)"
-                />
+                <Text style={styles.label}>Status</Text>
+                <View style={styles.rowActions}>
+                  {(["active", "paused", "archived"] as const).map((status) => (
+                    <TouchableOpacity
+                      key={status}
+                      style={[
+                        styles.secondaryButton,
+                        softEventDraft.status === status && styles.secondaryButtonActive,
+                      ]}
+                      onPress={() =>
+                        setSoftEventDraft((prev) =>
+                          prev ? { ...prev, status } : prev
+                        )
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.secondaryButtonText,
+                          softEventDraft.status === status && styles.secondaryButtonTextActive,
+                        ]}
+                      >
+                        {status}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
               </ScrollView>
             )}
+            {datePickerField && (
+              <DateTimePicker
+                value={datePickerValue}
+                mode="datetime"
+                display="default"
+                onChange={(_, selectedDate) => {
+                  if (!selectedDate || !softEventDraft) {
+                    setDatePickerField(null);
+                    return;
+                  }
+                  const iso = selectedDate.toISOString();
+                  setSoftEventDraft({
+                    ...softEventDraft,
+                    [datePickerField]: iso,
+                  });
+                  setDatePickerField(null);
+                }}
+              />
+            )}
             <View style={styles.modalActions}>
-                <TouchableOpacity
-                  style={styles.secondaryButton}
-                  onPress={() => {
-                    setSoftEventModalVisible(false);
-                    setSoftEventDraft(null);
-                    setSoftEventError(null);
-                  }}
-                >
-                  <Text style={styles.secondaryButtonText}>Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.primaryButton, styles.modalPrimary]}
-                  onPress={saveSoftEventDraft}
-                  disabled={softEventLoading || !softEventDraft}
-                >
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={() => {
+                  setSoftEventModalVisible(false);
+                  setSoftEventDraft(null);
+                  setSoftEventError(null);
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryButton, styles.modalPrimary]}
+                onPress={saveSoftEventDraft}
+                disabled={softEventLoading || !softEventDraft}
+              >
                 <Text style={styles.primaryButtonText}>
                   {softEventMode === "create" ? "Create" : "Save"}
                 </Text>
-                </TouchableOpacity>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -2330,6 +2437,45 @@ function InnerApp() {
                 }}
               >
                 <Text style={styles.secondaryButtonText}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={replanNoteVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>Replan notes</Text>
+            <TextInput
+              style={[styles.input, styles.textarea]}
+              value={replanNote}
+              onChangeText={setReplanNote}
+              placeholder="Any special requests for the next 2 weeks?"
+              multiline
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={() => {
+                  setReplanNoteVisible(false);
+                  setReplanNote("");
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.primaryButton, styles.modalPrimary]}
+                onPress={async () => {
+                  setReplanNoteVisible(false);
+                  await handleReplanCalendar();
+                  setReplanNote("");
+                }}
+                disabled={replanLoading}
+              >
+                <Text style={styles.primaryButtonText}>
+                  {replanLoading ? "Replanning…" : "Replan"}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2697,6 +2843,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#1f2937",
   },
+  inputButton: {
+    backgroundColor: "#0c1829",
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#1f2937",
+  },
+  inputButtonText: {
+    color: "#e5e7eb",
+  },
   primaryButton: {
     backgroundColor: "#2ad1a3",
     paddingHorizontal: 16,
@@ -2734,9 +2891,16 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     backgroundColor: "rgba(255, 255, 255, 0.02)",
   },
+  secondaryButtonActive: {
+    backgroundColor: "#2ad1a3",
+    borderColor: "#2ad1a3",
+  },
   secondaryButtonText: {
     color: "#e5e7eb",
     fontWeight: "600",
+  },
+  secondaryButtonTextActive: {
+    color: "#041316",
   },
   buttonDisabled: {
     opacity: 0.6,
@@ -2815,6 +2979,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     marginTop: 8,
   },
+  rowBetween: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   rowActionButton: {
     marginRight: 8,
   },
@@ -2878,6 +3047,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#1f2937",
     backgroundColor: "#0c1829",
+    position: "relative",
   },
   calendarCellPlaceholder: {
     backgroundColor: "transparent",
@@ -2885,6 +3055,21 @@ const styles = StyleSheet.create({
   },
   calendarCellActive: {
     borderColor: "#2ad1a3",
+  },
+  calendarCellWarningRed: {
+    borderColor: "#ef4444",
+  },
+  calendarCellWarningOrange: {
+    borderColor: "#f59e0b",
+  },
+  calendarCellWarningDot: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    width: 6,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: "#ef4444",
   },
   calendarCellLabel: {
     color: "#e5e7eb",

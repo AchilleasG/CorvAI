@@ -42,11 +42,11 @@ def collect_window_state(window_start: datetime, window_end: datetime) -> Dict[s
                 "duration_minutes": se.duration_minutes,
                 "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
                 "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+                "description": se.description,
                 "notes": se.notes,
                 "priority": se.priority,
                 "deferral_limit": se.deferral_limit,
                 "frequency": se.frequency,
-                "preferred_dayparts": se.preferred_dayparts,
                 "status": se.status,
             }
             for se in soft_events

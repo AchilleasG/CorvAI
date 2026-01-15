@@ -293,12 +293,6 @@ class SoftEvent(models.Model):
         default="",
         help_text="Optional recurrence description (e.g., weekly, monthly).",
     )
-    preferred_dayparts = ArrayField(
-        models.CharField(max_length=32, blank=True),
-        default=list,
-        blank=True,
-        help_text="Optional preference hints such as morning/afternoon/evening.",
-    )
     deferral_limit = models.PositiveIntegerField(default=3)
     priority = models.IntegerField(default=0, help_text="Higher = more urgent/important.")
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)

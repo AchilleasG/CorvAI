@@ -117,11 +117,6 @@ def list_combined(time_min: Optional[str] = None, time_max: Optional[str] = None
             "soft_deadline": {"type": "string", "description": "ISO datetime deadline (soft)"},
             "hard_deadline": {"type": "string", "description": "ISO datetime deadline (hard)"},
             "frequency": {"type": "string", "description": "Optional recurrence description (e.g., weekly)"},
-            "preferred_dayparts": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Hints like morning/afternoon/evening",
-            },
             "deferral_limit": {"type": "integer", "default": 3},
             "priority": {"type": "integer", "default": 0, "description": "Higher = more urgent"},
             "chat_id": {"type": "string", "description": "Optional chat id for context/notifications"},

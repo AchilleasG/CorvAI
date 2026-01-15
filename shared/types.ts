@@ -92,6 +92,8 @@ export type SoftSlot = {
   rationale?: string;
   deferral_count: number;
   promoted: boolean;
+  soft_deadline?: string | null;
+  hard_deadline?: string | null;
 };
 
 export type SoftEventUnscheduled = {
@@ -112,7 +114,6 @@ export type SoftEventDetail = {
   soft_deadline?: string | null;
   hard_deadline?: string | null;
   frequency: string;
-  preferred_dayparts: string[];
   deferral_limit: number;
   priority: number;
   status: "active" | "paused" | "archived";

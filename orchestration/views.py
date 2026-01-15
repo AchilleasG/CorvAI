@@ -548,6 +548,12 @@ def calendar_combined(
                 "rationale": slot.rationale,
                 "deferral_count": slot.deferral_count,
                 "promoted": slot.status == SoftEventSlot.STATUS_PROMOTED,
+                "soft_deadline": slot.soft_event.soft_deadline.isoformat()
+                if slot.soft_event.soft_deadline
+                else None,
+                "hard_deadline": slot.soft_event.hard_deadline.isoformat()
+                if slot.soft_event.hard_deadline
+                else None,
             }
         )
 
@@ -607,7 +613,6 @@ def get_soft_event_detail(request, soft_event_id: UUID):
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
-        "preferred_dayparts": se.preferred_dayparts,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
@@ -625,7 +630,6 @@ def update_soft_event_detail(
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
     frequency: Optional[str] = None,
-    preferred_dayparts: Optional[List[str]] = None,
     deferral_limit: Optional[int] = None,
     priority: Optional[int] = None,
     status: Optional[str] = None,
@@ -657,9 +661,6 @@ def update_soft_event_detail(
     if frequency is not None:
         se.frequency = frequency
         fields.append("frequency")
-    if preferred_dayparts is not None:
-        se.preferred_dayparts = preferred_dayparts
-        fields.append("preferred_dayparts")
     if deferral_limit is not None:
         se.deferral_limit = max(int(deferral_limit), 0)
         fields.append("deferral_limit")
@@ -681,7 +682,6 @@ def update_soft_event_detail(
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
-        "preferred_dayparts": se.preferred_dayparts,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
@@ -698,7 +698,6 @@ def create_soft_event_detail(
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
     frequency: str = "",
-    preferred_dayparts: Optional[List[str]] = None,
     deferral_limit: int = 3,
     priority: int = 0,
 ):
@@ -710,7 +709,6 @@ def create_soft_event_detail(
         soft_deadline=_parse_dt(soft_deadline) if soft_deadline else None,
         hard_deadline=_parse_dt(hard_deadline) if hard_deadline else None,
         frequency=frequency or "",
-        preferred_dayparts=preferred_dayparts or [],
         deferral_limit=max(deferral_limit or 0, 0),
         priority=priority or 0,
         status=SoftEvent.STATUS_ACTIVE,
@@ -724,7 +722,6 @@ def create_soft_event_detail(
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
-        "preferred_dayparts": se.preferred_dayparts,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
