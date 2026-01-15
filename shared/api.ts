@@ -5,7 +5,9 @@ import {
   Job,
   UsageEvent,
   UsageSummary,
+  CalendarReplanResult,
   CombinedCalendar,
+  SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
   UserMessage,
@@ -164,6 +166,46 @@ export function createApi(config: ApiConfig) {
     fetchCalendarCombined(params: { days?: number } = {}) {
       const qs = params.days ? `?days=${params.days}` : "";
       return request<CombinedCalendar>(config, `/orchestration/calendar/combined${qs}`);
+    },
+    createSoftEvent(payload: Partial<SoftEventDetail> & { title: string }) {
+      return request<SoftEventDetail>(config, "/orchestration/soft_events", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    replanCalendar(payload: { days?: number; note?: string } = {}) {
+      const params = new URLSearchParams();
+      if (payload.days) {
+        params.set("days", String(payload.days));
+      }
+      if (payload.note) {
+        params.set("note", payload.note);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return request<CalendarReplanResult>(config, `/orchestration/calendar/replan${suffix}`, {
+        method: "POST",
+      });
+    },
+    fetchSoftEvent(soft_event_id: string) {
+      return request<SoftEventDetail>(config, `/orchestration/soft_events/${soft_event_id}`);
+    },
+    updateSoftEvent(
+      soft_event_id: string,
+      payload: Partial<SoftEventDetail> & {
+        preferred_dayparts?: string[];
+        soft_deadline?: string | null;
+        hard_deadline?: string | null;
+      },
+    ) {
+      return request<SoftEventDetail>(config, `/orchestration/soft_events/${soft_event_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    promoteSoftSlot(slot_id: string) {
+      return request<{ updated: number }>(config, `/orchestration/soft_slots/${slot_id}/promote`, {
+        method: "POST",
+      });
     },
     fetchScheduledTasks() {
       return request<ScheduledTask[]>(config, `/orchestration/scheduled_tasks`);

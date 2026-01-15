@@ -97,9 +97,32 @@ export type SoftSlot = {
 export type SoftEventUnscheduled = {
   id: string;
   title: string;
+  notes?: string;
   priority: number;
   soft_deadline?: string | null;
   hard_deadline?: string | null;
+};
+
+export type SoftEventDetail = {
+  id: string;
+  title: string;
+  description: string;
+  notes: string;
+  duration_minutes: number;
+  soft_deadline?: string | null;
+  hard_deadline?: string | null;
+  frequency: string;
+  preferred_dayparts: string[];
+  deferral_limit: number;
+  priority: number;
+  status: "active" | "paused" | "archived";
+};
+
+export type CalendarReplanResult = {
+  actions: number;
+  created: number;
+  updated: number;
+  trace_id: string;
 };
 
 export type CombinedCalendar = {

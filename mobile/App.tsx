@@ -33,7 +33,6 @@ import {
   cancelJob,
   createChat,
   deleteChat,
-  fetchCalendarCombined,
   fetchChats,
   fetchJobs,
   fetchMessages,
@@ -41,6 +40,11 @@ import {
   fetchSettings,
   fetchUsageRecent,
   fetchUsageSummary,
+  fetchCalendarCombined,
+  createSoftEvent,
+  promoteSoftSlot,
+  replanCalendar,
+  fetchSoftEvent,
   renameChat,
   sendText,
   sendVoice,
@@ -49,6 +53,7 @@ import {
   createScheduledTask,
   updateScheduledTask,
   fetchScheduledTaskRuns,
+  updateSoftEvent,
   registerPushToken,
   fetchInboxMessages,
   markMessageRead,
@@ -68,6 +73,7 @@ import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
   CombinedCalendar,
+  SoftEventDetail,
   Job,
   Message,
   SettingsPayload,
@@ -82,6 +88,23 @@ import { Audio } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 
 type TabKey = "chat" | "settings" | "calendar" | "scheduler" | "messages" | "calls";
+
+type SoftEventDraft = {
+  id: string;
+  title: string;
+  description: string;
+  notes: string;
+  duration_minutes: string;
+  soft_deadline: string;
+  hard_deadline: string;
+  frequency: string;
+  preferred_dayparts: string;
+  deferral_limit: string;
+  priority: string;
+  status: SoftEventDetail["status"];
+};
+
+type SoftEventMode = "create" | "edit";
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -198,6 +221,13 @@ function InnerApp() {
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [selectedDayKey, setSelectedDayKey] = useState<string | null>(null);
+  const [replanLoading, setReplanLoading] = useState(false);
+  const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
+  const [softEventModalVisible, setSoftEventModalVisible] = useState(false);
+  const [softEventLoading, setSoftEventLoading] = useState(false);
+  const [softEventError, setSoftEventError] = useState<string | null>(null);
+  const [softEventDraft, setSoftEventDraft] = useState<SoftEventDraft | null>(null);
+  const [softEventMode, setSoftEventMode] = useState<SoftEventMode>("edit");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -458,12 +488,7 @@ function InnerApp() {
   useEffect(() => {
     if (!authed) return;
     if (activeTab !== "calendar") return;
-    setCalendarLoading(true);
-    setCalendarError(null);
-    fetchCalendarCombined({ days: 14 })
-      .then((data) => setCalendarData(data))
-      .catch((err: any) => setCalendarError(err.message || "Failed to load calendar"))
-      .finally(() => setCalendarLoading(false));
+    refreshCalendar();
   }, [activeTab, authed]);
 
   useEffect(() => {
@@ -827,6 +852,147 @@ function InnerApp() {
       setError(err.message || "Failed to load messages");
     } finally {
       setMessagesLoading(false);
+    }
+  }
+
+  async function refreshCalendar() {
+    try {
+      setCalendarLoading(true);
+      setCalendarError(null);
+      const data = await fetchCalendarCombined({ days: 14 });
+      setCalendarData(data);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to load calendar");
+    } finally {
+      setCalendarLoading(false);
+    }
+  }
+
+  function toSoftEventDraft(detail: SoftEventDetail): SoftEventDraft {
+    return {
+      id: detail.id,
+      title: detail.title || "",
+      description: detail.description || "",
+      notes: detail.notes || "",
+      duration_minutes: String(detail.duration_minutes ?? ""),
+      soft_deadline: detail.soft_deadline || "",
+      hard_deadline: detail.hard_deadline || "",
+      frequency: detail.frequency || "",
+      preferred_dayparts: (detail.preferred_dayparts || []).join(", "),
+      deferral_limit: String(detail.deferral_limit ?? ""),
+      priority: String(detail.priority ?? ""),
+      status: detail.status,
+    };
+  }
+
+  function newSoftEventDraft(): SoftEventDraft {
+    return {
+      id: "",
+      title: "",
+      description: "",
+      notes: "",
+      duration_minutes: "30",
+      soft_deadline: "",
+      hard_deadline: "",
+      frequency: "",
+      preferred_dayparts: "",
+      deferral_limit: "3",
+      priority: "0",
+      status: "active",
+    };
+  }
+
+  async function openSoftEventEditor(softEventId: string) {
+    try {
+      setSoftEventError(null);
+      setSoftEventLoading(true);
+      setSoftEventMode("edit");
+      setSoftEventModalVisible(true);
+      const detail = await fetchSoftEvent(softEventId);
+      setSoftEventDraft(toSoftEventDraft(detail));
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSoftEventError(err.message || "Failed to load soft event");
+    } finally {
+      setSoftEventLoading(false);
+    }
+  }
+
+  function openSoftEventCreator() {
+    setSoftEventError(null);
+    setSoftEventMode("create");
+    setSoftEventDraft(newSoftEventDraft());
+    setSoftEventModalVisible(true);
+  }
+
+  async function saveSoftEventDraft() {
+    if (!softEventDraft) return;
+    try {
+      if (!softEventDraft.title.trim()) {
+        setSoftEventError("Title is required");
+        return;
+      }
+      setSoftEventLoading(true);
+      const duration = parseInt(softEventDraft.duration_minutes, 10);
+      const deferral = parseInt(softEventDraft.deferral_limit, 10);
+      const priority = parseInt(softEventDraft.priority, 10);
+      const preferred = softEventDraft.preferred_dayparts
+        .split(",")
+        .map((val) => val.trim())
+        .filter(Boolean);
+      const payload = {
+        title: softEventDraft.title,
+        description: softEventDraft.description,
+        notes: softEventDraft.notes,
+        duration_minutes: Number.isFinite(duration) ? duration : undefined,
+        soft_deadline: softEventDraft.soft_deadline.trim() ? softEventDraft.soft_deadline.trim() : null,
+        hard_deadline: softEventDraft.hard_deadline.trim() ? softEventDraft.hard_deadline.trim() : null,
+        frequency: softEventDraft.frequency,
+        preferred_dayparts: preferred,
+        deferral_limit: Number.isFinite(deferral) ? deferral : undefined,
+        priority: Number.isFinite(priority) ? priority : undefined,
+        status: softEventDraft.status,
+      };
+      if (softEventMode === "create") {
+        await createSoftEvent(payload);
+      } else {
+        await updateSoftEvent(softEventDraft.id, payload);
+      }
+      setSoftEventModalVisible(false);
+      setSoftEventDraft(null);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSoftEventError(err.message || "Failed to save soft event");
+    } finally {
+      setSoftEventLoading(false);
+    }
+  }
+
+  async function handlePromoteSoftSlot(slotId: string) {
+    try {
+      setPromoteLoadingId(slotId);
+      await promoteSoftSlot(slotId);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to promote soft slot");
+    } finally {
+      setPromoteLoadingId(null);
+    }
+  }
+
+  async function handleReplanCalendar() {
+    try {
+      setReplanLoading(true);
+      await replanCalendar({ days: 14 });
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to replan calendar");
+    } finally {
+      setReplanLoading(false);
     }
   }
 
@@ -1797,6 +1963,23 @@ function InnerApp() {
                 Window: {formatDateTime(calendarData.window_start)} -{" "}
                 {formatDateTime(calendarData.window_end)}
               </Text>
+              <View style={styles.rowActions}>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={handleReplanCalendar}
+                  disabled={replanLoading}
+                >
+                  <Text style={styles.secondaryButtonText}>
+                    {replanLoading ? "Replanning…" : "Replan next 2 weeks"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={openSoftEventCreator}
+                >
+                  <Text style={styles.secondaryButtonText}>Add soft event</Text>
+                </TouchableOpacity>
+              </View>
               <View style={styles.calendarLegend}>
                 <View style={styles.calendarLegendItem}>
                   <View style={[styles.calendarLegendDot, styles.calendarLegendHard]} />
@@ -1860,13 +2043,28 @@ function InnerApp() {
                           <>
                             <Text style={styles.calendarSubTitle}>Soft slots</Text>
                             {selected.soft.map((slot) => (
-                              <View key={slot.id} style={styles.calendarRow}>
+                              <TouchableOpacity
+                                key={slot.id}
+                                style={styles.calendarRow}
+                                onPress={() => openSoftEventEditor(slot.soft_event_id)}
+                              >
                                 <Text style={styles.calendarTitle}>{slot.title}</Text>
                                 <Text style={styles.muted}>
                                   {formatDateTime(slot.start)} - {formatDateTime(slot.end)}
                                 </Text>
                                 <Text style={styles.muted}>Status: {slot.status}</Text>
-                              </View>
+                                <View style={styles.rowActions}>
+                                  <TouchableOpacity
+                                    style={styles.secondaryButton}
+                                    onPress={() => handlePromoteSoftSlot(slot.id)}
+                                    disabled={promoteLoadingId === slot.id}
+                                  >
+                                    <Text style={styles.secondaryButtonText}>
+                                      {promoteLoadingId === slot.id ? "Promoting…" : "Promote"}
+                                    </Text>
+                                  </TouchableOpacity>
+                                </View>
+                              </TouchableOpacity>
                             ))}
                           </>
                         )}
@@ -1882,7 +2080,11 @@ function InnerApp() {
               <Text style={styles.sectionTitle}>Unscheduled soft events</Text>
               {calendarData.soft_events_unscheduled.length ? (
                 calendarData.soft_events_unscheduled.map((event) => (
-                  <View key={event.id} style={styles.calendarRow}>
+                  <TouchableOpacity
+                    key={event.id}
+                    style={styles.calendarRow}
+                    onPress={() => openSoftEventEditor(event.id)}
+                  >
                     <Text style={styles.calendarTitle}>{event.title}</Text>
                     <Text style={styles.muted}>Priority: {event.priority}</Text>
                     {event.soft_deadline && (
@@ -1895,7 +2097,7 @@ function InnerApp() {
                         Hard deadline: {formatDateTime(event.hard_deadline)}
                       </Text>
                     )}
-                  </View>
+                  </TouchableOpacity>
                 ))
               ) : (
                 <Text style={styles.muted}>No unscheduled soft events.</Text>
@@ -1975,6 +2177,140 @@ function InnerApp() {
               >
                 <Text style={styles.secondaryButtonText}>Close</Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={softEventModalVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.sectionTitle}>
+              {softEventMode === "create" ? "Add soft event" : "Edit soft event"}
+            </Text>
+            {softEventLoading && <ActivityIndicator />}
+            {softEventError && <Text style={styles.errorText}>{softEventError}</Text>}
+            {softEventDraft && (
+              <ScrollView style={styles.jobLogList}>
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.title}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, title: value } : prev))
+                  }
+                  placeholder="Title"
+                />
+                <TextInput
+                  style={[styles.input, styles.textarea]}
+                  value={softEventDraft.description}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, description: value } : prev))
+                  }
+                  placeholder="Description"
+                  multiline
+                />
+                <TextInput
+                  style={[styles.input, styles.textarea]}
+                  value={softEventDraft.notes}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, notes: value } : prev))
+                  }
+                  placeholder="Notes"
+                  multiline
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.duration_minutes}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, duration_minutes: value } : prev))
+                  }
+                  placeholder="Duration minutes"
+                  keyboardType="numeric"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.soft_deadline}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, soft_deadline: value } : prev))
+                  }
+                  placeholder="Soft deadline (ISO)"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.hard_deadline}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, hard_deadline: value } : prev))
+                  }
+                  placeholder="Hard deadline (ISO)"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.frequency}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, frequency: value } : prev))
+                  }
+                  placeholder="Frequency"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.preferred_dayparts}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) =>
+                      prev ? { ...prev, preferred_dayparts: value } : prev
+                    )
+                  }
+                  placeholder="Preferred dayparts (comma-separated)"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.deferral_limit}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, deferral_limit: value } : prev))
+                  }
+                  placeholder="Deferral limit"
+                  keyboardType="numeric"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.priority}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, priority: value } : prev))
+                  }
+                  placeholder="Priority"
+                  keyboardType="numeric"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.status}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) =>
+                      prev ? { ...prev, status: value as SoftEventDetail["status"] } : prev
+                    )
+                  }
+                  placeholder="Status (active/paused/archived)"
+                />
+              </ScrollView>
+            )}
+            <View style={styles.modalActions}>
+                <TouchableOpacity
+                  style={styles.secondaryButton}
+                  onPress={() => {
+                    setSoftEventModalVisible(false);
+                    setSoftEventDraft(null);
+                    setSoftEventError(null);
+                  }}
+                >
+                  <Text style={styles.secondaryButtonText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.primaryButton, styles.modalPrimary]}
+                  onPress={saveSoftEventDraft}
+                  disabled={softEventLoading || !softEventDraft}
+                >
+                <Text style={styles.primaryButtonText}>
+                  {softEventMode === "create" ? "Create" : "Save"}
+                </Text>
+                </TouchableOpacity>
             </View>
           </View>
         </View>

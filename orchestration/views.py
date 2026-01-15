@@ -46,6 +46,7 @@ from orchestration.services import JobService, ModelConfigService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
 from orchestration.tools.calendar import list_events
+from orchestration.tools import soft_events
 
 router = Router(tags=["orchestration"])
 logger = logging.getLogger(__name__)
@@ -583,3 +584,154 @@ def calendar_combined(
         "soft_slots": soft_slots,
         "soft_events_unscheduled": unscheduled,
     }
+
+
+@router.post("/calendar/replan")
+def calendar_replan(request, days: int = 14, note: Optional[str] = None):
+    result = soft_events.replan_window(days=days, note=note)
+    return result
+
+
+@router.get("/soft_events/{soft_event_id}")
+def get_soft_event_detail(request, soft_event_id: UUID):
+    try:
+        se = SoftEvent.objects.get(id=soft_event_id)
+    except SoftEvent.DoesNotExist:
+        raise HttpError(404, "Soft event not found")
+    return {
+        "id": str(se.id),
+        "title": se.title,
+        "description": se.description,
+        "notes": se.notes,
+        "duration_minutes": se.duration_minutes,
+        "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+        "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+        "frequency": se.frequency,
+        "preferred_dayparts": se.preferred_dayparts,
+        "deferral_limit": se.deferral_limit,
+        "priority": se.priority,
+        "status": se.status,
+    }
+
+
+@router.patch("/soft_events/{soft_event_id}")
+def update_soft_event_detail(
+    request,
+    soft_event_id: UUID,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    notes: Optional[str] = None,
+    duration_minutes: Optional[int] = None,
+    soft_deadline: Optional[str] = None,
+    hard_deadline: Optional[str] = None,
+    frequency: Optional[str] = None,
+    preferred_dayparts: Optional[List[str]] = None,
+    deferral_limit: Optional[int] = None,
+    priority: Optional[int] = None,
+    status: Optional[str] = None,
+):
+    try:
+        se = SoftEvent.objects.get(id=soft_event_id)
+    except SoftEvent.DoesNotExist:
+        raise HttpError(404, "Soft event not found")
+
+    fields = []
+    if title is not None:
+        se.title = title
+        fields.append("title")
+    if description is not None:
+        se.description = description
+        fields.append("description")
+    if notes is not None:
+        se.notes = notes
+        fields.append("notes")
+    if duration_minutes is not None:
+        se.duration_minutes = max(int(duration_minutes), 1)
+        fields.append("duration_minutes")
+    if soft_deadline is not None:
+        se.soft_deadline = _parse_dt(soft_deadline) if soft_deadline else None
+        fields.append("soft_deadline")
+    if hard_deadline is not None:
+        se.hard_deadline = _parse_dt(hard_deadline) if hard_deadline else None
+        fields.append("hard_deadline")
+    if frequency is not None:
+        se.frequency = frequency
+        fields.append("frequency")
+    if preferred_dayparts is not None:
+        se.preferred_dayparts = preferred_dayparts
+        fields.append("preferred_dayparts")
+    if deferral_limit is not None:
+        se.deferral_limit = max(int(deferral_limit), 0)
+        fields.append("deferral_limit")
+    if priority is not None:
+        se.priority = int(priority)
+        fields.append("priority")
+    if status is not None:
+        se.status = status
+        fields.append("status")
+    if fields:
+        se.save(update_fields=list(set(fields + ["updated_at"])))
+
+    return {
+        "id": str(se.id),
+        "title": se.title,
+        "description": se.description,
+        "notes": se.notes,
+        "duration_minutes": se.duration_minutes,
+        "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+        "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+        "frequency": se.frequency,
+        "preferred_dayparts": se.preferred_dayparts,
+        "deferral_limit": se.deferral_limit,
+        "priority": se.priority,
+        "status": se.status,
+    }
+
+
+@router.post("/soft_events")
+def create_soft_event_detail(
+    request,
+    title: str,
+    description: str = "",
+    notes: str = "",
+    duration_minutes: int = 30,
+    soft_deadline: Optional[str] = None,
+    hard_deadline: Optional[str] = None,
+    frequency: str = "",
+    preferred_dayparts: Optional[List[str]] = None,
+    deferral_limit: int = 3,
+    priority: int = 0,
+):
+    se = SoftEvent.objects.create(
+        title=title,
+        description=description or "",
+        notes=notes or "",
+        duration_minutes=max(duration_minutes or 0, 1),
+        soft_deadline=_parse_dt(soft_deadline) if soft_deadline else None,
+        hard_deadline=_parse_dt(hard_deadline) if hard_deadline else None,
+        frequency=frequency or "",
+        preferred_dayparts=preferred_dayparts or [],
+        deferral_limit=max(deferral_limit or 0, 0),
+        priority=priority or 0,
+        status=SoftEvent.STATUS_ACTIVE,
+    )
+    return {
+        "id": str(se.id),
+        "title": se.title,
+        "description": se.description,
+        "notes": se.notes,
+        "duration_minutes": se.duration_minutes,
+        "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
+        "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+        "frequency": se.frequency,
+        "preferred_dayparts": se.preferred_dayparts,
+        "deferral_limit": se.deferral_limit,
+        "priority": se.priority,
+        "status": se.status,
+    }
+
+
+@router.post("/soft_slots/{slot_id}/promote")
+def promote_soft_slot(request, slot_id: UUID):
+    result = soft_events.promote_slot(slot_id=str(slot_id))
+    return result

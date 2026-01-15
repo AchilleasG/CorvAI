@@ -12,7 +12,29 @@ from orchestration.soft_scheduler import collect_window_state
 from orchestration.soft_planner import plan_soft_window
 from orchestration.services import SoftEventService
 
-from orchestration.models import SoftEvent, SoftEventSlot
+from orchestration.models import SoftEvent, SoftEventSlot, OrchestrationSetting
+
+HABITS_KEY = "calendar_habits_text"
+
+
+def _get_habits_value() -> str:
+    setting = OrchestrationSetting.objects.filter(key=HABITS_KEY).first()
+    return setting.value if setting else ""
+
+
+def _set_habits_value(value: str) -> str:
+    OrchestrationSetting.objects.update_or_create(
+        key=HABITS_KEY,
+        defaults={"value": value or ""},
+    )
+    return value or ""
+
+
+def _get_soft_event(soft_event_id: str) -> Optional[SoftEvent]:
+    try:
+        return SoftEvent.objects.get(id=soft_event_id)
+    except (SoftEvent.DoesNotExist, ValueError):
+        return None
 
 @register_function(
     manifest_id="calendar_manager.list_combined",
@@ -70,6 +92,7 @@ def list_combined(time_min: Optional[str] = None, time_max: Optional[str] = None
             {
                 "id": se["id"],
                 "title": se["title"],
+                "notes": se.get("notes", ""),
                 "priority": se["priority"],
                 "soft_deadline": se["soft_deadline"],
                 "hard_deadline": se["hard_deadline"],
@@ -89,6 +112,7 @@ def list_combined(time_min: Optional[str] = None, time_max: Optional[str] = None
         "properties": {
             "title": {"type": "string"},
             "description": {"type": "string"},
+            "notes": {"type": "string", "description": "Optional scheduling notes"},
             "duration_minutes": {"type": "integer", "default": 30},
             "soft_deadline": {"type": "string", "description": "ISO datetime deadline (soft)"},
             "hard_deadline": {"type": "string", "description": "ISO datetime deadline (hard)"},
@@ -148,9 +172,8 @@ def get_soft_event(
     time_min: Optional[str] = None,
     time_max: Optional[str] = None,
 ):
-    try:
-        se = SoftEvent.objects.get(id=soft_event_id)
-    except (SoftEvent.DoesNotExist, ValueError):
+    se = _get_soft_event(soft_event_id)
+    if not se:
         return {"found": False}
 
     slots_qs = SoftEventSlot.objects.filter(soft_event=se).order_by("start_at")
@@ -184,6 +207,7 @@ def get_soft_event(
             "id": str(se.id),
             "title": se.title,
             "description": se.description,
+            "notes": se.notes,
             "status": se.status,
             "priority": se.priority,
             "duration_minutes": se.duration_minutes,
@@ -192,6 +216,103 @@ def get_soft_event(
         },
         "slots": slots,
     }
+
+
+@register_function(
+    manifest_id="calendar_manager.get_soft_event_notes",
+    module="calendar_manager",
+    description="Get notes for a soft event.",
+    params_schema={
+        "type": "object",
+        "properties": {"soft_event_id": {"type": "string"}},
+        "required": ["soft_event_id"],
+    },
+)
+def get_soft_event_notes(soft_event_id: str):
+    se = _get_soft_event(soft_event_id)
+    if not se:
+        return {"found": False}
+    return {"found": True, "soft_event_id": str(se.id), "notes": se.notes}
+
+
+@register_function(
+    manifest_id="calendar_manager.set_soft_event_notes",
+    module="calendar_manager",
+    description="Overwrite notes for a soft event.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "soft_event_id": {"type": "string"},
+            "notes": {"type": "string"},
+        },
+        "required": ["soft_event_id", "notes"],
+    },
+)
+def set_soft_event_notes(soft_event_id: str, notes: str):
+    se = _get_soft_event(soft_event_id)
+    if not se:
+        return {"updated": False}
+    se.notes = notes or ""
+    se.save(update_fields=["notes", "updated_at"])
+    return {"updated": True, "soft_event_id": str(se.id), "notes": se.notes}
+
+
+@register_function(
+    manifest_id="calendar_manager.append_soft_event_notes",
+    module="calendar_manager",
+    description="Append notes for a soft event.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "soft_event_id": {"type": "string"},
+            "notes": {"type": "string"},
+            "separator": {"type": "string", "default": "\n"},
+        },
+        "required": ["soft_event_id", "notes"],
+    },
+)
+def append_soft_event_notes(soft_event_id: str, notes: str, separator: str = "\n"):
+    se = _get_soft_event(soft_event_id)
+    if not se:
+        return {"updated": False}
+    base = se.notes or ""
+    sep = separator if base and notes else ""
+    se.notes = f"{base}{sep}{notes}".strip()
+    se.save(update_fields=["notes", "updated_at"])
+    return {"updated": True, "soft_event_id": str(se.id), "notes": se.notes}
+
+
+@register_function(
+    manifest_id="calendar_manager.clear_soft_event_notes",
+    module="calendar_manager",
+    description="Clear notes for a soft event.",
+    params_schema={
+        "type": "object",
+        "properties": {"soft_event_id": {"type": "string"}},
+        "required": ["soft_event_id"],
+    },
+)
+def clear_soft_event_notes(soft_event_id: str):
+    se = _get_soft_event(soft_event_id)
+    if not se:
+        return {"updated": False}
+    se.notes = ""
+    se.save(update_fields=["notes", "updated_at"])
+    return {"updated": True, "soft_event_id": str(se.id)}
+
+
+@register_function(
+    manifest_id="calendar_manager.delete_soft_event_notes",
+    module="calendar_manager",
+    description="Delete notes for a soft event (alias of clear).",
+    params_schema={
+        "type": "object",
+        "properties": {"soft_event_id": {"type": "string"}},
+        "required": ["soft_event_id"],
+    },
+)
+def delete_soft_event_notes(soft_event_id: str):
+    return clear_soft_event_notes(soft_event_id)
 
 
 @register_function(
@@ -323,6 +444,73 @@ def delete_soft_event(soft_event_id: str):
     se.status = SoftEvent.STATUS_ARCHIVED
     se.save(update_fields=["status", "updated_at"])
     return {"deleted": 1, "canceled_slots": canceled}
+
+
+@register_function(
+    manifest_id="calendar_manager.get_habits",
+    module="calendar_manager",
+    description="Get scheduling habits and routine notes.",
+    params_schema={"type": "object", "properties": {}},
+)
+def get_habits():
+    return {"text": _get_habits_value()}
+
+
+@register_function(
+    manifest_id="calendar_manager.set_habits",
+    module="calendar_manager",
+    description="Overwrite scheduling habits and routine notes.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Full habits text to store"},
+        },
+        "required": ["text"],
+    },
+)
+def set_habits(text: str):
+    return {"text": _set_habits_value(text)}
+
+
+@register_function(
+    manifest_id="calendar_manager.append_habits",
+    module="calendar_manager",
+    description="Append text to scheduling habits and routine notes.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "Text to append"},
+            "separator": {"type": "string", "description": "Separator between entries", "default": "\n"},
+        },
+        "required": ["text"],
+    },
+)
+def append_habits(text: str, separator: str = "\n"):
+    base = _get_habits_value()
+    sep = separator if base and text else ""
+    return {"text": _set_habits_value(f"{base}{sep}{text}".strip())}
+
+
+@register_function(
+    manifest_id="calendar_manager.clear_habits",
+    module="calendar_manager",
+    description="Clear scheduling habits and routine notes.",
+    params_schema={"type": "object", "properties": {}},
+)
+def clear_habits():
+    _set_habits_value("")
+    return {"cleared": True}
+
+
+@register_function(
+    manifest_id="calendar_manager.delete_habits",
+    module="calendar_manager",
+    description="Delete scheduling habits and routine notes (alias of clear).",
+    params_schema={"type": "object", "properties": {}},
+)
+def delete_habits():
+    _set_habits_value("")
+    return {"deleted": True}
 
 
 @register_function(

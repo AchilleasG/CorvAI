@@ -35,6 +35,7 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
         "properties": {
             "title": {"type": "string"},
             "description": {"type": "string"},
+            "notes": {"type": "string", "description": "Optional scheduling notes"},
             "duration_minutes": {"type": "integer", "default": 30},
             "soft_deadline": {"type": "string", "description": "ISO datetime deadline (soft)"},
             "hard_deadline": {"type": "string", "description": "ISO datetime deadline (hard)"},
@@ -62,6 +63,7 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
 def create_soft_event(
     title: str,
     description: str = "",
+    notes: str = "",
     duration_minutes: int = 30,
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
@@ -81,6 +83,7 @@ def create_soft_event(
     se = SoftEvent.objects.create(
         title=title,
         description=description or "",
+        notes=notes or "",
         duration_minutes=max(duration_minutes or 0, 1),
         soft_deadline=_parse_dt(soft_deadline),
         hard_deadline=_parse_dt(hard_deadline),
@@ -151,6 +154,8 @@ def list_soft_events(
             {
                 "id": str(se.id),
                 "title": se.title,
+                "description": se.description,
+                "notes": se.notes,
                 "status": se.status,
                 "priority": se.priority,
                 "duration_minutes": se.duration_minutes,

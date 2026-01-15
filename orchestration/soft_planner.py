@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from orchestration.model_providers import resolve_provider, get_client
 from orchestration.services import ModelConfigService
+from orchestration.models import OrchestrationSetting
 
 
 def _safe_json_load(text: str) -> Dict[str, Any]:
@@ -38,7 +39,7 @@ def plan_soft_window(
 
     instructions = (
         "You are the Soft Event Planner. Given hard calendar events and flexible soft events, propose scheduling changes within the window.\n"
-        "Hard events are fixed. Soft events have duration, deadlines, and deferral limits. Existing soft slots may already be planned.\n"
+        "Hard events are fixed. Soft events have duration, deadlines, deferral limits, and may include notes. Existing soft slots may already be planned.\n"
         "Return JSON with 'actions' (array) and an optional 'summary'.\n" \
         "If a soft event is reaching its deadline and you deem the user might not get another good chance to do it later, promote it to a hard event.\n" \
         "If no changes are needed, return an empty 'actions' array.\n" \
@@ -64,7 +65,14 @@ def plan_soft_window(
         "soft_events": soft_state.get("soft_events", []),
         "slots": soft_state.get("slots", []),
     }
-    prompt_text = f"{instructions}\n{window_block}\nData:\n{json.dumps(payload, default=str)}"
+    habits = (
+        OrchestrationSetting.objects.filter(key="calendar_habits_text")
+        .values_list("value", flat=True)
+        .first()
+        or ""
+    )
+    habits_block = f"\nScheduling habits:\n{habits}" if habits else ""
+    prompt_text = f"{instructions}{habits_block}\n{window_block}\nData:\n{json.dumps(payload, default=str)}"
 
     actions: List[dict] = []
     if provider == "openai":
@@ -84,7 +92,10 @@ def plan_soft_window(
         resp = get_client("xai").chat.completions.create(
             model=model_name,
             messages=[
-                {"role": "system", "content": instructions},
+                {
+                    "role": "system",
+                    "content": f"{instructions}{habits_block}",
+                },
                 {"role": "user", "content": f"{window_block}\nData:\n{json.dumps(payload, default=str)}"},
             ],
             response_format={"type": "json_object"},

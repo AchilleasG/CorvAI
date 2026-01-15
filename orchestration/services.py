@@ -704,6 +704,9 @@ class SoftEventService:
         goal = f"Time to do: {soft_event.title}."
         if description:
             goal = f"{goal} {description}"
+        notes = (soft_event.notes or "").strip()
+        if notes:
+            goal = f"{goal} Notes: {notes}"
         start_at = slot.start_at.isoformat()
         end_at = slot.end_at.isoformat()
         return (
