@@ -146,7 +146,10 @@ def send_message_push_to_all(
     payload.setdefault("type", "user_message")
     payload.setdefault("title", title)
     payload.setdefault("body", body)
-    send_push_to_all(title=title, body=body, data=payload)
+    expo_tokens = PushToken.objects.filter(
+        platform__in=["ios", "web", "unknown"]
+    ).values_list("token", flat=True)
+    send_push(tokens=expo_tokens, title=title, body=body, data=payload)
     tokens = list(
         PushToken.objects.filter(platform="android_fcm").values_list("token", flat=True)
     )

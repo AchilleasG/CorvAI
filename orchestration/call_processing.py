@@ -80,6 +80,12 @@ def notify_incoming_call(session: CallSession):
 def mark_call_missed(session: CallSession):
     logger.info("call_session mark_missed id=%s status=%s", session.id, session.status)
     try:
+        existing = UserMessage.objects.filter(
+            kind=UserMessage.KIND_CALL_MISSED,
+            metadata__call_session_id=str(session.id),
+        ).first()
+        if existing and session.status == CallSession.STATUS_MISSED:
+            return
         session.status = CallSession.STATUS_MISSED
         session.ended_at = timezone.now()
         session.save(update_fields=["status", "ended_at", "updated_at"])
@@ -90,18 +96,20 @@ def mark_call_missed(session: CallSession):
             title=title,
             kind=UserMessage.KIND_CALL_MISSED,
         )
-        msg = UserMessage.objects.create(
-            title=title,
-            body=phrased_body,
-            kind=UserMessage.KIND_CALL_MISSED,
-            metadata={"call_session_id": str(session.id)},
-        )
+        msg = existing
+        if not msg:
+            msg = UserMessage.objects.create(
+                title=title,
+                body=phrased_body,
+                kind=UserMessage.KIND_CALL_MISSED,
+                metadata={"call_session_id": str(session.id)},
+            )
         send_message_push_to_all(
             title=title,
             body=phrased_body,
             data={
                 "call_session_id": str(session.id),
-                "message_id": str(msg.id),
+                "message_id": str(msg.id) if msg else "",
             },
         )
     except Exception:
