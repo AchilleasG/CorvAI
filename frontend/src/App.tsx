@@ -15,10 +15,20 @@ import {
   fetchSettings,
   updateSettings,
   fetchCalendarCombined,
+  createSoftEvent,
+  updateSoftEvent,
+  fetchSoftEvent,
+  promoteSoftSlot,
+  replanCalendar,
   fetchScheduledTasks,
   createScheduledTask,
   updateScheduledTask,
   fetchScheduledTaskRuns,
+  fetchInboxMessages,
+  markMessageRead,
+  fetchCallSessions,
+  createCallSession,
+  updateCallSession,
 } from "./api";
 import {
   ChatListItem,
@@ -28,8 +38,11 @@ import {
   UsageSummary,
   SettingsPayload,
   CombinedCalendar,
+  SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
+  UserMessage,
+  CallSession,
 } from "./types";
 
 function formatChatLabel(chat: ChatListItem) {
@@ -42,6 +55,47 @@ function formatChatLabel(chat: ChatListItem) {
 function RoleBadge({ role }: { role: Message["role"] }) {
   const label = role === "assistant" ? "Corv" : role === "user" ? "You" : "System";
   return <span className={`badge badge-${role}`}>{label}</span>;
+}
+
+type SoftEventDraft = {
+  id: string;
+  title: string;
+  description: string;
+  notes: string;
+  duration_minutes: string;
+  soft_deadline: string;
+  hard_deadline: string;
+  frequency: string;
+  deferral_limit: string;
+  priority: string;
+  status: SoftEventDetail["status"];
+};
+
+type SoftEventMode = "create" | "edit";
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "";
+  return new Date(value).toLocaleString([], {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function toLocalInputValue(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
+function toIsoValue(value: string) {
+  if (!value.trim()) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString();
 }
 
 type MessageBubbleProps = {
@@ -147,6 +201,8 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [showScheduler, setShowScheduler] = useState(false);
+  const [showMessages, setShowMessages] = useState(false);
+  const [showCalls, setShowCalls] = useState(false);
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -174,12 +230,24 @@ export default function App() {
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
+  const [replanLoading, setReplanLoading] = useState(false);
+  const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
+  const [softEventModalOpen, setSoftEventModalOpen] = useState(false);
+  const [softEventLoading, setSoftEventLoading] = useState(false);
+  const [softEventError, setSoftEventError] = useState<string | null>(null);
+  const [softEventDraft, setSoftEventDraft] = useState<SoftEventDraft | null>(null);
+  const [softEventMode, setSoftEventMode] = useState<SoftEventMode>("edit");
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
   const [schedulerError, setSchedulerError] = useState<string | null>(null);
   const [schedulerLoading, setSchedulerLoading] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskRuns, setTaskRuns] = useState<ScheduledTaskRun[]>([]);
   const [taskRunsLoading, setTaskRunsLoading] = useState(false);
+  const [messagesInbox, setMessagesInbox] = useState<UserMessage[]>([]);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [callSessions, setCallSessions] = useState<CallSession[]>([]);
+  const [callsLoading, setCallsLoading] = useState(false);
+  const [callsError, setCallsError] = useState<string | null>(null);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -215,15 +283,7 @@ export default function App() {
   useEffect(() => {
     if (!authed) return;
     if (!showCalendar) return;
-    setCalendarLoading(true);
-    setCalendarError(null);
-    fetchCalendarCombined({ days: 14 })
-      .then((data) => setCalendarData(data))
-      .catch((err: any) => {
-        if (handleAuthError(err)) return;
-        setCalendarError(err.message || "Failed to load calendar");
-      })
-      .finally(() => setCalendarLoading(false));
+    refreshCalendar();
   }, [authed, showCalendar]);
 
   useEffect(() => {
@@ -231,6 +291,18 @@ export default function App() {
     if (!showScheduler) return;
     refreshScheduledTasks();
   }, [authed, showScheduler]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showMessages) return;
+    refreshInboxMessages();
+  }, [authed, showMessages]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showCalls) return;
+    refreshCallSessions();
+  }, [authed, showCalls]);
 
   useEffect(() => {
     if (!authed) return;
@@ -355,6 +427,57 @@ export default function App() {
     }
   }
 
+  async function refreshCalendar() {
+    try {
+      setCalendarLoading(true);
+      setCalendarError(null);
+      const data = await fetchCalendarCombined({ days: 14 });
+      setCalendarData(data);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to load calendar");
+    } finally {
+      setCalendarLoading(false);
+    }
+  }
+
+  async function refreshInboxMessages() {
+    try {
+      setMessagesLoading(true);
+      const data = await fetchInboxMessages();
+      setMessagesInbox(data);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setError(err.message || "Failed to load messages");
+    } finally {
+      setMessagesLoading(false);
+    }
+  }
+
+  async function handleMarkMessageRead(messageId: string) {
+    try {
+      await markMessageRead(messageId);
+      await refreshInboxMessages();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setError(err.message || "Failed to mark message read");
+    }
+  }
+
+  async function refreshCallSessions() {
+    try {
+      setCallsLoading(true);
+      setCallsError(null);
+      const data = await fetchCallSessions();
+      setCallSessions(data);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCallsError(err.message || "Failed to load call sessions");
+    } finally {
+      setCallsLoading(false);
+    }
+  }
+
   async function handleCreateScheduledTask(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setSchedulerError(null);
@@ -406,6 +529,134 @@ export default function App() {
       setSchedulerError(err.message || "Failed to load task runs");
     } finally {
       setTaskRunsLoading(false);
+    }
+  }
+
+  function toSoftEventDraft(detail: SoftEventDetail): SoftEventDraft {
+    return {
+      id: detail.id,
+      title: detail.title || "",
+      description: detail.description || "",
+      notes: detail.notes || "",
+      duration_minutes: String(detail.duration_minutes ?? ""),
+      soft_deadline: toLocalInputValue(detail.soft_deadline),
+      hard_deadline: toLocalInputValue(detail.hard_deadline),
+      frequency: detail.frequency || "",
+      deferral_limit: String(detail.deferral_limit ?? ""),
+      priority: String(detail.priority ?? ""),
+      status: detail.status,
+    };
+  }
+
+  function newSoftEventDraft(): SoftEventDraft {
+    return {
+      id: "",
+      title: "",
+      description: "",
+      notes: "",
+      duration_minutes: "30",
+      soft_deadline: "",
+      hard_deadline: "",
+      frequency: "",
+      deferral_limit: "3",
+      priority: "0",
+      status: "active",
+    };
+  }
+
+  function updateSoftEventDraftField(field: keyof SoftEventDraft, value: string) {
+    setSoftEventDraft((prev) => {
+      if (!prev) return prev;
+      return { ...prev, [field]: value };
+    });
+  }
+
+  async function openSoftEventEditor(softEventId: string) {
+    try {
+      setSoftEventError(null);
+      setSoftEventLoading(true);
+      setSoftEventMode("edit");
+      setSoftEventModalOpen(true);
+      const detail = await fetchSoftEvent(softEventId);
+      setSoftEventDraft(toSoftEventDraft(detail));
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSoftEventError(err.message || "Failed to load soft event");
+    } finally {
+      setSoftEventLoading(false);
+    }
+  }
+
+  function openSoftEventCreator() {
+    setSoftEventError(null);
+    setSoftEventMode("create");
+    setSoftEventDraft(newSoftEventDraft());
+    setSoftEventModalOpen(true);
+  }
+
+  async function saveSoftEventDraft() {
+    if (!softEventDraft) return;
+    if (!softEventDraft.title.trim()) {
+      setSoftEventError("Title is required");
+      return;
+    }
+    try {
+      setSoftEventLoading(true);
+      const duration = parseInt(softEventDraft.duration_minutes, 10);
+      const deferral = parseInt(softEventDraft.deferral_limit, 10);
+      const priority = parseInt(softEventDraft.priority, 10);
+      const payload = {
+        title: softEventDraft.title.trim(),
+        description: softEventDraft.description.trim(),
+        notes: softEventDraft.notes.trim(),
+        duration_minutes: Number.isFinite(duration) ? duration : undefined,
+        soft_deadline: toIsoValue(softEventDraft.soft_deadline) || null,
+        hard_deadline: toIsoValue(softEventDraft.hard_deadline) || null,
+        frequency: softEventDraft.frequency.trim(),
+        deferral_limit: Number.isFinite(deferral) ? deferral : undefined,
+        priority: Number.isFinite(priority) ? priority : undefined,
+        status: softEventDraft.status,
+      };
+      if (softEventMode === "create") {
+        await createSoftEvent(payload);
+      } else {
+        await updateSoftEvent(softEventDraft.id, payload);
+      }
+      setSoftEventModalOpen(false);
+      setSoftEventDraft(null);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSoftEventError(err.message || "Failed to save soft event");
+    } finally {
+      setSoftEventLoading(false);
+    }
+  }
+
+  async function handlePromoteSoftSlot(slotId: string) {
+    try {
+      setPromoteLoadingId(slotId);
+      await promoteSoftSlot(slotId);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to promote soft slot");
+    } finally {
+      setPromoteLoadingId(null);
+    }
+  }
+
+  async function handleReplanCalendar() {
+    const note = window.prompt("Optional note for replanning", "");
+    try {
+      setReplanLoading(true);
+      await replanCalendar({ days: 14, note: note?.trim() || undefined });
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to replan calendar");
+    } finally {
+      setReplanLoading(false);
     }
   }
 
@@ -463,6 +714,11 @@ export default function App() {
 
   async function handleNewChat() {
     try {
+      setShowSettings(false);
+      setShowCalendar(false);
+      setShowScheduler(false);
+      setShowMessages(false);
+      setShowCalls(false);
       const created = await createChat("");
       await refreshChats(created.chat_id);
       setMessages([]);
@@ -753,6 +1009,8 @@ export default function App() {
                         setShowSettings(false);
                         setShowCalendar(false);
                         setShowScheduler(false);
+                        setShowMessages(false);
+                        setShowCalls(false);
                       }}
                     >
                       <span>{formatChatLabel(chat)}</span>
@@ -815,7 +1073,18 @@ export default function App() {
                 <h2>Models & Usage</h2>
               </div>
               <div className="main-actions">
-                <button className="ghost" onClick={() => setShowSettings(false)}>Back to chat</button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowSettings(false);
+                    setShowCalendar(false);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
+                  }}
+                >
+                  Back to chat
+                </button>
               </div>
             </header>
             <div className="settings-grid">
@@ -968,19 +1237,29 @@ export default function App() {
                 <h2>Hard + Soft Events</h2>
               </div>
               <div className="main-actions">
-                <button className="ghost" onClick={() => setShowCalendar(false)}>Back to chat</button>
                 <button
                   className="ghost"
                   onClick={() => {
-                    setCalendarLoading(true);
-                    setCalendarError(null);
-                    fetchCalendarCombined({ days: 14 })
-                      .then((data) => setCalendarData(data))
-                      .catch((err: any) => setCalendarError(err.message || "Failed to load calendar"))
-                      .finally(() => setCalendarLoading(false));
+                    setShowCalendar(false);
+                    setShowSettings(false);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
                   }}
                 >
+                  Back to chat
+                </button>
+                <button
+                  className="ghost"
+                  onClick={refreshCalendar}
+                >
                   Refresh
+                </button>
+                <button className="ghost" onClick={handleReplanCalendar} disabled={replanLoading}>
+                  {replanLoading ? "Replanning…" : "Replan"}
+                </button>
+                <button className="ghost" onClick={openSoftEventCreator}>
+                  Add soft event
                 </button>
               </div>
             </header>
@@ -1002,6 +1281,7 @@ export default function App() {
                   <div className="calendar-list">
                     {[...calendarData.hard_events.map((e) => ({ ...e, type: "hard" as const })), ...calendarData.soft_slots.map((s) => ({
                       id: s.id,
+                      soft_event_id: s.soft_event_id,
                       title: s.title,
                       start: s.start,
                       end: s.end,
@@ -1010,10 +1290,13 @@ export default function App() {
                       rationale: s.rationale,
                       deferral_count: s.deferral_count,
                       promoted: s.promoted,
+                      soft_deadline: s.soft_deadline,
+                      hard_deadline: s.hard_deadline,
                     }))].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()).map((item) => {
                       const start = new Date(item.start).toLocaleString();
                       const end = new Date(item.end).toLocaleString();
                       const isSoft = item.type === "soft";
+                      const softEventId = "soft_event_id" in item ? item.soft_event_id : "";
                       return (
                         <div key={`${item.type}-${item.id}`} className="cal-row">
                           <div className={`cal-badge ${isSoft ? "soft" : "hard"}`}>
@@ -1025,6 +1308,9 @@ export default function App() {
                               {isSoft && item.promoted && <span className="pill" style={{ marginLeft: "0.5rem" }}>Promoted</span>}
                             </div>
                             <div className="cal-time">{start} → {end}</div>
+                            {"description" in item && item.description && (
+                              <div className="cal-note muted small">{item.description}</div>
+                            )}
                             {"status" in item && item.status && (
                               <div className="cal-meta muted small">
                                 Status: {item.status}
@@ -1033,6 +1319,25 @@ export default function App() {
                             )}
                             {"rationale" in item && item.rationale && (
                               <div className="cal-note muted small">{item.rationale}</div>
+                            )}
+                            {isSoft && (
+                              <div className="cal-actions">
+                                <button
+                                  type="button"
+                                  className="ghost pill-action"
+                                  onClick={() => openSoftEventEditor(softEventId)}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost pill-action"
+                                  onClick={() => handlePromoteSoftSlot(item.id)}
+                                  disabled={promoteLoadingId === item.id}
+                                >
+                                  {promoteLoadingId === item.id ? "Promoting…" : "Promote"}
+                                </button>
+                              </div>
                             )}
                           </div>
                         </div>
@@ -1053,10 +1358,23 @@ export default function App() {
                   {calendarData.soft_events_unscheduled.length ? (
                     <div className="calendar-list">
                       {calendarData.soft_events_unscheduled.map((se) => (
-                        <div key={se.id} className="cal-row">
+                        <div
+                          key={se.id}
+                          className="cal-row clickable"
+                          onClick={() => openSoftEventEditor(se.id)}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              openSoftEventEditor(se.id);
+                            }
+                          }}
+                        >
                           <div className="cal-badge soft">Soft</div>
                           <div className="cal-body">
                             <div className="cal-title">{se.title}</div>
+                            {se.notes && <div className="cal-note muted small">{se.notes}</div>}
                             <div className="cal-meta muted small">
                               Priority {se.priority}
                               {se.soft_deadline && ` · Soft deadline ${new Date(se.soft_deadline).toLocaleDateString()}`}
@@ -1081,7 +1399,18 @@ export default function App() {
                 <h2>Scheduled tasks</h2>
               </div>
               <div className="main-actions">
-                <button className="ghost" onClick={() => setShowScheduler(false)}>Back to chat</button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowScheduler(false);
+                    setShowSettings(false);
+                    setShowCalendar(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
+                  }}
+                >
+                  Back to chat
+                </button>
               </div>
             </header>
             <div className="settings-grid">
@@ -1207,6 +1536,172 @@ export default function App() {
               </div>
             </div>
           </div>
+        ) : showMessages ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Messages</p>
+                <h2>Inbox</h2>
+              </div>
+              <div className="main-actions">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowMessages(false);
+                    setShowSettings(false);
+                    setShowCalendar(false);
+                    setShowScheduler(false);
+                    setShowCalls(false);
+                  }}
+                >
+                  Back to chat
+                </button>
+                <button className="ghost" onClick={refreshInboxMessages} disabled={messagesLoading}>
+                  {messagesLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+            </header>
+            {messagesLoading && <div className="muted">Loading messages…</div>}
+            {!messagesLoading && (
+              messagesInbox.length ? (
+                <div className="calendar-list">
+                  {messagesInbox.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`cal-row clickable ${msg.read_at ? "" : "unread"}`}
+                      onClick={() => {
+                        if (!msg.read_at) {
+                          handleMarkMessageRead(msg.id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          if (!msg.read_at) {
+                            handleMarkMessageRead(msg.id);
+                          }
+                        }
+                      }}
+                    >
+                      <div className="cal-body">
+                        <div className="cal-title">{msg.title || "Message"}</div>
+                        <div className="cal-note muted small">{msg.body}</div>
+                        {msg.created_at && (
+                          <div className="cal-meta muted small">{formatDateTime(msg.created_at)}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No messages yet.</p>
+              )
+            )}
+          </div>
+        ) : showCalls ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Calls</p>
+                <h2>Call sessions</h2>
+              </div>
+              <div className="main-actions">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalls(false);
+                    setShowSettings(false);
+                    setShowCalendar(false);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                  }}
+                >
+                  Back to chat
+                </button>
+                <button className="ghost" onClick={refreshCallSessions} disabled={callsLoading}>
+                  {callsLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+            </header>
+            {callsError && <div className="alert">{callsError}</div>}
+            {callsLoading && <div className="muted">Loading calls…</div>}
+            {!callsLoading && (
+              callSessions.length ? (
+                <div className="calendar-list">
+                  {callSessions.map((session) => (
+                    <div key={session.id} className="cal-row">
+                      <div className="cal-body">
+                        <div className="cal-title">{session.goal}</div>
+                        <div className="cal-meta muted small">Status: {session.status}</div>
+                        {session.scheduled_for && (
+                          <div className="cal-meta muted small">
+                            Scheduled: {formatDateTime(session.scheduled_for)}
+                          </div>
+                        )}
+                        {session.summary && (
+                          <div className="cal-note muted small">TL;DR: {session.summary}</div>
+                        )}
+                        {session.status === "ringing" && (
+                          <div className="cal-actions">
+                            <button
+                              type="button"
+                              className="ghost pill-action"
+                              onClick={async () => {
+                                try {
+                                  await updateCallSession(session.id, { status: "in_call" });
+                                  await refreshCallSessions();
+                                } catch (err: any) {
+                                  if (handleAuthError(err)) return;
+                                  setCallsError(err.message || "Failed to answer call");
+                                }
+                              }}
+                            >
+                              Answer
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost pill-action"
+                              onClick={async () => {
+                                try {
+                                  await updateCallSession(session.id, { status: "missed" });
+                                  await refreshCallSessions();
+                                } catch (err: any) {
+                                  if (handleAuthError(err)) return;
+                                  setCallsError(err.message || "Failed to decline call");
+                                }
+                              }}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No call sessions yet.</p>
+              )
+            )}
+            <div className="actions-row">
+              <button
+                className="primary"
+                onClick={async () => {
+                  try {
+                    await createCallSession({ goal: "Quick check-in call" });
+                    await refreshCallSessions();
+                  } catch (err: any) {
+                    if (handleAuthError(err)) return;
+                    setCallsError(err.message || "Failed to create call session");
+                  }
+                }}
+              >
+                Start test call
+              </button>
+            </div>
+          </div>
         ) : (
           <>
             <header className="main-header">
@@ -1285,6 +1780,8 @@ export default function App() {
                     setShowSettings(false);
                     setShowCalendar(true);
                     setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
                   }}
                 >
                   Calendar
@@ -1295,6 +1792,8 @@ export default function App() {
                     setShowCalendar(false);
                     setShowSettings(false);
                     setShowScheduler(true);
+                    setShowMessages(false);
+                    setShowCalls(false);
                   }}
                 >
                   Scheduler
@@ -1303,8 +1802,34 @@ export default function App() {
                   className="ghost"
                   onClick={() => {
                     setShowCalendar(false);
+                    setShowSettings(false);
+                    setShowScheduler(false);
+                    setShowMessages(true);
+                    setShowCalls(false);
+                  }}
+                >
+                  Messages
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalendar(false);
+                    setShowSettings(false);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(true);
+                  }}
+                >
+                  Calls
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalendar(false);
                     setShowSettings(true);
                     setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
                   }}
                 >
                   Settings
@@ -1428,6 +1953,149 @@ export default function App() {
               )}
             </form>
           </>
+        )}
+        {softEventModalOpen && softEventDraft && (
+          <div
+            className="modal-backdrop"
+            onClick={() => {
+              if (!softEventLoading) {
+                setSoftEventModalOpen(false);
+                setSoftEventDraft(null);
+              }
+            }}
+          >
+            <div
+              className="modal-card"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">{softEventMode === "create" ? "New" : "Edit"}</p>
+                  <h3>Soft event</h3>
+                </div>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    if (softEventLoading) return;
+                    setSoftEventModalOpen(false);
+                    setSoftEventDraft(null);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              {softEventError && <div className="error-banner">{softEventError}</div>}
+              <div className="modal-body">
+                <label className="field">
+                  <span>Title</span>
+                  <input
+                    value={softEventDraft.title}
+                    onChange={(e) => updateSoftEventDraftField("title", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    rows={3}
+                    value={softEventDraft.description}
+                    onChange={(e) => updateSoftEventDraftField("description", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Notes</span>
+                  <textarea
+                    rows={2}
+                    value={softEventDraft.notes}
+                    onChange={(e) => updateSoftEventDraftField("notes", e.target.value)}
+                  />
+                </label>
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Duration (minutes)</span>
+                    <input
+                      type="number"
+                      min={5}
+                      step={5}
+                      value={softEventDraft.duration_minutes}
+                      onChange={(e) => updateSoftEventDraftField("duration_minutes", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Priority</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={softEventDraft.priority}
+                      onChange={(e) => updateSoftEventDraftField("priority", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Deferral limit</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={softEventDraft.deferral_limit}
+                      onChange={(e) => updateSoftEventDraftField("deferral_limit", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Status</span>
+                    <select
+                      value={softEventDraft.status}
+                      onChange={(e) => updateSoftEventDraftField("status", e.target.value)}
+                    >
+                      <option value="active">active</option>
+                      <option value="paused">paused</option>
+                      <option value="archived">archived</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Soft deadline</span>
+                    <input
+                      type="datetime-local"
+                      value={softEventDraft.soft_deadline}
+                      onChange={(e) => updateSoftEventDraftField("soft_deadline", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Hard deadline</span>
+                    <input
+                      type="datetime-local"
+                      value={softEventDraft.hard_deadline}
+                      onChange={(e) => updateSoftEventDraftField("hard_deadline", e.target.value)}
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>Frequency</span>
+                  <input
+                    value={softEventDraft.frequency}
+                    onChange={(e) => updateSoftEventDraftField("frequency", e.target.value)}
+                    placeholder="weekly, monthly, etc."
+                  />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    if (softEventLoading) return;
+                    setSoftEventModalOpen(false);
+                    setSoftEventDraft(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button className="primary" onClick={saveSoftEventDraft} disabled={softEventLoading}>
+                  {softEventLoading ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

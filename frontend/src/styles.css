@@ -213,6 +213,21 @@ body {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.cal-row.clickable {
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.cal-row.clickable:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.cal-row.unread {
+  border-color: rgba(247, 194, 102, 0.5);
+  background: rgba(247, 194, 102, 0.08);
+}
+
 .cal-badge {
   min-width: 54px;
   text-align: center;
@@ -246,6 +261,18 @@ body {
 
 .cal-time {
   font-size: 0.95rem;
+}
+
+.cal-note {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.cal-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin-top: 0.35rem;
 }
 
 .settings-grid {
@@ -340,6 +367,13 @@ body {
 .field select:focus,
 .field textarea:focus {
   outline: 1px solid var(--accent);
+}
+
+.actions-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .error-banner {
@@ -763,6 +797,48 @@ button {
   padding: 0.5rem 0.75rem;
   border-radius: 10px;
   border: 1px solid var(--border);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 10, 16, 0.72);
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  z-index: 30;
+}
+
+.modal-card {
+  width: min(720px, 96vw);
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1rem;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
 }
 
 @media (max-width: 900px) {

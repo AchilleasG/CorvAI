@@ -77,6 +77,7 @@ export type SettingsPayload = {
 export type HardCalendarEvent = {
   id: string;
   title: string;
+  description?: string;
   start: string;
   end: string;
   all_day?: boolean;

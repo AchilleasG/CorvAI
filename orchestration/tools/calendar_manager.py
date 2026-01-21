@@ -65,6 +65,7 @@ def list_combined(time_min: Optional[str] = None, time_max: Optional[str] = None
             {
                 "id": ev.get("id"),
                 "title": ev.get("summary") or "(no title)",
+                "description": ev.get("description"),
                 "start": ev.get("start"),
                 "end": ev.get("end"),
                 "all_day": ev.get("all_day", False),
