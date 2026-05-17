@@ -99,6 +99,20 @@ type StudyOutputModalKind = "converted" | "solved" | "theory";
 type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "exam" | "other";
 type StudyMaterialInputMode = "file" | "text";
 const STUDY_PREVIEW_COUNT = 3;
+const STUDY_TOPIC_STATUS_OPTIONS = ["not_started", "in_progress", "review", "mastered"] as const;
+
+function formatTopicStatus(status: string) {
+  return status
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function topicStatusTone(status: string): "pending" | "processing" | "processed" {
+  if (status === "mastered") return "processed";
+  if (status === "in_progress" || status === "review") return "processing";
+  return "pending";
+}
 
 function formatDateTime(value?: string | null) {
   if (!value) return "";
@@ -140,6 +154,59 @@ function asStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => String(item).trim())
+    .filter(Boolean);
+}
+
+function parseTopicSummaryLines(summary: string): string[] {
+  const raw = String(summary || "").trim();
+  if (!raw) return [];
+
+  // Normalize escaped line breaks from API text payloads.
+  const normalized = raw.replace(/\\n/g, "\n");
+  const normalizedNoLeadBullet = normalized.replace(/^[-*•]+\s*/, "");
+
+  const cleanLine = (line: string) =>
+    line
+      .trim()
+      .replace(/^[-*•]+\s*/, "")
+      .replace(/^[\[\]"'`\s]+/, "")
+      .replace(/[\[\]"'`\s]+$/, "")
+      .replace(/^[-*•]+\s*/, "")
+      .replace(/^\d+[.)]\s*/, "")
+      .replace(/^[\[\]"'`\s]+/, "")
+      .replace(/[\[\]"'`\s]+$/, "")
+      .trim();
+
+  // Handle serialized list strings like "['item a', 'item b']".
+  const listLike = normalizedNoLeadBullet.match(/^\s*\[([\s\S]*)\]\s*$/);
+  if (listLike) {
+    const body = listLike[1]
+      .replace(/',\s*'/g, "\n")
+      .replace(/",\s*"/g, "\n")
+      .replace(/',\s*"/g, "\n")
+      .replace(/",\s*'/g, "\n")
+      .replace(/,\s*'/g, "\n")
+      .replace(/,\s*"/g, "\n");
+
+    const listLines = body
+      .split(/\n+/)
+      .map(cleanLine)
+      .filter(Boolean);
+
+    if (listLines.length) return listLines;
+  }
+
+  const lines = normalizedNoLeadBullet
+    .split(/\n+/)
+    .map(cleanLine)
+    .filter(Boolean);
+
+  if (lines.length) return lines;
+
+  // Fallback: split a single-line bullet stream (e.g. "• a • b • c").
+  return normalized
+    .split(/[•\u2022]+/)
+    .map((part) => part.trim())
     .filter(Boolean);
 }
 
@@ -311,8 +378,7 @@ export default function App() {
   const [studyCourseDescription, setStudyCourseDescription] = useState("");
   const [studySelectedCourseId, setStudySelectedCourseId] = useState<string | null>(null);
   const [studySelectedMaterialId, setStudySelectedMaterialId] = useState<string | null>(null);
-  const [studyTopicGradeDrafts, setStudyTopicGradeDrafts] = useState<Record<string, string>>({});
-  const [studyTopicPassDrafts, setStudyTopicPassDrafts] = useState<Record<string, boolean>>({});
+  const [studyTopicStatusDrafts, setStudyTopicStatusDrafts] = useState<Record<string, string>>({});
   const [studyLessonTitle, setStudyLessonTitle] = useState("");
   const [studyLessonDescription, setStudyLessonDescription] = useState("");
   const [studyLessonEffort, setStudyLessonEffort] = useState("60");
@@ -326,6 +392,7 @@ export default function App() {
   const [studyMaterialInputMode, setStudyMaterialInputMode] = useState<StudyMaterialInputMode>("file");
   const [studyMaterialNotes, setStudyMaterialNotes] = useState("");
   const [studyMaterialFile, setStudyMaterialFile] = useState<File | null>(null);
+  const [studyFileDragOver, setStudyFileDragOver] = useState(false);
   const [studyMaterialText, setStudyMaterialText] = useState("");
   const [studyLessonDetailId, setStudyLessonDetailId] = useState<string | null>(null);
   const [studyOutputModalKind, setStudyOutputModalKind] = useState<StudyOutputModalKind | null>(null);
@@ -658,11 +725,8 @@ export default function App() {
       setStudyExams((prev) =>
         JSON.stringify(prev) !== JSON.stringify(exams) ? exams : prev
       );
-      setStudyTopicGradeDrafts(
-        Object.fromEntries(topics.map((topic) => [topic.id, topic.grade?.toString() || ""])),
-      );
-      setStudyTopicPassDrafts(
-        Object.fromEntries(topics.map((topic) => [topic.id, !!topic.passed])),
+      setStudyTopicStatusDrafts(
+        Object.fromEntries(topics.map((topic) => [topic.id, topic.status || "not_started"])),
       );
       setStudyJobs((prev) => {
         const filtered = (jobsResp || []).filter((job) => job.module_slug === "study");
@@ -842,6 +906,32 @@ export default function App() {
     }
   }
 
+  function handleStudyFileDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    if (studyMaterialInputMode !== "file") return;
+    setStudyFileDragOver(true);
+  }
+
+  function handleStudyFileDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setStudyFileDragOver(false);
+  }
+
+  function handleStudyFileDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setStudyFileDragOver(false);
+    if (studyMaterialInputMode !== "file") return;
+
+    const droppedFile = e.dataTransfer.files?.[0] || null;
+    if (!droppedFile) return;
+
+    setStudyMaterialFile(droppedFile);
+    if (!studyMaterialTitle.trim()) {
+      const baseName = droppedFile.name.replace(/\.[^.]+$/, "");
+      setStudyMaterialTitle(baseName);
+    }
+  }
+
   function openStudyFilePicker() {
     studyFileInputRef.current?.click();
   }
@@ -993,6 +1083,7 @@ export default function App() {
       setStudyMaterialTitle("");
       setStudyMaterialNotes("");
       setStudyMaterialFile(null);
+      setStudyFileDragOver(false);
       setStudyMaterialText("");
       setStudySelectedMaterialId(created.material.id);
       await refreshStudyData();
@@ -1924,7 +2015,7 @@ export default function App() {
                   <div>
                     <p className="eyebrow">Lessons</p>
                     <h3>All lessons</h3>
-                    <p className="muted small">Add lessons, mark them passed, and record a grade when you finish them.</p>
+                    <p className="muted small">Add lessons and track each topic through a study state workflow.</p>
                   </div>
                   <div className="card-head-actions">
                     <span className="pill">{studyTopics.length} lessons</span>
@@ -1940,67 +2031,58 @@ export default function App() {
                 {studyTopics.length ? (
                   <div className="study-topic-list">
                     {visibleStudyLessons.map((topic) => {
-                      const passedDraft = studyTopicPassDrafts[topic.id] ?? topic.passed;
-                      const gradeDraft = studyTopicGradeDrafts[topic.id] ?? topic.grade?.toString() ?? "";
+                      const statusDraft = studyTopicStatusDrafts[topic.id] ?? topic.status;
+                      const summaryLines = parseTopicSummaryLines(topic.summary || "");
                       return (
                         <div key={topic.id} className="study-topic-card">
                           <div className="study-topic-header">
                             <div>
                               <div className="study-material-title">{topic.name}</div>
                               <div className="study-topic-summary">
-                                {topic.summary ? (
-                                  <div className="summary-bullets">{topic.summary}</div>
+                                {summaryLines.length ? (
+                                  <ul className="study-summary-list">
+                                    {summaryLines.slice(0, 5).map((line, idx) => (
+                                      <li key={`${topic.id}-summary-${idx}`}>{line}</li>
+                                    ))}
+                                  </ul>
                                 ) : (
                                   <div className="muted small">{topic.description || "No description"}</div>
                                 )}
                               </div>
                             </div>
-                            <span className={`pill study-status ${topic.passed ? "processed" : "pending"}`}>
-                              {topic.passed ? "passed" : topic.status}
+                            <span className={`pill study-status ${topicStatusTone(statusDraft)}`}>
+                              {formatTopicStatus(statusDraft)}
                             </span>
                           </div>
                           <div className="study-topic-controls">
-                            <label className="study-inline-check">
-                              <input
-                                type="checkbox"
-                                checked={passedDraft}
-                                onChange={(e) =>
-                                  setStudyTopicPassDrafts((prev) => ({
-                                    ...prev,
-                                    [topic.id]: e.target.checked,
-                                  }))
-                                }
-                              />
-                              <span>Passed</span>
-                            </label>
                             <label className="field compact">
-                              <span>Grade</span>
-                              <input
-                                type="number"
-                                min={0}
-                                max={100}
-                                step={1}
-                                value={gradeDraft}
+                              <span>Status</span>
+                              <select
+                                value={statusDraft}
                                 onChange={(e) =>
-                                  setStudyTopicGradeDrafts((prev) => ({
+                                  setStudyTopicStatusDrafts((prev) => ({
                                     ...prev,
                                     [topic.id]: e.target.value,
                                   }))
                                 }
-                                placeholder="92"
-                              />
+                              >
+                                {STUDY_TOPIC_STATUS_OPTIONS.map((statusOption) => (
+                                  <option key={statusOption} value={statusOption}>
+                                    {formatTopicStatus(statusOption)}
+                                  </option>
+                                ))}
+                              </select>
                             </label>
                             <button
                               type="button"
                               className="ghost"
                               onClick={() =>
                                 handleSaveStudyTopic(topic, {
-                                  passed: passedDraft,
-                                  grade: gradeDraft.trim() ? Number(gradeDraft) : undefined,
+                                  status: statusDraft,
                                 })
                               }
                             >
-                              Save lesson
+                              Save status
                             </button>
                             <button
                               type="button"
@@ -2027,7 +2109,7 @@ export default function App() {
                             </button>
                           </div>
                           <div className="study-topic-meta">
-                            Effort {topic.estimated_effort_minutes} min · Weight {topic.weight} · {topic.passed ? `Passed${topic.grade != null ? ` · Grade ${topic.grade}` : ""}` : "Not passed"}
+                            Effort {topic.estimated_effort_minutes} min · Weight {topic.weight} · State {formatTopicStatus(statusDraft)}
                           </div>
                         </div>
                       );
@@ -3297,9 +3379,38 @@ export default function App() {
                         accept=".pdf,image/*"
                         onChange={handleStudyFileChange}
                       />
-                      <button type="button" className="ghost study-file-picker-btn" onClick={openStudyFilePicker}>
-                        {studyMaterialFile ? "Change file" : "Choose file"}
-                      </button>
+                      <div
+                        className={`study-file-dropzone${studyFileDragOver ? " active" : ""}`}
+                        onDragOver={handleStudyFileDragOver}
+                        onDragLeave={handleStudyFileDragLeave}
+                        onDrop={handleStudyFileDrop}
+                        onClick={openStudyFilePicker}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openStudyFilePicker();
+                          }
+                        }}
+                      >
+                        <div className="study-file-dropzone-title">
+                          {studyMaterialFile ? "Drop to replace file" : "Drag and drop file here"}
+                        </div>
+                        <div className="study-file-dropzone-sub muted small">
+                          Supports PDF and images. You can also click to browse.
+                        </div>
+                        <button
+                          type="button"
+                          className="ghost study-file-picker-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openStudyFilePicker();
+                          }}
+                        >
+                          {studyMaterialFile ? "Change file" : "Choose file"}
+                        </button>
+                      </div>
                     </label>
                   ) : (
                     <label className="field full">
@@ -3356,10 +3467,9 @@ export default function App() {
               </div>
               <div className="modal-body">
                 <div className="study-lesson-meta-grid">
-                  <div className="study-lesson-chip">Status: {selectedStudyLesson.passed ? "passed" : selectedStudyLesson.status}</div>
+                  <div className="study-lesson-chip">Status: {formatTopicStatus(selectedStudyLesson.status)}</div>
                   <div className="study-lesson-chip">Effort: {selectedStudyLesson.estimated_effort_minutes} min</div>
                   <div className="study-lesson-chip">Weight: {selectedStudyLesson.weight}</div>
-                  <div className="study-lesson-chip">Grade: {selectedStudyLesson.grade ?? "n/a"}</div>
                 </div>
 
                 <section className="study-lesson-section">

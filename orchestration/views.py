@@ -5,6 +5,7 @@ from uuid import UUID
 from ninja import Router
 from ninja.errors import HttpError
 
+from django.db import OperationalError
 from django.db.models import Sum
 from datetime import timedelta
 from django.utils import timezone
@@ -22,6 +23,7 @@ from orchestration.api_schemas import (
 )
 from orchestration.models import (
     Job,
+    JobEvent,
     UsageEvent,
     SoftEvent,
     SoftEventSlot,
@@ -99,6 +101,36 @@ def job_messages(request, job_id: UUID):
         }
         for m in messages
     ]
+
+
+@router.get("/jobs/{job_id}/events")
+def job_events(request, job_id: UUID):
+    try:
+        try:
+            job = Job.objects.get(id=job_id)
+        except Job.DoesNotExist:
+            raise HttpError(404, "Job not found")
+
+        events = JobEvent.objects.filter(job=job).order_by("created_at")
+        return {
+            "job_id": str(job.id),
+            "events": [
+                {
+                    "id": str(event.id),
+                    "role": event.role,
+                    "event_type": event.event_type,
+                    "visibility": event.visibility,
+                    "message": event.message,
+                    "payload": event.payload,
+                    "call_id": event.call_id or None,
+                    "created_at": event.created_at.isoformat() if event.created_at else None,
+                }
+                for event in events
+            ],
+        }
+    except OperationalError:
+        logger.warning("job_events unavailable: database is not ready", exc_info=True)
+        return {"job_id": str(job_id), "events": []}
 
 
 @router.get("/usage/recent")

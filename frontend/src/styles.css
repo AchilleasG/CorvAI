@@ -1001,6 +1001,18 @@ button {
   line-height: 1.5;
 }
 
+.study-summary-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.study-summary-list li {
+  line-height: 1.4;
+  color: var(--muted);
+}
+
 .summary-bullets {
   white-space: pre-wrap;
   word-break: break-word;
@@ -1176,6 +1188,38 @@ button {
 
 .study-file-picker-btn {
   width: fit-content;
+}
+
+.study-file-dropzone {
+  margin-top: 0.5rem;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  background: rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+}
+
+.study-file-dropzone:hover {
+  border-color: rgba(42, 209, 163, 0.5);
+  background: rgba(42, 209, 163, 0.07);
+}
+
+.study-file-dropzone.active {
+  border-color: var(--accent);
+  background: rgba(42, 209, 163, 0.12);
+  box-shadow: 0 0 0 2px rgba(42, 209, 163, 0.2);
+}
+
+.study-file-dropzone-title {
+  font-weight: 600;
+}
+
+.study-file-dropzone-sub {
+  line-height: 1.4;
 }
 
 .study-detail {

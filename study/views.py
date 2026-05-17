@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 from datetime import timedelta
 
@@ -8,15 +9,50 @@ from django.utils import timezone
 from ninja import File, Form, Router
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
-from django.http import FileResponse
+from django.http import FileResponse, QueryDict
+from django.http.multipartparser import MultiPartParser, MultiPartParserError
 
 from orchestration.models import Job, ToolModule
 from orchestration.services import JobService
 from study.models import StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
-from study.services import StudyIngestionService, StudyPlannerService
+from study.services import StudyIngestionService, StudyPlannerService, _normalize_topic_summary
 from study.tasks import process_study_material_job
 
 router = Router(tags=["Study"])
+
+
+def _request_json_dict(request) -> dict:
+    try:
+        raw = request.body.decode("utf-8") if getattr(request, "body", None) else ""
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _request_form_dict(request) -> dict:
+    content_type = str(request.META.get("CONTENT_TYPE") or "").lower()
+
+    if "multipart/form-data" in content_type:
+        try:
+            parser = MultiPartParser(request.META, request, request.upload_handlers, request.encoding)
+            data, _files = parser.parse()
+            return {key: data.get(key) for key in data.keys()}
+        except (MultiPartParserError, ValueError, AttributeError):
+            return {}
+
+    if "application/x-www-form-urlencoded" in content_type:
+        try:
+            charset = request.encoding or "utf-8"
+            decoded = request.body.decode(charset) if getattr(request, "body", None) else ""
+            data = QueryDict(decoded)
+            return {key: data.get(key) for key in data.keys()}
+        except Exception:
+            return {}
+
+    return {}
 
 
 def _normalize_material_kind(kind: Optional[str]) -> str:
@@ -92,7 +128,7 @@ def _topic_payload(topic: StudyTopic) -> dict:
         "course_id": str(topic.course_id),
         "name": topic.name,
         "description": topic.description,
-        "summary": topic.summary,
+        "summary": _normalize_topic_summary(topic.summary),
         "order_index": topic.order_index,
         "estimated_effort_minutes": topic.estimated_effort_minutes,
         "weight": topic.weight,
@@ -467,6 +503,58 @@ def update_topic(
     grade: Optional[float] = Form(None),
 ):
     topic = StudyTopic.objects.get(id=topic_id)
+    payload = {
+        **_request_form_dict(request),
+        **_request_json_dict(request),
+    }
+
+    if name is None and "name" in payload:
+        name = payload.get("name")
+    if description is None and "description" in payload:
+        description = payload.get("description")
+    if order_index is None and "order_index" in payload:
+        try:
+            order_index = int(payload.get("order_index"))
+        except (TypeError, ValueError):
+            raise HttpError(400, "order_index must be an integer")
+    if estimated_effort_minutes is None and "estimated_effort_minutes" in payload:
+        try:
+            estimated_effort_minutes = int(payload.get("estimated_effort_minutes"))
+        except (TypeError, ValueError):
+            raise HttpError(400, "estimated_effort_minutes must be an integer")
+    if weight is None and "weight" in payload:
+        try:
+            weight = float(payload.get("weight"))
+        except (TypeError, ValueError):
+            raise HttpError(400, "weight must be a number")
+    if status is None and "status" in payload:
+        status = str(payload.get("status") or "").strip() or None
+    if passed is None and "passed" in payload:
+        raw_passed = payload.get("passed")
+        if isinstance(raw_passed, bool):
+            passed = raw_passed
+        elif isinstance(raw_passed, str):
+            lowered = raw_passed.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                passed = True
+            elif lowered in {"false", "0", "no", "off"}:
+                passed = False
+            else:
+                raise HttpError(400, "passed must be a boolean")
+        elif raw_passed is None:
+            passed = None
+        else:
+            raise HttpError(400, "passed must be a boolean")
+    if grade is None and "grade" in payload:
+        raw_grade = payload.get("grade")
+        if raw_grade in (None, ""):
+            grade = None
+        else:
+            try:
+                grade = float(raw_grade)
+            except (TypeError, ValueError):
+                raise HttpError(400, "grade must be a number")
+
     fields: List[str] = []
     if name is not None:
         topic.name = name
@@ -484,6 +572,9 @@ def update_topic(
         topic.weight = weight
         fields.append("weight")
     if status is not None:
+        valid_statuses = {choice[0] for choice in StudyTopic.STATUS_CHOICES}
+        if status not in valid_statuses:
+            raise HttpError(400, f"Invalid status '{status}'")
         topic.status = status
         fields.append("status")
     if passed is not None:

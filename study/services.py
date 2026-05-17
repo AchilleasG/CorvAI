@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import ast
 import json
 import logging
 import mimetypes
 import os
+import re
 from datetime import date, datetime, time, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +124,57 @@ def _safe_json_load(text: str) -> Dict[str, Any]:
     except Exception:
         pass
     return {}
+
+
+def _normalize_topic_summary(value: Any) -> str:
+    """Normalize AI summary payloads into readable multi-line bullets.
+
+    Some model outputs arrive as Python/JSON list literals serialized into a string
+    (for example: "['item a', 'item b']"). This converts those into stable
+    newline bullet text for storage and API responses.
+    """
+    raw_items: List[str] = []
+
+    if value is None:
+        return ""
+
+    if isinstance(value, (list, tuple, set)):
+        raw_items = [str(item) for item in value]
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+
+        parsed: Any = None
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                try:
+                    parsed = ast.literal_eval(text)
+                except Exception:
+                    parsed = None
+
+        if isinstance(parsed, (list, tuple, set)):
+            raw_items = [str(item) for item in parsed]
+        else:
+            normalized = text.replace("\\n", "\n")
+            raw_items = normalized.splitlines() or [normalized]
+
+    cleaned: List[str] = []
+    for item in raw_items:
+        line = str(item).strip()
+        if not line:
+            continue
+        line = re.sub(r"^[\-\*•\u2022]+\s*", "", line)
+        line = line.strip(" \t\r\n\"'`")
+        if line:
+            cleaned.append(line)
+
+    if not cleaned:
+        return ""
+
+    return "\n".join(f"- {line}" for line in cleaned)
 
 
 def _file_extension(path: str) -> str:
@@ -273,7 +326,7 @@ class StudyIngestionService:
             f"Text:\n{text}\n\n"
             "Return the requested JSON now."
         )
-        resp = get_client("openai").responses.create(
+        resp = get_client("openai").with_options(max_retries=0).responses.create(
             model=model_name,
             input=[
                 {
@@ -288,7 +341,7 @@ class StudyIngestionService:
             text={"format": {"type": "json_object"}, "verbosity": "medium"},
             reasoning={"effort": "medium"},
             store=False,
-            timeout=90,
+            timeout=120,
         )
         usage_obj = getattr(resp, "usage", None)
         if usage_obj:
@@ -341,13 +394,13 @@ class StudyIngestionService:
             },
         ]
 
-        resp = get_client("openai").responses.create(
+        resp = get_client("openai").with_options(max_retries=0).responses.create(
             model=model_name,
             input=input_seq,
             text={"format": {"type": "json_object"}, "verbosity": "medium"},
             reasoning={"effort": "medium"},
             store=False,
-            timeout=90,
+            timeout=180,
         )
         usage_obj = getattr(resp, "usage", None)
         if usage_obj:
@@ -570,7 +623,7 @@ class StudyIngestionService:
         model_name = model or ModelConfigService.get_study_model()
         raw = "{}"
         try:
-            resp = get_client("openai").responses.create(
+            resp = get_client("openai").with_options(max_retries=0).responses.create(
                 model=model_name,
                 input=[
                     {
@@ -603,7 +656,7 @@ class StudyIngestionService:
                 text={"format": {"type": "json_object"}, "verbosity": "low"},
                 reasoning={"effort": "low"},
                 store=False,
-                timeout=90,
+                timeout=120,
             )
             usage_obj = getattr(resp, "usage", None)
             if usage_obj:
@@ -663,7 +716,7 @@ class StudyIngestionService:
                     if merged != existing.description:
                         existing.description = merged
                         update_fields_local.append("description")
-                    new_summary = str(action.get("summary") or "").strip()
+                    new_summary = _normalize_topic_summary(action.get("summary"))
                     if new_summary and new_summary != existing.summary:
                         existing.summary = new_summary
                         update_fields_local.append("summary")
@@ -686,7 +739,7 @@ class StudyIngestionService:
                     course=course,
                     name=raw_name,
                     description=StudyIngestionService._build_rich_topic_description(raw_name, action),
-                    summary=str(action.get("summary") or "").strip(),
+                    summary=_normalize_topic_summary(action.get("summary")),
                     order_index=course.topics.count(),
                     estimated_effort_minutes=max(int(action.get("estimated_effort_minutes") or 60), 1),
                     weight=float(action.get("weight") or 1.0),
@@ -713,7 +766,7 @@ class StudyIngestionService:
                 if merged_description != topic.description:
                     topic.description = merged_description
                     update_fields.append("description")
-                new_summary = str(action.get("summary") or "").strip()
+                new_summary = _normalize_topic_summary(action.get("summary"))
                 if new_summary and new_summary != topic.summary:
                     topic.summary = new_summary
                     update_fields.append("summary")
@@ -1154,6 +1207,7 @@ class StudyPlannerService:
             note_parts = []
             if target.topic:
                 note_parts.append(f"Topic: {target.topic.name}")
+                note_parts.append(f"Topic status: {target.topic.status}")
             note_parts.append(f"Plan: {plan.name}")
             note_parts.append(f"Target date: {target.target_date.isoformat()}")
             if target.target_preferred_minutes:
@@ -1164,6 +1218,16 @@ class StudyPlannerService:
 
             soft_deadline, hard_deadline = StudyPlannerService._target_deadlines(plan.course, target)
             priority = int(round((target.topic.weight if target.topic else 1.0) * 10))
+            if target.topic:
+                topic_status = (target.topic.status or StudyTopic.STATUS_NOT_STARTED).strip()
+                if topic_status == StudyTopic.STATUS_MASTERED:
+                    priority = max(priority - 8, 1)
+                elif topic_status == StudyTopic.STATUS_REVIEW:
+                    priority = max(priority - 3, 1)
+                elif topic_status == StudyTopic.STATUS_IN_PROGRESS:
+                    priority = max(priority + 1, 1)
+                else:
+                    priority = max(priority + 3, 1)
             if target.exam and target.exam.scheduled_at:
                 priority += 10
 
@@ -1183,6 +1247,7 @@ class StudyPlannerService:
                     "study_session_target_id": str(target.id),
                     "study_course_id": str(plan.course_id),
                     "study_topic_id": str(target.topic_id) if target.topic_id else None,
+                    "study_topic_status": target.topic.status if target.topic else None,
                     "study_exam_id": str(target.exam_id) if target.exam_id else None,
                     "source": "study_session_target",
                 },
@@ -1321,6 +1386,19 @@ class StudyPlannerService:
         for day_offset in range(day_count):
             current_date = start_date + timedelta(days=day_offset)
             topic = topics[topic_index % len(topics)]
+            topic_status = (topic.status or StudyTopic.STATUS_NOT_STARTED).strip()
+            if topic_status == StudyTopic.STATUS_MASTERED:
+                focus = f"Light spaced review for {topic.name}."
+                outcome = f"Retain mastery in {topic.name} with quick recall and one mixed checkpoint problem."
+            elif topic_status == StudyTopic.STATUS_REVIEW:
+                focus = f"Review and reinforce {topic.name}, focusing on previous weak spots."
+                outcome = f"Restore confidence and fluency for {topic.name} through targeted review practice."
+            elif topic_status == StudyTopic.STATUS_IN_PROGRESS:
+                focus = f"Continue building depth in {topic.name}."
+                outcome = f"Move {topic.name} toward review readiness by solving representative problems independently."
+            else:
+                focus = f"Cover {topic.name} thoroughly."
+                outcome = f"Be able to explain and solve problems for {topic.name}."
             target = StudySessionTarget.objects.create(
                 plan=plan,
                 course=plan.course,
@@ -1329,8 +1407,8 @@ class StudyPlannerService:
                 target_date=current_date,
                 target_preferred_minutes=preferred_minutes,
                 target_min_minutes=min_minutes,
-                focus=f"Cover {topic.name} thoroughly.",
-                outcome=f"Be able to explain and solve problems for {topic.name}.",
+                focus=focus,
+                outcome=outcome,
             )
             targets.append(target)
             topic_index += 1
