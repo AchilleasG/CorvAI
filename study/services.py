@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageOps
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
@@ -37,6 +37,10 @@ from study.models import (
 logger = logging.getLogger(__name__)
 
 ALLOWED_MATERIAL_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
+MAX_IMAGE_EDGE_PX = 2000
+MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
+JPEG_QUALITY_HIGH = 88
+JPEG_QUALITY_FALLBACK = 72
 
 MATERIAL_PAGE_INSTRUCTIONS = (
     "You are converting a study material page into structured notes. "
@@ -79,8 +83,8 @@ TOPIC_RECONCILIATION_INSTRUCTIONS = (
     "Each action must contain: action, rationale. "
     "Allowed actions: create, update, noop. "
     "Write all returned strings and list items in English only, regardless of the source material language. "
-    "For create include: name, description, summary, estimated_effort_minutes, weight, status, metadata_patch, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
-    "For update include: target_topic_id, description, summary, estimated_effort_minutes, weight, status, metadata_patch, aliases, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
+    "For create include: name, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
+    "For update include: target_topic_id, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, aliases, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
     "For noop include: rationale. "
     "Descriptions must be concrete and detailed enough for a student to study directly from them. "
     "Avoid generic one-liners. Include exam-relevant emphasis when possible. "
@@ -200,16 +204,35 @@ def _render_image_file(path: str) -> List[RenderedPage]:
                 img.seek(index)
             except EOFError:
                 break
-            frame = img.convert("RGB")
+            # Normalize orientation and cap dimensions to avoid oversized API payloads.
+            frame = ImageOps.exif_transpose(img).convert("RGB")
+            width, height = frame.size
+            max_edge = max(width, height)
+            if max_edge > MAX_IMAGE_EDGE_PX:
+                scale = MAX_IMAGE_EDGE_PX / float(max_edge)
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                frame = frame.resize(
+                    (
+                        max(1, int(round(width * scale))),
+                        max(1, int(round(height * scale))),
+                    ),
+                    resample,
+                )
             from io import BytesIO
 
             buffer = BytesIO()
-            frame.save(buffer, format="PNG")
+            frame.save(buffer, format="JPEG", quality=JPEG_QUALITY_HIGH, optimize=True)
+            data = buffer.getvalue()
+            if len(data) > MAX_IMAGE_UPLOAD_BYTES:
+                buffer = BytesIO()
+                frame.save(buffer, format="JPEG", quality=JPEG_QUALITY_FALLBACK, optimize=True)
+                data = buffer.getvalue()
+
             rendered.append(
                 RenderedPage(
                     index=index + 1,
-                    mime_type="image/png",
-                    data_url=_bytes_to_data_url(buffer.getvalue(), "image/png"),
+                    mime_type="image/jpeg",
+                    data_url=_bytes_to_data_url(data, "image/jpeg"),
                 )
             )
     return rendered
@@ -720,6 +743,12 @@ class StudyIngestionService:
                     if new_summary and new_summary != existing.summary:
                         existing.summary = new_summary
                         update_fields_local.append("summary")
+                    maybe_order_index = action.get("order_index")
+                    if isinstance(maybe_order_index, int):
+                        next_order = max(int(maybe_order_index), 0)
+                        if next_order != existing.order_index:
+                            existing.order_index = next_order
+                            update_fields_local.append("order_index")
                     metadata_patch = StudyIngestionService._topic_metadata_from_action(action)
                     if metadata_patch:
                         existing.metadata = {
@@ -740,7 +769,7 @@ class StudyIngestionService:
                     name=raw_name,
                     description=StudyIngestionService._build_rich_topic_description(raw_name, action),
                     summary=_normalize_topic_summary(action.get("summary")),
-                    order_index=course.topics.count(),
+                    order_index=max(int(action.get("order_index") or course.topics.count()), 0),
                     estimated_effort_minutes=max(int(action.get("estimated_effort_minutes") or 60), 1),
                     weight=float(action.get("weight") or 1.0),
                     status=(str(action.get("status") or StudyTopic.STATUS_NOT_STARTED).strip() if str(action.get("status") or "").strip() in valid_statuses else StudyTopic.STATUS_NOT_STARTED),
@@ -770,6 +799,12 @@ class StudyIngestionService:
                 if new_summary and new_summary != topic.summary:
                     topic.summary = new_summary
                     update_fields.append("summary")
+                maybe_order_index = action.get("order_index")
+                if isinstance(maybe_order_index, int):
+                    next_order = max(int(maybe_order_index), 0)
+                    if next_order != topic.order_index:
+                        topic.order_index = next_order
+                        update_fields.append("order_index")
                 effort = action.get("estimated_effort_minutes")
                 if isinstance(effort, int) and effort > 0 and effort != topic.estimated_effort_minutes:
                     topic.estimated_effort_minutes = effort
@@ -816,7 +851,6 @@ class StudyIngestionService:
         }
 
     @staticmethod
-    @transaction.atomic
     def process_material(
         material: StudyMaterial,
         *,
@@ -858,7 +892,20 @@ class StudyIngestionService:
                 page_total = len(pages)
                 for page_index, page in enumerate(pages, start=1):
                     StudyIngestionService._ensure_not_canceled(cancel_check)
-                    result = StudyIngestionService._extract_page(material, page, model=model)
+                    StudyIngestionService._emit_progress(
+                        progress_callback,
+                        0.1 + (0.6 * ((page_index - 1) / max(page_total, 1))),
+                        f"Analyzing page {page_index} of {page_total}",
+                    )
+                    try:
+                        result = StudyIngestionService._extract_page(material, page, model=model)
+                    except Exception as exc:
+                        if "timed out" in str(exc).lower():
+                            raise TimeoutError(
+                                f"Timed out while analyzing page {page_index} of {page_total}. "
+                                "Try a clearer crop or PDF export for this page."
+                            ) from exc
+                        raise
                     page_results.append(
                         {
                             "page": page.index,
@@ -925,13 +972,11 @@ class StudyIngestionService:
                 cancel_check=cancel_check,
             )
 
-            plan_refresh: Dict[str, Any] = {"recalculated": False, "target_count": 0}
-            if topic_result.get("created_count", 0) > 0:
-                StudyIngestionService._emit_progress(progress_callback, 0.9, "Recalculating study plan")
-                plan_refresh = StudyPlannerService.recalculate_plan_for_course(
-                    material.course,
-                    source_material=material,
-                )
+            StudyIngestionService._emit_progress(progress_callback, 0.9, "Recalculating study plan")
+            plan_refresh: Dict[str, Any] = StudyPlannerService.recalculate_plan_for_course(
+                material.course,
+                source_material=material,
+            )
 
             extracted_data["topic_reconciliation"] = {
                 "mode": topic_result.get("mode"),
@@ -1178,6 +1223,93 @@ class StudyPlannerService:
         return soft_deadline, hard_deadline
 
     @staticmethod
+    def _past_exam_question_text(raw_question: Any) -> str:
+        if isinstance(raw_question, str):
+            return raw_question.strip()
+        if isinstance(raw_question, dict):
+            for key in ("question", "prompt", "text", "title", "body"):
+                value = raw_question.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    @staticmethod
+    def _collect_past_exam_questions(course: StudyCourse) -> List[Dict[str, Any]]:
+        questions: List[Dict[str, Any]] = []
+        materials = (
+            StudyMaterial.objects.filter(
+                course=course,
+                kind=StudyMaterial.KIND_PAST_EXAM,
+                ingestion_status=StudyMaterial.INGESTION_PROCESSED,
+            )
+            .order_by("created_at")
+        )
+
+        for material in materials:
+            extracted = material.extracted_data if isinstance(material.extracted_data, dict) else {}
+            raw_questions = extracted.get("questions") if isinstance(extracted, dict) else []
+            if not isinstance(raw_questions, list):
+                raw_questions = []
+
+            # Fallback: if top-level questions are missing, try page-level extraction blocks.
+            if not raw_questions:
+                page_blocks = extracted.get("pages") if isinstance(extracted, dict) else []
+                if isinstance(page_blocks, list):
+                    for page in page_blocks:
+                        if not isinstance(page, dict):
+                            continue
+                        page_data = page.get("extracted_data")
+                        if not isinstance(page_data, dict):
+                            continue
+                        page_questions = page_data.get("questions")
+                        if isinstance(page_questions, list):
+                            raw_questions.extend(page_questions)
+
+            for idx, raw_question in enumerate(raw_questions, start=1):
+                text = StudyPlannerService._past_exam_question_text(raw_question)
+                if not text:
+                    continue
+                questions.append(
+                    {
+                        "assignment_id": f"{material.id}:{idx}",
+                        "source_material_id": str(material.id),
+                        "source_material_title": material.title,
+                        "question_index": idx,
+                        "text": text,
+                        "raw": raw_question if isinstance(raw_question, dict) else {"question": text},
+                    }
+                )
+
+        return questions
+
+    @staticmethod
+    def assign_past_exam_homework_to_topics(course: StudyCourse) -> Dict[str, int]:
+        topics = list(course.topics.all().order_by("order_index", "name"))
+        if not topics:
+            return {
+                "past_exam_question_count": 0,
+                "topics_with_homework": 0,
+            }
+
+        questions = StudyPlannerService._collect_past_exam_questions(course)
+        buckets: List[List[Dict[str, Any]]] = [[] for _ in topics]
+        for idx, question in enumerate(questions):
+            buckets[idx % len(topics)].append(question)
+
+        topics_with_homework = 0
+        for idx, topic in enumerate(topics):
+            assigned = buckets[idx]
+            topic.homework = assigned
+            topic.save(update_fields=["homework", "updated_at"])
+            if assigned:
+                topics_with_homework += 1
+
+        return {
+            "past_exam_question_count": len(questions),
+            "topics_with_homework": topics_with_homework,
+        }
+
+    @staticmethod
     @transaction.atomic
     def sync_session_targets_to_soft_events(plan: StudyPlan) -> Dict[str, int]:
         created = 0
@@ -1208,6 +1340,13 @@ class StudyPlannerService:
             if target.topic:
                 note_parts.append(f"Topic: {target.topic.name}")
                 note_parts.append(f"Topic status: {target.topic.status}")
+            target_homework = []
+            if target.topic and isinstance(target.topic.homework, list):
+                target_homework = [item for item in target.topic.homework if isinstance(item, dict)]
+            if target_homework:
+                note_parts.append(
+                    f"Lesson homework: {len(target_homework)} past-exam question(s) assigned to this lesson."
+                )
             note_parts.append(f"Plan: {plan.name}")
             note_parts.append(f"Target date: {target.target_date.isoformat()}")
             if target.target_preferred_minutes:
@@ -1249,6 +1388,8 @@ class StudyPlannerService:
                     "study_topic_id": str(target.topic_id) if target.topic_id else None,
                     "study_topic_status": target.topic.status if target.topic else None,
                     "study_exam_id": str(target.exam_id) if target.exam_id else None,
+                    "study_topic_homework_count": len(target_homework),
+                    "study_topic_homework_required": bool(target_homework),
                     "source": "study_session_target",
                 },
             }
@@ -1342,6 +1483,7 @@ class StudyPlannerService:
             start_date=start_date,
             end_date=end_date,
         )
+        homework_stats = StudyPlannerService.assign_past_exam_homework_to_topics(course)
         soft_event_stats = StudyPlannerService.sync_session_targets_to_soft_events(plan)
         plan.summary = (
             f"Auto-recalculated from {course.topics.count()} topics"
@@ -1353,6 +1495,7 @@ class StudyPlannerService:
             "target_count": len(targets),
             "source_material_id": str(source_material.id) if source_material else None,
             "soft_event_stats": soft_event_stats,
+            "homework_stats": homework_stats,
         }
         plan.save(update_fields=["window_start", "window_end", "summary", "plan_json", "updated_at"])
         return {

@@ -95,6 +95,7 @@ class StudyTopic(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     summary = models.TextField(blank=True, default="", help_text="Human-readable bullet-point summary of what's covered in this topic")
+    homework = models.JSONField(default=list, blank=True, help_text="Assigned past-exam homework questions for this lesson")
     order_index = models.PositiveIntegerField(default=0)
     estimated_effort_minutes = models.PositiveIntegerField(default=60)
     weight = models.FloatField(default=1.0)

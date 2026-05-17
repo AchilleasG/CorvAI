@@ -94,6 +94,7 @@ type SoftEventDraft = {
 };
 
 type SoftEventMode = "create" | "edit";
+type SoftEventModalTab = "details" | "metadata";
 type StudyOutputModalKind = "converted" | "solved" | "theory";
 
 type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "exam" | "other";
@@ -350,6 +351,8 @@ export default function App() {
   const [softEventLoading, setSoftEventLoading] = useState(false);
   const [softEventError, setSoftEventError] = useState<string | null>(null);
   const [softEventDraft, setSoftEventDraft] = useState<SoftEventDraft | null>(null);
+  const [softEventMetadata, setSoftEventMetadata] = useState<Record<string, unknown> | null>(null);
+  const [softEventModalTab, setSoftEventModalTab] = useState<SoftEventModalTab>("details");
   const [softEventMode, setSoftEventMode] = useState<SoftEventMode>("edit");
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
   const [schedulerError, setSchedulerError] = useState<string | null>(null);
@@ -1232,10 +1235,12 @@ export default function App() {
     try {
       setSoftEventError(null);
       setSoftEventLoading(true);
+      setSoftEventModalTab("details");
       setSoftEventMode("edit");
       setSoftEventModalOpen(true);
       const detail = await fetchSoftEvent(softEventId);
       setSoftEventDraft(toSoftEventDraft(detail));
+      setSoftEventMetadata(detail.metadata || {});
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setSoftEventError(err.message || "Failed to load soft event");
@@ -1246,8 +1251,10 @@ export default function App() {
 
   function openSoftEventCreator() {
     setSoftEventError(null);
+    setSoftEventModalTab("details");
     setSoftEventMode("create");
     setSoftEventDraft(newSoftEventDraft());
+    setSoftEventMetadata({});
     setSoftEventModalOpen(true);
   }
 
@@ -1288,6 +1295,7 @@ export default function App() {
       }
       setSoftEventModalOpen(false);
       setSoftEventDraft(null);
+      setSoftEventMetadata(null);
       await refreshCalendar();
     } catch (err: any) {
       if (handleAuthError(err)) return;
@@ -2479,7 +2487,23 @@ export default function App() {
                       const isSoft = item.type === "soft";
                       const softEventId = "soft_event_id" in item ? item.soft_event_id : "";
                       return (
-                        <div key={`${item.type}-${item.id}`} className="cal-row">
+                        <div
+                          key={`${item.type}-${item.id}`}
+                          className={`cal-row ${isSoft ? "clickable" : ""}`}
+                          onClick={isSoft ? () => openSoftEventEditor(softEventId) : undefined}
+                          role={isSoft ? "button" : undefined}
+                          tabIndex={isSoft ? 0 : undefined}
+                          onKeyDown={
+                            isSoft
+                              ? (e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    openSoftEventEditor(softEventId);
+                                  }
+                                }
+                              : undefined
+                          }
+                        >
                           <div className={`cal-badge ${isSoft ? "soft" : "hard"}`}>
                             {isSoft ? "Soft" : "Hard"}
                           </div>
@@ -2506,14 +2530,20 @@ export default function App() {
                                 <button
                                   type="button"
                                   className="ghost pill-action"
-                                  onClick={() => openSoftEventEditor(softEventId)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openSoftEventEditor(softEventId);
+                                  }}
                                 >
                                   Edit
                                 </button>
                                 <button
                                   type="button"
                                   className="ghost pill-action"
-                                  onClick={() => handlePromoteSoftSlot(item.id)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePromoteSoftSlot(item.id);
+                                  }}
                                   disabled={promoteLoadingId === item.id}
                                 >
                                   {promoteLoadingId === item.id ? "Promoting…" : "Promote"}
@@ -3575,13 +3605,14 @@ export default function App() {
             </div>
           </div>
         )}
-        {softEventModalOpen && softEventDraft && (
+        {softEventModalOpen && (
           <div
             className="modal-backdrop"
             onClick={() => {
               if (!softEventLoading) {
                 setSoftEventModalOpen(false);
                 setSoftEventDraft(null);
+                setSoftEventMetadata(null);
               }
             }}
           >
@@ -3600,116 +3631,145 @@ export default function App() {
                     if (softEventLoading) return;
                     setSoftEventModalOpen(false);
                     setSoftEventDraft(null);
+                    setSoftEventMetadata(null);
                   }}
                 >
                   Close
                 </button>
               </div>
               {softEventError && <div className="error-banner">{softEventError}</div>}
-              <div className="modal-body">
-                <label className="field">
-                  <span>Title</span>
-                  <input
-                    value={softEventDraft.title}
-                    onChange={(e) => updateSoftEventDraftField("title", e.target.value)}
-                  />
-                </label>
-                <label className="field">
-                  <span>Description</span>
-                  <textarea
-                    rows={3}
-                    value={softEventDraft.description}
-                    onChange={(e) => updateSoftEventDraftField("description", e.target.value)}
-                  />
-                </label>
-                <label className="field">
-                  <span>Notes</span>
-                  <textarea
-                    rows={2}
-                    value={softEventDraft.notes}
-                    onChange={(e) => updateSoftEventDraftField("notes", e.target.value)}
-                  />
-                </label>
-                <div className="form-grid">
-                  <label className="field">
-                    <span>Preferred Duration (minutes)</span>
-                    <input
-                      type="number"
-                      min={5}
-                      step={5}
-                      value={softEventDraft.preferred_duration_minutes}
-                      onChange={(e) => updateSoftEventDraftField("preferred_duration_minutes", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Minimum Duration (minutes)</span>
-                    <input
-                      type="number"
-                      min={5}
-                      step={5}
-                      value={softEventDraft.min_duration_minutes}
-                      onChange={(e) => updateSoftEventDraftField("min_duration_minutes", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Priority</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={softEventDraft.priority}
-                      onChange={(e) => updateSoftEventDraftField("priority", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Deferral limit</span>
-                    <input
-                      type="number"
-                      min={0}
-                      step={1}
-                      value={softEventDraft.deferral_limit}
-                      onChange={(e) => updateSoftEventDraftField("deferral_limit", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Status</span>
-                    <select
-                      value={softEventDraft.status}
-                      onChange={(e) => updateSoftEventDraftField("status", e.target.value)}
-                    >
-                      <option value="active">active</option>
-                      <option value="paused">paused</option>
-                      <option value="archived">archived</option>
-                    </select>
-                  </label>
-                </div>
-                <div className="form-grid">
-                  <label className="field">
-                    <span>Soft deadline</span>
-                    <input
-                      type="datetime-local"
-                      value={softEventDraft.soft_deadline}
-                      onChange={(e) => updateSoftEventDraftField("soft_deadline", e.target.value)}
-                    />
-                  </label>
-                  <label className="field">
-                    <span>Hard deadline</span>
-                    <input
-                      type="datetime-local"
-                      value={softEventDraft.hard_deadline}
-                      onChange={(e) => updateSoftEventDraftField("hard_deadline", e.target.value)}
-                    />
-                  </label>
-                </div>
-                <label className="field">
-                  <span>Frequency</span>
-                  <input
-                    value={softEventDraft.frequency}
-                    onChange={(e) => updateSoftEventDraftField("frequency", e.target.value)}
-                    placeholder="weekly, monthly, etc."
-                  />
-                </label>
+              <div className="modal-tabs" role="tablist" aria-label="Soft event detail tabs">
+                <button
+                  type="button"
+                  className={`modal-tab ${softEventModalTab === "details" ? "active" : ""}`}
+                  onClick={() => setSoftEventModalTab("details")}
+                >
+                  Details
+                </button>
+                <button
+                  type="button"
+                  className={`modal-tab ${softEventModalTab === "metadata" ? "active" : ""}`}
+                  onClick={() => setSoftEventModalTab("metadata")}
+                >
+                  Raw metadata
+                </button>
               </div>
+              {softEventDraft ? (
+                softEventModalTab === "details" ? (
+                <div className="modal-body">
+                  <label className="field">
+                    <span>Title</span>
+                    <input
+                      value={softEventDraft.title}
+                      onChange={(e) => updateSoftEventDraftField("title", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Description</span>
+                    <textarea
+                      rows={3}
+                      value={softEventDraft.description}
+                      onChange={(e) => updateSoftEventDraftField("description", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Notes</span>
+                    <textarea
+                      rows={2}
+                      value={softEventDraft.notes}
+                      onChange={(e) => updateSoftEventDraftField("notes", e.target.value)}
+                    />
+                  </label>
+                  <div className="form-grid">
+                    <label className="field">
+                      <span>Preferred Duration (minutes)</span>
+                      <input
+                        type="number"
+                        min={5}
+                        step={5}
+                        value={softEventDraft.preferred_duration_minutes}
+                        onChange={(e) => updateSoftEventDraftField("preferred_duration_minutes", e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Minimum Duration (minutes)</span>
+                      <input
+                        type="number"
+                        min={5}
+                        step={5}
+                        value={softEventDraft.min_duration_minutes}
+                        onChange={(e) => updateSoftEventDraftField("min_duration_minutes", e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Priority</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={softEventDraft.priority}
+                        onChange={(e) => updateSoftEventDraftField("priority", e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Deferral limit</span>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        value={softEventDraft.deferral_limit}
+                        onChange={(e) => updateSoftEventDraftField("deferral_limit", e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Status</span>
+                      <select
+                        value={softEventDraft.status}
+                        onChange={(e) => updateSoftEventDraftField("status", e.target.value)}
+                      >
+                        <option value="active">active</option>
+                        <option value="paused">paused</option>
+                        <option value="archived">archived</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="form-grid">
+                    <label className="field">
+                      <span>Soft deadline</span>
+                      <input
+                        type="datetime-local"
+                        value={softEventDraft.soft_deadline}
+                        onChange={(e) => updateSoftEventDraftField("soft_deadline", e.target.value)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Hard deadline</span>
+                      <input
+                        type="datetime-local"
+                        value={softEventDraft.hard_deadline}
+                        onChange={(e) => updateSoftEventDraftField("hard_deadline", e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <label className="field">
+                    <span>Frequency</span>
+                    <input
+                      value={softEventDraft.frequency}
+                      onChange={(e) => updateSoftEventDraftField("frequency", e.target.value)}
+                      placeholder="weekly, monthly, etc."
+                    />
+                  </label>
+                </div>
+                ) : (
+                <div className="modal-body">
+                  <pre className="study-log-dump">{JSON.stringify(softEventMetadata || {}, null, 2)}</pre>
+                </div>
+                )
+              ) : (
+                <div className="modal-body">
+                  <p className="muted">Loading soft event details...</p>
+                </div>
+              )}
               <div className="modal-actions">
                 <button
                   className="ghost"
@@ -3717,11 +3777,12 @@ export default function App() {
                     if (softEventLoading) return;
                     setSoftEventModalOpen(false);
                     setSoftEventDraft(null);
+                    setSoftEventMetadata(null);
                   }}
                 >
                   Cancel
                 </button>
-                <button className="primary" onClick={saveSoftEventDraft} disabled={softEventLoading}>
+                <button className="primary" onClick={saveSoftEventDraft} disabled={softEventLoading || !softEventDraft}>
                   {softEventLoading ? "Saving…" : "Save"}
                 </button>
               </div>

@@ -663,13 +663,15 @@ def get_soft_event_detail(request, soft_event_id: UUID):
         "title": se.title,
         "description": se.description,
         "notes": se.notes,
-        "duration_minutes": se.duration_minutes,
+        "preferred_duration_minutes": se.preferred_duration_minutes,
+        "min_duration_minutes": se.min_duration_minutes,
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
+        "metadata": se.metadata or {},
     }
 
 
@@ -680,18 +682,42 @@ def update_soft_event_detail(
     title: Optional[str] = None,
     description: Optional[str] = None,
     notes: Optional[str] = None,
-    duration_minutes: Optional[int] = None,
+    preferred_duration_minutes: Optional[int] = None,
+    min_duration_minutes: Optional[int] = None,
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
     frequency: Optional[str] = None,
     deferral_limit: Optional[int] = None,
     priority: Optional[int] = None,
     status: Optional[str] = None,
+    duration_minutes: Optional[int] = None,
 ):
     try:
         se = SoftEvent.objects.get(id=soft_event_id)
     except SoftEvent.DoesNotExist:
         raise HttpError(404, "Soft event not found")
+
+    body_payload = {}
+    try:
+        if getattr(request, "body", None):
+            parsed = json.loads(request.body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                body_payload = parsed
+    except Exception:
+        body_payload = {}
+
+    title = body_payload.get("title", title)
+    description = body_payload.get("description", description)
+    notes = body_payload.get("notes", notes)
+    preferred_duration_minutes = body_payload.get("preferred_duration_minutes", preferred_duration_minutes)
+    min_duration_minutes = body_payload.get("min_duration_minutes", min_duration_minutes)
+    soft_deadline = body_payload.get("soft_deadline", soft_deadline)
+    hard_deadline = body_payload.get("hard_deadline", hard_deadline)
+    frequency = body_payload.get("frequency", frequency)
+    deferral_limit = body_payload.get("deferral_limit", deferral_limit)
+    priority = body_payload.get("priority", priority)
+    status = body_payload.get("status", status)
+    duration_minutes = body_payload.get("duration_minutes", duration_minutes)
 
     fields = []
     if title is not None:
@@ -703,9 +729,21 @@ def update_soft_event_detail(
     if notes is not None:
         se.notes = notes
         fields.append("notes")
-    if duration_minutes is not None:
-        se.duration_minutes = max(int(duration_minutes), 1)
-        fields.append("duration_minutes")
+    # Backward compatibility for old clients sending a single duration field.
+    if duration_minutes is not None and preferred_duration_minutes is None:
+        preferred_duration_minutes = duration_minutes
+    if preferred_duration_minutes is not None:
+        se.preferred_duration_minutes = max(int(preferred_duration_minutes), 1)
+        fields.append("preferred_duration_minutes")
+    if min_duration_minutes is not None:
+        se.min_duration_minutes = max(int(min_duration_minutes), 1)
+        fields.append("min_duration_minutes")
+    if preferred_duration_minutes is not None and min_duration_minutes is None:
+        se.min_duration_minutes = min(se.min_duration_minutes, se.preferred_duration_minutes)
+        fields.append("min_duration_minutes")
+    if min_duration_minutes is not None and preferred_duration_minutes is None:
+        se.preferred_duration_minutes = max(se.preferred_duration_minutes, se.min_duration_minutes)
+        fields.append("preferred_duration_minutes")
     if soft_deadline is not None:
         se.soft_deadline = _parse_dt(soft_deadline) if soft_deadline else None
         fields.append("soft_deadline")
@@ -732,13 +770,15 @@ def update_soft_event_detail(
         "title": se.title,
         "description": se.description,
         "notes": se.notes,
-        "duration_minutes": se.duration_minutes,
+        "preferred_duration_minutes": se.preferred_duration_minutes,
+        "min_duration_minutes": se.min_duration_minutes,
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
+        "metadata": se.metadata or {},
     }
 
 
@@ -748,18 +788,51 @@ def create_soft_event_detail(
     title: str,
     description: str = "",
     notes: str = "",
-    duration_minutes: int = 30,
+    preferred_duration_minutes: int = 60,
+    min_duration_minutes: int = 30,
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
     frequency: str = "",
     deferral_limit: int = 3,
     priority: int = 0,
+    duration_minutes: Optional[int] = None,
 ):
+    body_payload = {}
+    try:
+        if getattr(request, "body", None):
+            parsed = json.loads(request.body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                body_payload = parsed
+    except Exception:
+        body_payload = {}
+
+    title = body_payload.get("title", title)
+    description = body_payload.get("description", description)
+    notes = body_payload.get("notes", notes)
+    preferred_duration_minutes = body_payload.get("preferred_duration_minutes", preferred_duration_minutes)
+    min_duration_minutes = body_payload.get("min_duration_minutes", min_duration_minutes)
+    soft_deadline = body_payload.get("soft_deadline", soft_deadline)
+    hard_deadline = body_payload.get("hard_deadline", hard_deadline)
+    frequency = body_payload.get("frequency", frequency)
+    deferral_limit = body_payload.get("deferral_limit", deferral_limit)
+    priority = body_payload.get("priority", priority)
+    duration_minutes = body_payload.get("duration_minutes", duration_minutes)
+
+    # Backward compatibility for old clients sending a single duration field.
+    if duration_minutes is not None and "preferred_duration_minutes" not in body_payload:
+        preferred_duration_minutes = duration_minutes
+
+    preferred_duration_minutes = max(int(preferred_duration_minutes or 0), 1)
+    min_duration_minutes = max(int(min_duration_minutes or 0), 1)
+    if min_duration_minutes > preferred_duration_minutes:
+        preferred_duration_minutes = min_duration_minutes
+
     se = SoftEvent.objects.create(
         title=title,
         description=description or "",
         notes=notes or "",
-        duration_minutes=max(duration_minutes or 0, 1),
+        preferred_duration_minutes=preferred_duration_minutes,
+        min_duration_minutes=min_duration_minutes,
         soft_deadline=_parse_dt(soft_deadline) if soft_deadline else None,
         hard_deadline=_parse_dt(hard_deadline) if hard_deadline else None,
         frequency=frequency or "",
@@ -772,13 +845,15 @@ def create_soft_event_detail(
         "title": se.title,
         "description": se.description,
         "notes": se.notes,
-        "duration_minutes": se.duration_minutes,
+        "preferred_duration_minutes": se.preferred_duration_minutes,
+        "min_duration_minutes": se.min_duration_minutes,
         "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
         "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
         "frequency": se.frequency,
         "deferral_limit": se.deferral_limit,
         "priority": se.priority,
         "status": se.status,
+        "metadata": se.metadata or {},
     }
 
 

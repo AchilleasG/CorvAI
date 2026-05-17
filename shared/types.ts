@@ -154,6 +154,7 @@ export type StudyTopic = {
   name: string;
   description: string;
   summary: string;
+  homework?: Array<Record<string, unknown>>;
   order_index: number;
   estimated_effort_minutes: number;
   weight: number;
@@ -212,6 +213,7 @@ export type SoftEventDetail = {
   deferral_limit: number;
   priority: number;
   status: "active" | "paused" | "archived";
+  metadata?: Record<string, unknown>;
 };
 
 export type CalendarReplanResult = {

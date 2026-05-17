@@ -856,6 +856,28 @@ button {
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.75rem;
+
+.modal-tabs {
+  display: flex;
+  gap: 0.45rem;
+  padding: 0 1rem;
+}
+
+.modal-tab {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.modal-tab.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(42, 209, 163, 0.12);
+}
 }
 
 .card-head-actions {

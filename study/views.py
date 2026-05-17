@@ -129,6 +129,7 @@ def _topic_payload(topic: StudyTopic) -> dict:
         "name": topic.name,
         "description": topic.description,
         "summary": _normalize_topic_summary(topic.summary),
+        "homework": topic.homework or [],
         "order_index": topic.order_index,
         "estimated_effort_minutes": topic.estimated_effort_minutes,
         "weight": topic.weight,
@@ -419,6 +420,7 @@ def create_topic(
         estimated_effort_minutes=max(estimated_effort_minutes, 1),
         weight=weight or 1.0,
     )
+    StudyPlannerService.assign_past_exam_homework_to_topics(course)
     return _topic_payload(topic)
 
 
@@ -441,6 +443,7 @@ def create_exam(
         weight=weight or 1.0,
         notes=notes or "",
     )
+    StudyPlannerService.recalculate_plan_for_course(course)
     return _exam_payload(exam)
 
 
@@ -479,13 +482,16 @@ def update_exam(
         fields.append("notes")
     if fields:
         exam.save(update_fields=fields + ["updated_at"])
+        StudyPlannerService.recalculate_plan_for_course(exam.course)
     return _exam_payload(exam)
 
 
 @router.delete("/exams/{exam_id}")
 def delete_exam(request, exam_id: str):
     exam = StudyExam.objects.get(id=exam_id)
+    course = exam.course
     exam.delete()
+    StudyPlannerService.recalculate_plan_for_course(course)
     return {"ok": True}
 
 
@@ -596,6 +602,8 @@ def update_topic(
 @router.delete("/topics/{topic_id}")
 def delete_topic(request, topic_id: str):
     topic = StudyTopic.objects.get(id=topic_id)
+    course = topic.course
     cleanup_stats = StudyPlannerService.cleanup_topic_soft_events(topic)
     topic.delete()
+    StudyPlannerService.assign_past_exam_homework_to_topics(course)
     return {"ok": True, "cleanup": cleanup_stats}
