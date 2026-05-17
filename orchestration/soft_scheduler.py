@@ -39,7 +39,8 @@ def collect_window_state(window_start: datetime, window_end: datetime) -> Dict[s
             {
                 "id": str(se.id),
                 "title": se.title,
-                "duration_minutes": se.duration_minutes,
+                "preferred_duration_minutes": se.preferred_duration_minutes,
+                "min_duration_minutes": se.min_duration_minutes,
                 "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
                 "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
                 "description": se.description,

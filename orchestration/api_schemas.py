@@ -13,9 +13,11 @@ class JobOut(Schema):
     progress: float
     module_slug: Optional[str] = None
     active_function: Optional[str] = None
+    metadata: Optional[dict] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     cancel_requested: Optional[bool] = None
+    error_summary: Optional[str] = None
 
     @staticmethod
     def from_model(job: Job) -> "JobOut":
@@ -26,9 +28,11 @@ class JobOut(Schema):
             progress=job.progress,
             module_slug=job.module.slug if job.module else None,
             active_function=job.active_function.manifest_id if job.active_function else None,
+            metadata=job.metadata,
             created_at=job.created_at.isoformat() if job.created_at else None,
             updated_at=job.updated_at.isoformat() if job.updated_at else None,
             cancel_requested=job.cancel_requested,
+            error_summary=job.error_summary or None,
         )
 
 

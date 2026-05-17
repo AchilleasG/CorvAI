@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createChat,
+  createStudyCourse,
+  updateStudyCourse,
+  deleteStudyCourse,
   fetchChats,
+  fetchStudyCourses,
+  fetchStudyExams,
+  fetchStudyMaterials,
+  fetchStudyTopics,
   fetchMessages,
   fetchJobs,
   sendText,
@@ -9,6 +16,7 @@ import {
   renameChat,
   deleteChat,
   cancelJob,
+  fetchJobEvents,
   fetchJobMessagesDirect,
   fetchUsageRecent,
   fetchUsageSummary,
@@ -20,6 +28,12 @@ import {
   fetchSoftEvent,
   promoteSoftSlot,
   replanCalendar,
+  createStudyTopic,
+  createStudyExam,
+  updateStudyExam,
+  deleteStudyExam,
+  updateStudyTopic,
+  deleteStudyTopic,
   fetchScheduledTasks,
   createScheduledTask,
   updateScheduledTask,
@@ -29,11 +43,14 @@ import {
   fetchCallSessions,
   createCallSession,
   updateCallSession,
+  uploadStudyMaterial,
+  restartStudyJob,
 } from "./api";
 import {
   ChatListItem,
   Message,
   Job,
+  JobEvent,
   UsageEvent,
   UsageSummary,
   SettingsPayload,
@@ -41,6 +58,10 @@ import {
   SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
+  StudyCourse,
+  StudyExam,
+  StudyMaterial,
+  StudyTopic,
   UserMessage,
   CallSession,
 } from "./types";
@@ -62,7 +83,8 @@ type SoftEventDraft = {
   title: string;
   description: string;
   notes: string;
-  duration_minutes: string;
+  preferred_duration_minutes: string;
+  min_duration_minutes: string;
   soft_deadline: string;
   hard_deadline: string;
   frequency: string;
@@ -72,6 +94,11 @@ type SoftEventDraft = {
 };
 
 type SoftEventMode = "create" | "edit";
+type StudyOutputModalKind = "converted" | "solved" | "theory";
+
+type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "exam" | "other";
+type StudyMaterialInputMode = "file" | "text";
+const STUDY_PREVIEW_COUNT = 3;
 
 function formatDateTime(value?: string | null) {
   if (!value) return "";
@@ -96,6 +123,24 @@ function toIsoValue(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString();
+}
+
+function formatMaterialKind(kind: string) {
+  return kind
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function asStringList(value: unknown): string[] {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item).trim())
+    .filter(Boolean);
 }
 
 type MessageBubbleProps = {
@@ -199,6 +244,7 @@ export default function App() {
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [input, setInput] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [showStudy, setShowStudy] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
   const [showScheduler, setShowScheduler] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
@@ -224,6 +270,7 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState("");
   const [showMicSettings, setShowMicSettings] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const studyFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +295,49 @@ export default function App() {
   const [callSessions, setCallSessions] = useState<CallSession[]>([]);
   const [callsLoading, setCallsLoading] = useState(false);
   const [callsError, setCallsError] = useState<string | null>(null);
+  const [studyCourses, setStudyCourses] = useState<StudyCourse[]>([]);
+  const [studyTopics, setStudyTopics] = useState<StudyTopic[]>([]);
+  const [studyExams, setStudyExams] = useState<StudyExam[]>([]);
+  const [studyMaterials, setStudyMaterials] = useState<StudyMaterial[]>([]);
+  const [studyJobs, setStudyJobs] = useState<Job[]>([]);
+  const [studySelectedJobId, setStudySelectedJobId] = useState<string | null>(null);
+  const [studyJobEvents, setStudyJobEvents] = useState<JobEvent[]>([]);
+  const [studyJobLogsLoading, setStudyJobLogsLoading] = useState(false);
+  const [studyLoading, setStudyLoading] = useState(false);
+  const [studySaving, setStudySaving] = useState(false);
+  const [studyError, setStudyError] = useState<string | null>(null);
+  const [studyCourseTitle, setStudyCourseTitle] = useState("");
+  const [studyCourseCode, setStudyCourseCode] = useState("");
+  const [studyCourseDescription, setStudyCourseDescription] = useState("");
+  const [studySelectedCourseId, setStudySelectedCourseId] = useState<string | null>(null);
+  const [studySelectedMaterialId, setStudySelectedMaterialId] = useState<string | null>(null);
+  const [studyTopicGradeDrafts, setStudyTopicGradeDrafts] = useState<Record<string, string>>({});
+  const [studyTopicPassDrafts, setStudyTopicPassDrafts] = useState<Record<string, boolean>>({});
+  const [studyLessonTitle, setStudyLessonTitle] = useState("");
+  const [studyLessonDescription, setStudyLessonDescription] = useState("");
+  const [studyLessonEffort, setStudyLessonEffort] = useState("60");
+  const [studyLessonWeight, setStudyLessonWeight] = useState("1.0");
+  const [studyExamTitle, setStudyExamTitle] = useState("");
+  const [studyExamKind, setStudyExamKind] = useState("other");
+  const [studyExamDate, setStudyExamDate] = useState("");
+  const [studyExamWeight, setStudyExamWeight] = useState("1.0");
+  const [studyMaterialTitle, setStudyMaterialTitle] = useState("");
+  const [studyMaterialKind, setStudyMaterialKind] = useState<StudyMaterialKind>("lecture");
+  const [studyMaterialInputMode, setStudyMaterialInputMode] = useState<StudyMaterialInputMode>("file");
+  const [studyMaterialNotes, setStudyMaterialNotes] = useState("");
+  const [studyMaterialFile, setStudyMaterialFile] = useState<File | null>(null);
+  const [studyMaterialText, setStudyMaterialText] = useState("");
+  const [studyLessonDetailId, setStudyLessonDetailId] = useState<string | null>(null);
+  const [studyOutputModalKind, setStudyOutputModalKind] = useState<StudyOutputModalKind | null>(null);
+  const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
+  const [showCreateLessonModal, setShowCreateLessonModal] = useState(false);
+  const [showCreateExamModal, setShowCreateExamModal] = useState(false);
+  const [showCreateMaterialModal, setShowCreateMaterialModal] = useState(false);
+  const [studyShowAllCourses, setStudyShowAllCourses] = useState(false);
+  const [studyShowAllLessons, setStudyShowAllLessons] = useState(false);
+  const [studyShowAllExams, setStudyShowAllExams] = useState(false);
+  const [studyShowAllMaterials, setStudyShowAllMaterials] = useState(false);
+  const [studyShowAllJobs, setStudyShowAllJobs] = useState(false);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -279,6 +369,21 @@ export default function App() {
       }
     })();
   }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showStudy) return;
+    refreshStudyData();
+  }, [authed, showStudy, studySelectedCourseId]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showStudy) return;
+    const id = setInterval(() => {
+      refreshStudyData();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [authed, showStudy, studySelectedCourseId]);
 
   useEffect(() => {
     if (!authed) return;
@@ -383,6 +488,81 @@ export default function App() {
     () => chats.find((c) => c.chat_id === activeChatId) || null,
     [chats, activeChatId],
   );
+  const selectedStudyCourse = useMemo(
+    () => studyCourses.find((course) => course.id === studySelectedCourseId) || null,
+    [studyCourses, studySelectedCourseId],
+  );
+  const selectedStudyMaterial = useMemo(
+    () => studyMaterials.find((material) => material.id === studySelectedMaterialId) || null,
+    [studyMaterials, studySelectedMaterialId],
+  );
+  const selectedStudyMaterialJobs = useMemo(() => {
+    if (!studySelectedMaterialId) return [];
+    return studyJobs.filter(
+      (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
+    );
+  }, [studyJobs, studySelectedMaterialId]);
+  const selectedStudyJob = useMemo(
+    () => selectedStudyMaterialJobs.find((job) => job.id === studySelectedJobId) || null,
+    [selectedStudyMaterialJobs, studySelectedJobId],
+  );
+  const selectedStudyLesson = useMemo(
+    () => studyTopics.find((topic) => topic.id === studyLessonDetailId) || null,
+    [studyTopics, studyLessonDetailId],
+  );
+  const selectedStudyOutput = useMemo(() => {
+    if (!selectedStudyMaterial || !studyOutputModalKind) return null;
+    if (studyOutputModalKind === "converted") {
+      return {
+        title: "Converted markdown",
+        body: selectedStudyMaterial.converted_markdown || "No converted markdown yet.",
+      };
+    }
+    if (studyOutputModalKind === "solved") {
+      return {
+        title: "Solved markdown",
+        body: selectedStudyMaterial.solved_markdown || "No solved output yet.",
+      };
+    }
+    return {
+      title: "Theory pack",
+      body: selectedStudyMaterial.theory_markdown || "No theory output yet.",
+    };
+  }, [selectedStudyMaterial, studyOutputModalKind]);
+  const visibleStudyCourses = useMemo(
+    () => (studyShowAllCourses ? studyCourses : studyCourses.slice(0, STUDY_PREVIEW_COUNT)),
+    [studyCourses, studyShowAllCourses],
+  );
+  const visibleStudyLessons = useMemo(
+    () => (studyShowAllLessons ? studyTopics : studyTopics.slice(0, STUDY_PREVIEW_COUNT)),
+    [studyTopics, studyShowAllLessons],
+  );
+  const visibleStudyExams = useMemo(
+    () => (studyShowAllExams ? studyExams : studyExams.slice(0, STUDY_PREVIEW_COUNT)),
+    [studyExams, studyShowAllExams],
+  );
+  const visibleStudyMaterials = useMemo(
+    () => (studyShowAllMaterials ? studyMaterials : studyMaterials.slice(0, STUDY_PREVIEW_COUNT)),
+    [studyMaterials, studyShowAllMaterials],
+  );
+  const visibleStudyJobs = useMemo(
+    () => (studyShowAllJobs ? selectedStudyMaterialJobs : selectedStudyMaterialJobs.slice(0, STUDY_PREVIEW_COUNT)),
+    [selectedStudyMaterialJobs, studyShowAllJobs],
+  );
+  useEffect(() => {
+    if (!studySelectedMaterialId) {
+      return;
+    }
+    if (!selectedStudyMaterialJobs.length) {
+      return;
+    }
+    setStudySelectedJobId((prev) => {
+      if (prev && selectedStudyMaterialJobs.some((job) => job.id === prev)) {
+        return prev;
+      }
+      return selectedStudyMaterialJobs[0].id;
+    });
+  }, [studySelectedMaterialId, selectedStudyMaterialJobs]);
   const sortedChats = useMemo(() => {
     return [...chats].sort((a, b) => {
       const aTime = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0;
@@ -400,6 +580,7 @@ export default function App() {
       const payload: SettingsPayload = {
         frontman_model: formData.get("frontman_model") as string,
         caller_model: formData.get("caller_model") as string,
+        study_model: formData.get("study_model") as string,
         cache_mode: formData.get("cache_mode") as string,
         max_function_result_chars: Number(formData.get("max_function_result_chars") || 0) || undefined,
       };
@@ -438,6 +619,389 @@ export default function App() {
       setCalendarError(err.message || "Failed to load calendar");
     } finally {
       setCalendarLoading(false);
+    }
+  }
+
+  async function refreshStudyData() {
+    try {
+      setStudyLoading(true);
+      setStudyError(null);
+      const [{ courses }, materialsResp, topicsResp, examsResp, jobsResp] = await Promise.all([
+        fetchStudyCourses(),
+        studySelectedCourseId
+          ? fetchStudyMaterials(studySelectedCourseId)
+          : Promise.resolve({ materials: [] as StudyMaterial[] }),
+        studySelectedCourseId
+          ? fetchStudyTopics(studySelectedCourseId)
+          : Promise.resolve({ topics: [] as StudyTopic[] }),
+        studySelectedCourseId
+          ? fetchStudyExams(studySelectedCourseId)
+          : Promise.resolve({ exams: [] as StudyExam[] }),
+        fetchJobs(),
+      ]);
+      // Only update state if data actually changed
+      setStudyCourses((prev) => 
+        JSON.stringify(prev) !== JSON.stringify(courses) ? courses : prev
+      );
+      if (!studySelectedCourseId && courses.length) {
+        setStudySelectedCourseId(courses[0].id);
+      }
+      const materials = materialsResp.materials || [];
+      const topics = topicsResp.topics || [];
+      const exams = examsResp.exams || [];
+      setStudyMaterials((prev) =>
+        JSON.stringify(prev) !== JSON.stringify(materials) ? materials : prev
+      );
+      setStudyTopics((prev) =>
+        JSON.stringify(prev) !== JSON.stringify(topics) ? topics : prev
+      );
+      setStudyExams((prev) =>
+        JSON.stringify(prev) !== JSON.stringify(exams) ? exams : prev
+      );
+      setStudyTopicGradeDrafts(
+        Object.fromEntries(topics.map((topic) => [topic.id, topic.grade?.toString() || ""])),
+      );
+      setStudyTopicPassDrafts(
+        Object.fromEntries(topics.map((topic) => [topic.id, !!topic.passed])),
+      );
+      setStudyJobs((prev) => {
+        const filtered = (jobsResp || []).filter((job) => job.module_slug === "study");
+        return JSON.stringify(prev) !== JSON.stringify(filtered) ? filtered : prev;
+      });
+      setStudySelectedJobId((prev) => {
+        const studyOnly = (jobsResp || []).filter((job) => job.module_slug === "study");
+        const jobsForMaterial = studyOnly.filter(
+          (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
+        );
+        if (prev && jobsForMaterial.some((job) => job.id === prev)) return prev;
+        return jobsForMaterial[0]?.id || prev;
+      });
+      setStudySelectedMaterialId((prev) => {
+        if (prev && materials.some((material) => material.id === prev)) {
+          return prev;
+        }
+        return materials[0]?.id || null;
+      });
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to load study data");
+    } finally {
+      setStudyLoading(false);
+    }
+  }
+
+  async function handleSelectStudyJob(jobId: string) {
+    try {
+      setStudySelectedJobId(jobId);
+      setStudyJobLogsLoading(true);
+      const payload = await fetchJobEvents(jobId);
+      setStudyJobEvents(payload.events || []);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to load job logs");
+      setStudyJobEvents([]);
+    } finally {
+      setStudyJobLogsLoading(false);
+    }
+  }
+
+  async function handleRestartStudyJob(job: Job, force = false) {
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await restartStudyJob(job.id, force);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      if (err?.status === 409 && !force) {
+        await handleRestartStudyJob(job, true);
+        return;
+      }
+      setStudyError(err.message || "Failed to restart job");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleCreateStudyLesson(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studySelectedCourseId) {
+      setStudyError("Select or create a course first");
+      return;
+    }
+    if (!studyLessonTitle.trim()) {
+      setStudyError("Lesson title is required");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await createStudyTopic({
+        course_id: studySelectedCourseId,
+        name: studyLessonTitle.trim(),
+        description: studyLessonDescription.trim() || undefined,
+        estimated_effort_minutes: Number(studyLessonEffort) || 60,
+        weight: Number(studyLessonWeight) || 1,
+      });
+      setStudyLessonTitle("");
+      setStudyLessonDescription("");
+      setStudyLessonEffort("60");
+      setStudyLessonWeight("1.0");
+      await refreshStudyData();
+      setShowCreateLessonModal(false);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to create lesson");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleCreateStudyExam(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studySelectedCourseId) {
+      setStudyError("Select or create a course first");
+      return;
+    }
+    if (!studyExamTitle.trim()) {
+      setStudyError("Exam title is required");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await createStudyExam({
+        course_id: studySelectedCourseId,
+        title: studyExamTitle.trim(),
+        kind: studyExamKind,
+        scheduled_at: studyExamDate ? new Date(studyExamDate).toISOString() : undefined,
+        weight: Number(studyExamWeight) || 1,
+      });
+      setStudyExamTitle("");
+      setStudyExamKind("other");
+      setStudyExamDate("");
+      setStudyExamWeight("1.0");
+      await refreshStudyData();
+      setShowCreateExamModal(false);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to create exam");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleSaveStudyTopic(topic: StudyTopic, payload: Partial<StudyTopic>) {
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await updateStudyTopic(topic.id, payload);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to update lesson");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleCreateStudyCourse(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studyCourseTitle.trim()) {
+      setStudyError("Course title is required");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      const created = await createStudyCourse({
+        title: studyCourseTitle.trim(),
+        code: studyCourseCode.trim() || undefined,
+        description: studyCourseDescription.trim() || undefined,
+      });
+      setStudyCourseTitle("");
+      setStudyCourseCode("");
+      setStudyCourseDescription("");
+      setStudySelectedCourseId(created.id);
+      await refreshStudyData();
+      setShowCreateCourseModal(false);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to create course");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  function handleStudyFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const nextFile = e.target.files?.[0] || null;
+    setStudyMaterialFile(nextFile);
+    if (!studyMaterialTitle.trim() && nextFile?.name) {
+      const baseName = nextFile.name.replace(/\.[^.]+$/, "");
+      setStudyMaterialTitle(baseName);
+    }
+  }
+
+  function openStudyFilePicker() {
+    studyFileInputRef.current?.click();
+  }
+
+  async function handleEditStudyCourse(course: StudyCourse) {
+    const title = window.prompt("Course title", course.title) ?? course.title;
+    if (!title.trim()) return;
+    const code = window.prompt("Course code", course.code || "") ?? course.code;
+    const description = window.prompt("Course description", course.description || "") ?? course.description;
+    try {
+      setStudySaving(true);
+      await updateStudyCourse(course.id, {
+        title: title.trim(),
+        code: code.trim(),
+        description: description.trim(),
+      });
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to update course");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleDeleteStudyCourse(course: StudyCourse) {
+    if (!window.confirm(`Delete course '${course.title}'? This removes related study data.`)) return;
+    try {
+      setStudySaving(true);
+      await deleteStudyCourse(course.id);
+      if (studySelectedCourseId === course.id) {
+        setStudySelectedCourseId(null);
+      }
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to delete course");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleEditStudyLesson(topic: StudyTopic) {
+    const name = window.prompt("Lesson title", topic.name) ?? topic.name;
+    if (!name.trim()) return;
+    const description = window.prompt("Lesson description", topic.description || "") ?? topic.description;
+    const effortRaw = window.prompt("Estimated effort minutes", String(topic.estimated_effort_minutes)) ?? String(topic.estimated_effort_minutes);
+    const weightRaw = window.prompt("Lesson weight", String(topic.weight)) ?? String(topic.weight);
+    try {
+      setStudySaving(true);
+      await updateStudyTopic(topic.id, {
+        name: name.trim(),
+        description: description.trim(),
+        estimated_effort_minutes: Number(effortRaw) || topic.estimated_effort_minutes,
+        weight: Number(weightRaw) || topic.weight,
+      });
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to update lesson");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleDeleteStudyLesson(topic: StudyTopic) {
+    if (!window.confirm(`Delete lesson '${topic.name}'?`)) return;
+    try {
+      setStudySaving(true);
+      await deleteStudyTopic(topic.id);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to delete lesson");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleEditStudyExam(exam: StudyExam) {
+    const title = window.prompt("Exam title", exam.title) ?? exam.title;
+    if (!title.trim()) return;
+    const kind = window.prompt("Exam kind", exam.kind || "other") ?? exam.kind;
+    const scheduledAt = window.prompt("Scheduled at (ISO datetime)", exam.scheduled_at || "") ?? (exam.scheduled_at || "");
+    const weightRaw = window.prompt("Exam weight", String(exam.weight)) ?? String(exam.weight);
+    const notes = window.prompt("Exam notes", exam.notes || "") ?? exam.notes;
+    try {
+      setStudySaving(true);
+      await updateStudyExam(exam.id, {
+        title: title.trim(),
+        kind: (kind || "other").trim(),
+        scheduled_at: scheduledAt.trim() || undefined,
+        weight: Number(weightRaw) || exam.weight,
+        notes: notes.trim(),
+      });
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to update exam");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleDeleteStudyExam(exam: StudyExam) {
+    if (!window.confirm(`Delete exam '${exam.title}'?`)) return;
+    try {
+      setStudySaving(true);
+      await deleteStudyExam(exam.id);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to delete exam");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleUploadStudyMaterial(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studySelectedCourseId) {
+      setStudyError("Select or create a course first");
+      return;
+    }
+    if (!studyMaterialTitle.trim()) {
+      setStudyError("Material title is required");
+      return;
+    }
+    if (studyMaterialInputMode === "file" && !studyMaterialFile) {
+      setStudyError("Choose a file first");
+      return;
+    }
+    if (studyMaterialInputMode === "text" && !studyMaterialText.trim()) {
+      setStudyError("Paste the study text first");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      const created = await uploadStudyMaterial({
+        course_id: studySelectedCourseId,
+        title: studyMaterialTitle.trim(),
+        kind: studyMaterialKind,
+        notes: studyMaterialNotes.trim(),
+        source_text: studyMaterialInputMode === "text" ? studyMaterialText.trim() : undefined,
+        file: studyMaterialInputMode === "file" ? studyMaterialFile : undefined,
+        process_now: true,
+      });
+      setStudyMaterialTitle("");
+      setStudyMaterialNotes("");
+      setStudyMaterialFile(null);
+      setStudyMaterialText("");
+      setStudySelectedMaterialId(created.material.id);
+      await refreshStudyData();
+      setShowCreateMaterialModal(false);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to upload material");
+    } finally {
+      setStudySaving(false);
     }
   }
 
@@ -538,7 +1102,8 @@ export default function App() {
       title: detail.title || "",
       description: detail.description || "",
       notes: detail.notes || "",
-      duration_minutes: String(detail.duration_minutes ?? ""),
+      preferred_duration_minutes: String(detail.preferred_duration_minutes ?? ""),
+      min_duration_minutes: String(detail.min_duration_minutes ?? ""),
       soft_deadline: toLocalInputValue(detail.soft_deadline),
       hard_deadline: toLocalInputValue(detail.hard_deadline),
       frequency: detail.frequency || "",
@@ -554,7 +1119,8 @@ export default function App() {
       title: "",
       description: "",
       notes: "",
-      duration_minutes: "30",
+      preferred_duration_minutes: "60",
+      min_duration_minutes: "30",
       soft_deadline: "",
       hard_deadline: "",
       frequency: "",
@@ -602,14 +1168,21 @@ export default function App() {
     }
     try {
       setSoftEventLoading(true);
-      const duration = parseInt(softEventDraft.duration_minutes, 10);
+      const preferredDuration = parseInt(softEventDraft.preferred_duration_minutes, 10);
+      const minDuration = parseInt(softEventDraft.min_duration_minutes, 10);
       const deferral = parseInt(softEventDraft.deferral_limit, 10);
       const priority = parseInt(softEventDraft.priority, 10);
+      const preferred = Number.isFinite(preferredDuration) ? preferredDuration : undefined;
+      const minimum = Number.isFinite(minDuration) ? minDuration : undefined;
       const payload = {
         title: softEventDraft.title.trim(),
         description: softEventDraft.description.trim(),
         notes: softEventDraft.notes.trim(),
-        duration_minutes: Number.isFinite(duration) ? duration : undefined,
+        preferred_duration_minutes: preferred,
+        min_duration_minutes:
+          minimum !== undefined && preferred !== undefined
+            ? Math.min(minimum, preferred)
+            : minimum,
         soft_deadline: toIsoValue(softEventDraft.soft_deadline) || null,
         hard_deadline: toIsoValue(softEventDraft.hard_deadline) || null,
         frequency: softEventDraft.frequency.trim(),
@@ -715,6 +1288,7 @@ export default function App() {
   async function handleNewChat() {
     try {
       setShowSettings(false);
+      setShowStudy(false);
       setShowCalendar(false);
       setShowScheduler(false);
       setShowMessages(false);
@@ -1007,6 +1581,7 @@ export default function App() {
                       onClick={() => {
                         setActiveChatId(chat.chat_id);
                         setShowSettings(false);
+                        setShowStudy(false);
                         setShowCalendar(false);
                         setShowScheduler(false);
                         setShowMessages(false);
@@ -1077,6 +1652,7 @@ export default function App() {
                   className="ghost"
                   onClick={() => {
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowCalendar(false);
                     setShowScheduler(false);
                     setShowMessages(false);
@@ -1098,6 +1674,7 @@ export default function App() {
                   <div className="pill-stack">
                     <span className="pill">Frontman: {settings.frontman_model || "gpt-5-mini"}</span>
                     <span className="pill">Caller: {settings.caller_model || "gpt-5-mini"}</span>
+                    <span className="pill">Study: {settings.study_model || "gpt-5-mini"}</span>
                     <span className="pill">Cache: {settings.cache_mode || "off"}</span>
                     <span className="pill">
                       Max result: {settings.max_function_result_chars ?? "6000"} chars
@@ -1114,6 +1691,10 @@ export default function App() {
                     <label className="field">
                       <span>Caller model</span>
                       <input name="caller_model" defaultValue={settings.caller_model || "gpt-5-mini"} />
+                    </label>
+                    <label className="field">
+                      <span>Study model</span>
+                      <input name="study_model" defaultValue={settings.study_model || "gpt-5-mini"} />
                     </label>
                     <label className="field">
                       <span>Cache mode</span>
@@ -1212,7 +1793,7 @@ export default function App() {
                     </div>
                     {usageRecent.map((u) => (
                       <div key={u.id} className="usage-row">
-                        <span>{new Date(u.created_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span>
+                        <span>{new Date(u.created_at).toLocaleString([], { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })}</span>
                         <span>{u.source}</span>
                         <span>{u.model}</span>
                         <span>{u.prompt_tokens.toLocaleString()}</span>
@@ -1225,6 +1806,523 @@ export default function App() {
                   </div>
                 ) : (
                   <p className="muted">No recent usage.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : showStudy ? (
+          <div className="settings-panel">
+            <header className="main-header">
+              <div>
+                <p className="eyebrow">Study</p>
+                <h2>Course materials</h2>
+              </div>
+              <div className="main-actions">
+                <input
+                  name="study_model_quick"
+                  className="ghost"
+                  style={{ minWidth: 220 }}
+                  value={settings.study_model || "gpt-5-mini"}
+                  onChange={(e) => setSettings((prev) => ({ ...prev, study_model: e.target.value }))}
+                  placeholder="Study model"
+                />
+                <button
+                  className="ghost"
+                  onClick={async () => {
+                    try {
+                      setSavingSettings(true);
+                      setStudyError(null);
+                      const updated = await updateSettings({ study_model: settings.study_model || "gpt-5-mini" });
+                      setSettings(updated);
+                    } catch (err: any) {
+                      if (handleAuthError(err)) return;
+                      setStudyError(err.message || "Failed to save study model");
+                    } finally {
+                      setSavingSettings(false);
+                    }
+                  }}
+                  disabled={savingSettings}
+                  title="Only affects study processing, solutions, and lesson generation"
+                >
+                  {savingSettings ? "Saving…" : "Save study model"}
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowStudy(false);
+                    setShowSettings(false);
+                    setShowCalendar(false);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
+                  }}
+                >
+                  Back to chat
+                </button>
+                <button className="ghost" onClick={refreshStudyData} disabled={studyLoading}>
+                  {studyLoading ? "Refreshing…" : "Refresh"}
+                </button>
+              </div>
+            </header>
+            {studyError && <div className="alert">{studyError}</div>}
+            <div className="settings-grid">
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Library</p>
+                    <h3>Your courses</h3>
+                    <p className="muted small">Choose the course that new uploads should attach to.</p>
+                  </div>
+                  <div className="card-head-actions">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setShowCreateCourseModal(true)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                {studyCourses.length ? (
+                  <div className="study-course-list">
+                    {visibleStudyCourses.map((course) => (
+                      <div key={course.id} className={`study-course-pill ${studySelectedCourseId === course.id ? "active" : ""}`}>
+                        <button
+                          type="button"
+                          className="study-course-select"
+                          onClick={() => setStudySelectedCourseId(course.id)}
+                        >
+                          <span className="study-course-title">{course.title}</span>
+                          <span className="study-course-meta">
+                            {course.code || "No code"} · {course.status}
+                          </span>
+                        </button>
+                        <div className="actions-row">
+                          <button type="button" className="ghost" onClick={() => handleEditStudyCourse(course)} disabled={studySaving}>Edit</button>
+                          <button type="button" className="ghost" onClick={() => handleDeleteStudyCourse(course)} disabled={studySaving}>Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No courses yet.</p>
+                )}
+                {studyCourses.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllCourses((prev) => !prev)}
+                    >
+                      {studyShowAllCourses ? "Show less" : `Show all (${studyCourses.length})`}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="card full">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Lessons</p>
+                    <h3>All lessons</h3>
+                    <p className="muted small">Add lessons, mark them passed, and record a grade when you finish them.</p>
+                  </div>
+                  <div className="card-head-actions">
+                    <span className="pill">{studyTopics.length} lessons</span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setShowCreateLessonModal(true)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                {studyTopics.length ? (
+                  <div className="study-topic-list">
+                    {visibleStudyLessons.map((topic) => {
+                      const passedDraft = studyTopicPassDrafts[topic.id] ?? topic.passed;
+                      const gradeDraft = studyTopicGradeDrafts[topic.id] ?? topic.grade?.toString() ?? "";
+                      return (
+                        <div key={topic.id} className="study-topic-card">
+                          <div className="study-topic-header">
+                            <div>
+                              <div className="study-material-title">{topic.name}</div>
+                              <div className="study-topic-summary">
+                                {topic.summary ? (
+                                  <div className="summary-bullets">{topic.summary}</div>
+                                ) : (
+                                  <div className="muted small">{topic.description || "No description"}</div>
+                                )}
+                              </div>
+                            </div>
+                            <span className={`pill study-status ${topic.passed ? "processed" : "pending"}`}>
+                              {topic.passed ? "passed" : topic.status}
+                            </span>
+                          </div>
+                          <div className="study-topic-controls">
+                            <label className="study-inline-check">
+                              <input
+                                type="checkbox"
+                                checked={passedDraft}
+                                onChange={(e) =>
+                                  setStudyTopicPassDrafts((prev) => ({
+                                    ...prev,
+                                    [topic.id]: e.target.checked,
+                                  }))
+                                }
+                              />
+                              <span>Passed</span>
+                            </label>
+                            <label className="field compact">
+                              <span>Grade</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={100}
+                                step={1}
+                                value={gradeDraft}
+                                onChange={(e) =>
+                                  setStudyTopicGradeDrafts((prev) => ({
+                                    ...prev,
+                                    [topic.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="92"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() =>
+                                handleSaveStudyTopic(topic, {
+                                  passed: passedDraft,
+                                  grade: gradeDraft.trim() ? Number(gradeDraft) : undefined,
+                                })
+                              }
+                            >
+                              Save lesson
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => setStudyLessonDetailId(topic.id)}
+                            >
+                              View details
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => handleEditStudyLesson(topic)}
+                              disabled={studySaving}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => handleDeleteStudyLesson(topic)}
+                              disabled={studySaving}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                          <div className="study-topic-meta">
+                            Effort {topic.estimated_effort_minutes} min · Weight {topic.weight} · {topic.passed ? `Passed${topic.grade != null ? ` · Grade ${topic.grade}` : ""}` : "Not passed"}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="muted">No lessons yet.</p>
+                )}
+                {studyTopics.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllLessons((prev) => !prev)}
+                    >
+                      {studyShowAllLessons ? "Show less" : `Show all (${studyTopics.length})`}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="card full">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Exams</p>
+                    <h3>Course exams</h3>
+                    <p className="muted small">Add course-level exam checkpoints and keep their deadlines visible in one place.</p>
+                  </div>
+                  <div className="card-head-actions">
+                    <span className="pill">{studyExams.length} exams</span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setShowCreateExamModal(true)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                {studyExams.length ? (
+                  <div className="study-exam-list">
+                    {visibleStudyExams.map((exam) => (
+                      <div key={exam.id} className="study-exam-card">
+                        <div className="study-topic-header">
+                          <div>
+                            <div className="study-material-title">{exam.title}</div>
+                            <div className="study-topic-meta">
+                              {exam.kind} · {exam.weight}x
+                              {exam.course_title ? ` · ${exam.course_title}` : ""}
+                            </div>
+                          </div>
+                          <span className="pill">{exam.scheduled_at ? formatDateTime(exam.scheduled_at) : "No date"}</span>
+                        </div>
+                        {exam.notes && <div className="study-topic-meta">{exam.notes}</div>}
+                        <div className="actions-row">
+                          <button type="button" className="ghost" onClick={() => handleEditStudyExam(exam)} disabled={studySaving}>Edit</button>
+                          <button type="button" className="ghost" onClick={() => handleDeleteStudyExam(exam)} disabled={studySaving}>Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No exams yet.</p>
+                )}
+                {studyExams.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllExams((prev) => !prev)}
+                    >
+                      {studyShowAllExams ? "Show less" : `Show all (${studyExams.length})`}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="card full">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Upload</p>
+                    <h3>Add study material</h3>
+                    <p className="muted small">Upload a PDF or image, queue a study-processing job, and let Corv solve it in the background.</p>
+                  </div>
+                  <div className="card-head-actions">
+                    {selectedStudyCourse && (
+                      <span className="pill">Course: {selectedStudyCourse.title}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setShowCreateMaterialModal(true)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="muted small">
+                  Use the <code>+</code> button to add a new material item.
+                </p>
+              </div>
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Jobs</p>
+                    <h3>Study processing</h3>
+                    <p className="muted small">Recent queued and completed study jobs.</p>
+                  </div>
+                </div>
+                {studyJobs.length ? (
+                  <div className="study-job-list">
+                    {visibleStudyJobs.map((job) => (
+                      <div key={job.id} className="study-job-card">
+                        <div className="study-job-topline">
+                          <span className="study-material-title">{job.user_visible_summary || "Study job"}</span>
+                          <span className={`pill study-status ${job.status === "completed" ? "processed" : job.status === "failed" ? "failed" : job.status === "canceled" ? "failed" : "processing"}`}>
+                            {job.status}
+                          </span>
+                        </div>
+                        <div className="study-job-meta">
+                          {Math.round((job.progress || 0) * 100)}% complete
+                          {job.updated_at ? ` · Updated ${formatDateTime(job.updated_at)}` : ""}
+                        </div>
+                        <div className="study-job-progress">
+                          <div className="study-job-progress-bar" style={{ width: `${Math.max(4, Math.round((job.progress || 0) * 100))}%` }} />
+                        </div>
+                        <div className="actions-row">
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => handleSelectStudyJob(job.id)}
+                            disabled={studyJobLogsLoading && studySelectedJobId === job.id}
+                          >
+                            {studySelectedJobId === job.id
+                              ? studyJobLogsLoading
+                                ? "Loading logs..."
+                                : "Refresh logs"
+                              : "View logs"}
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => handleRestartStudyJob(job)}
+                            disabled={studySaving}
+                          >
+                            Restart
+                          </button>
+                        </div>
+                        {job.error_summary && <div className="alert">{job.error_summary}</div>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No study jobs yet.</p>
+                )}
+                {studyJobs.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllJobs((prev) => !prev)}
+                    >
+                      {studyShowAllJobs ? "Show less" : `Show all (${studyJobs.length})`}
+                    </button>
+                  </div>
+                )}
+                {studySelectedJobId && (
+                  <div className="study-job-log-panel">
+                    <div className="study-job-topline">
+                      <strong>Technical logs</strong>
+                      <span className="muted small">
+                        {selectedStudyJob ? `${selectedStudyJob.user_visible_summary || "Study job"} (${selectedStudyJob.status})` : studySelectedJobId}
+                      </span>
+                    </div>
+                    {studyJobLogsLoading ? (
+                      <p className="muted">Loading logs...</p>
+                    ) : studyJobEvents.length ? (
+                      <pre className="study-log-dump">
+                        {studyJobEvents
+                          .map((event) => {
+                            const payloadText =
+                              event.payload && Object.keys(event.payload).length
+                                ? `\n${JSON.stringify(event.payload, null, 2)}`
+                                : "";
+                            return `${event.created_at || ""} [${event.event_type}] [${event.visibility}] [${event.role || "system"}] ${event.message || ""}${payloadText}`;
+                          })
+                          .join("\n\n")}
+                      </pre>
+                    ) : (
+                      <p className="muted">No logs recorded for this job yet.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Materials</p>
+                    <h3>Processed set</h3>
+                  </div>
+                </div>
+                {studyLoading && !studyMaterials.length ? (
+                  <p className="muted">Loading materials…</p>
+                ) : studyMaterials.length ? (
+                  <div className="study-material-list">
+                    {visibleStudyMaterials.map((material) => (
+                      <button
+                        key={material.id}
+                        type="button"
+                        className={`study-material-card ${studySelectedMaterialId === material.id ? "active" : ""}`}
+                        onClick={() => setStudySelectedMaterialId(material.id)}
+                      >
+                        <div className="study-material-header">
+                          <span className="study-material-title">{material.title}</span>
+                          <span className={`pill study-status ${material.ingestion_status}`}>
+                            {material.ingestion_status}
+                          </span>
+                        </div>
+                        <div className="study-material-meta">
+                          {formatMaterialKind(material.kind)}
+                          {material.page_count ? ` · ${material.page_count} page${material.page_count === 1 ? "" : "s"}` : ""}
+                        </div>
+                        <div className="study-material-meta">
+                          {material.processed_at ? `Processed ${formatDateTime(material.processed_at)}` : "Waiting to process"}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No materials for this course yet.</p>
+                )}
+                {studyMaterials.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllMaterials((prev) => !prev)}
+                    >
+                      {studyShowAllMaterials ? "Show less" : `Show all (${studyMaterials.length})`}
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Detail</p>
+                    <h3>Material output</h3>
+                  </div>
+                </div>
+                {selectedStudyMaterial ? (
+                  <div className="study-detail">
+                    <div className="study-detail-topline">
+                      <div>
+                        <div className="cal-title">{selectedStudyMaterial.title}</div>
+                        <div className="cal-meta muted small">
+                          {formatMaterialKind(selectedStudyMaterial.kind)}
+                          {selectedStudyMaterial.processing_error ? ` · ${selectedStudyMaterial.processing_error}` : ""}
+                        </div>
+                      </div>
+                      {selectedStudyMaterial.uploaded_file_url && (
+                        <a
+                          className="ghost"
+                          href={`/api/study/materials/${selectedStudyMaterial.id}/original`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open original
+                        </a>
+                      )}
+                    </div>
+                    <div className="study-output-grid">
+                      <button
+                        type="button"
+                        className="study-output-panel study-output-trigger"
+                        onClick={() => setStudyOutputModalKind("converted")}
+                      >
+                        <h4>Converted markdown</h4>
+                      </button>
+                      <button
+                        type="button"
+                        className="study-output-panel study-output-trigger"
+                        onClick={() => setStudyOutputModalKind("solved")}
+                      >
+                        <h4>Solved markdown</h4>
+                      </button>
+                      <button
+                        type="button"
+                        className="study-output-panel study-output-trigger"
+                        onClick={() => setStudyOutputModalKind("theory")}
+                      >
+                        <h4>Theory pack</h4>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted">Select a material to inspect its extracted content.</p>
                 )}
               </div>
             </div>
@@ -1242,6 +2340,7 @@ export default function App() {
                   onClick={() => {
                     setShowCalendar(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowScheduler(false);
                     setShowMessages(false);
                     setShowCalls(false);
@@ -1404,6 +2503,7 @@ export default function App() {
                   onClick={() => {
                     setShowScheduler(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowCalendar(false);
                     setShowMessages(false);
                     setShowCalls(false);
@@ -1549,6 +2649,7 @@ export default function App() {
                   onClick={() => {
                     setShowMessages(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowCalendar(false);
                     setShowScheduler(false);
                     setShowCalls(false);
@@ -1613,6 +2714,7 @@ export default function App() {
                   onClick={() => {
                     setShowCalls(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowCalendar(false);
                     setShowScheduler(false);
                     setShowMessages(false);
@@ -1778,6 +2880,7 @@ export default function App() {
                   className="ghost"
                   onClick={() => {
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowCalendar(true);
                     setShowScheduler(false);
                     setShowMessages(false);
@@ -1791,6 +2894,7 @@ export default function App() {
                   onClick={() => {
                     setShowCalendar(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowScheduler(true);
                     setShowMessages(false);
                     setShowCalls(false);
@@ -1803,6 +2907,7 @@ export default function App() {
                   onClick={() => {
                     setShowCalendar(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowScheduler(false);
                     setShowMessages(true);
                     setShowCalls(false);
@@ -1815,6 +2920,7 @@ export default function App() {
                   onClick={() => {
                     setShowCalendar(false);
                     setShowSettings(false);
+                    setShowStudy(false);
                     setShowScheduler(false);
                     setShowMessages(false);
                     setShowCalls(true);
@@ -1826,6 +2932,20 @@ export default function App() {
                   className="ghost"
                   onClick={() => {
                     setShowCalendar(false);
+                    setShowSettings(false);
+                    setShowStudy(true);
+                    setShowScheduler(false);
+                    setShowMessages(false);
+                    setShowCalls(false);
+                  }}
+                >
+                  Study
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    setShowCalendar(false);
+                    setShowStudy(false);
                     setShowSettings(true);
                     setShowScheduler(false);
                     setShowMessages(false);
@@ -1954,6 +3074,397 @@ export default function App() {
             </form>
           </>
         )}
+        {showCreateCourseModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowCreateCourseModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Course</p>
+                  <h3>Create course</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowCreateCourseModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleCreateStudyCourse} className="modal-body">
+                <label className="field">
+                  <span>Title</span>
+                  <input
+                    value={studyCourseTitle}
+                    onChange={(e) => setStudyCourseTitle(e.target.value)}
+                    placeholder="Calculus II"
+                  />
+                </label>
+                <label className="field">
+                  <span>Code</span>
+                  <input
+                    value={studyCourseCode}
+                    onChange={(e) => setStudyCourseCode(e.target.value)}
+                    placeholder="MATH-202"
+                  />
+                </label>
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    rows={4}
+                    value={studyCourseDescription}
+                    onChange={(e) => setStudyCourseDescription(e.target.value)}
+                    placeholder="Exam window, professor emphasis, grading structure..."
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowCreateCourseModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving}>
+                    {studySaving ? "Saving…" : "Create course"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showCreateLessonModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowCreateLessonModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Lesson</p>
+                  <h3>Create lesson</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowCreateLessonModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleCreateStudyLesson} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Lesson title</span>
+                    <input
+                      value={studyLessonTitle}
+                      onChange={(e) => setStudyLessonTitle(e.target.value)}
+                      placeholder="Chain rule"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Estimated effort</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={5}
+                      value={studyLessonEffort}
+                      onChange={(e) => setStudyLessonEffort(e.target.value)}
+                      placeholder="60"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Weight</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={studyLessonWeight}
+                      onChange={(e) => setStudyLessonWeight(e.target.value)}
+                      placeholder="1.0"
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    rows={3}
+                    value={studyLessonDescription}
+                    onChange={(e) => setStudyLessonDescription(e.target.value)}
+                    placeholder="What this lesson covers and what success looks like..."
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowCreateLessonModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studySelectedCourseId}>
+                    {studySaving ? "Saving…" : "Add lesson"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showCreateExamModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowCreateExamModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Exam</p>
+                  <h3>Create exam</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowCreateExamModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleCreateStudyExam} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Exam title</span>
+                    <input
+                      value={studyExamTitle}
+                      onChange={(e) => setStudyExamTitle(e.target.value)}
+                      placeholder="Midterm 1"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Kind</span>
+                    <select value={studyExamKind} onChange={(e) => setStudyExamKind(e.target.value)}>
+                      <option value="midterm">Midterm</option>
+                      <option value="final">Final</option>
+                      <option value="quiz">Quiz</option>
+                      <option value="practical">Practical</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Scheduled at</span>
+                    <input
+                      type="datetime-local"
+                      value={studyExamDate}
+                      onChange={(e) => setStudyExamDate(e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Weight</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={studyExamWeight}
+                      onChange={(e) => setStudyExamWeight(e.target.value)}
+                    />
+                  </label>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowCreateExamModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studySelectedCourseId}>
+                    {studySaving ? "Saving…" : "Add exam"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showCreateMaterialModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowCreateMaterialModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Material</p>
+                  <h3>Add study material</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowCreateMaterialModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleUploadStudyMaterial} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Input type</span>
+                    <select
+                      value={studyMaterialInputMode}
+                      onChange={(e) => setStudyMaterialInputMode(e.target.value as StudyMaterialInputMode)}
+                    >
+                      <option value="file">File</option>
+                      <option value="text">Text</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Material title</span>
+                    <input
+                      value={studyMaterialTitle}
+                      onChange={(e) => setStudyMaterialTitle(e.target.value)}
+                      placeholder="Week 4 practice set"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Kind</span>
+                    <select
+                      value={studyMaterialKind}
+                      onChange={(e) => setStudyMaterialKind(e.target.value as StudyMaterialKind)}
+                    >
+                      <option value="lecture">Lecture</option>
+                      <option value="worksheet">Worksheet</option>
+                      <option value="assignment">Assignment</option>
+                      <option value="exam">Exam</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  {studyMaterialInputMode === "file" ? (
+                    <label className="field">
+                      <span>File</span>
+                      <input
+                        ref={studyFileInputRef}
+                        className="visually-hidden"
+                        type="file"
+                        accept=".pdf,image/*"
+                        onChange={handleStudyFileChange}
+                      />
+                      <button type="button" className="ghost study-file-picker-btn" onClick={openStudyFilePicker}>
+                        {studyMaterialFile ? "Change file" : "Choose file"}
+                      </button>
+                    </label>
+                  ) : (
+                    <label className="field full">
+                      <span>Paste text</span>
+                      <textarea
+                        rows={8}
+                        value={studyMaterialText}
+                        onChange={(e) => setStudyMaterialText(e.target.value)}
+                        placeholder="Paste the full notes, worksheet, or study text here..."
+                      />
+                    </label>
+                  )}
+                </div>
+                <label className="field">
+                  <span>Notes</span>
+                  <textarea
+                    rows={3}
+                    value={studyMaterialNotes}
+                    onChange={(e) => setStudyMaterialNotes(e.target.value)}
+                    placeholder="Anything Corv should keep in mind about this material..."
+                  />
+                </label>
+                {studyMaterialFile && (
+                  <div className="study-file-chip">
+                    <span>{studyMaterialFile.name}</span>
+                    <span className="muted small">{Math.max(1, Math.round(studyMaterialFile.size / 1024))} KB</span>
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowCreateMaterialModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studySelectedCourseId}>
+                    {studySaving ? "Uploading…" : "Upload and queue"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {studyLessonDetailId && selectedStudyLesson && (
+          <div
+            className="modal-backdrop"
+            onClick={() => setStudyLessonDetailId(null)}
+          >
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Lesson detail</p>
+                  <h3>{selectedStudyLesson.name}</h3>
+                </div>
+                <button className="ghost" onClick={() => setStudyLessonDetailId(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="study-lesson-meta-grid">
+                  <div className="study-lesson-chip">Status: {selectedStudyLesson.passed ? "passed" : selectedStudyLesson.status}</div>
+                  <div className="study-lesson-chip">Effort: {selectedStudyLesson.estimated_effort_minutes} min</div>
+                  <div className="study-lesson-chip">Weight: {selectedStudyLesson.weight}</div>
+                  <div className="study-lesson-chip">Grade: {selectedStudyLesson.grade ?? "n/a"}</div>
+                </div>
+
+                <section className="study-lesson-section">
+                  <h4>Description</h4>
+                  <div className="study-output-body">
+                    {selectedStudyLesson.description || "No detailed description saved yet."}
+                  </div>
+                </section>
+
+                {selectedStudyLesson.metadata && (
+                  <>
+                    {(() => {
+                      const why = String((selectedStudyLesson.metadata as Record<string, unknown>).why_it_matters || "").trim();
+                      const prereqs = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).prerequisite_assumptions);
+                      const toKnow = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).what_to_know);
+                      const checks = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).mastery_checks);
+                      const pitfalls = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).common_pitfalls);
+
+                      return (
+                        <>
+                          {why && (
+                            <section className="study-lesson-section">
+                              <h4>Why this matters</h4>
+                              <div className="study-output-body">{why}</div>
+                            </section>
+                          )}
+
+                          {prereqs.length > 0 && (
+                            <section className="study-lesson-section">
+                              <h4>Prerequisites</h4>
+                              <ul className="study-lesson-list">
+                                {prereqs.map((item) => (
+                                  <li key={`prereq-${item}`}>{item}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          )}
+
+                          {toKnow.length > 0 && (
+                            <section className="study-lesson-section">
+                              <h4>What to know</h4>
+                              <ul className="study-lesson-list">
+                                {toKnow.map((item) => (
+                                  <li key={`know-${item}`}>{item}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          )}
+
+                          {checks.length > 0 && (
+                            <section className="study-lesson-section">
+                              <h4>Mastery checks</h4>
+                              <ul className="study-lesson-list">
+                                {checks.map((item) => (
+                                  <li key={`check-${item}`}>{item}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          )}
+
+                          {pitfalls.length > 0 && (
+                            <section className="study-lesson-section">
+                              <h4>Common pitfalls</h4>
+                              <ul className="study-lesson-list">
+                                {pitfalls.map((item) => (
+                                  <li key={`pitfall-${item}`}>{item}</li>
+                                ))}
+                              </ul>
+                            </section>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+
+                <section className="study-lesson-section">
+                  <h4>Raw metadata</h4>
+                  <pre className="study-log-dump">
+                    {JSON.stringify(selectedStudyLesson.metadata || {}, null, 2)}
+                  </pre>
+                </section>
+              </div>
+            </div>
+          </div>
+        )}
+        {studyOutputModalKind && selectedStudyMaterial && selectedStudyOutput && (
+          <div className="modal-backdrop" onClick={() => setStudyOutputModalKind(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Material output</p>
+                  <h3>{selectedStudyOutput.title}</h3>
+                  <p className="muted small">{selectedStudyMaterial.title}</p>
+                </div>
+                <button className="ghost" onClick={() => setStudyOutputModalKind(null)}>
+                  Close
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="study-output-body">{selectedStudyOutput.body}</div>
+              </div>
+            </div>
+          </div>
+        )}
         {softEventModalOpen && softEventDraft && (
           <div
             className="modal-backdrop"
@@ -2011,13 +3522,23 @@ export default function App() {
                 </label>
                 <div className="form-grid">
                   <label className="field">
-                    <span>Duration (minutes)</span>
+                    <span>Preferred Duration (minutes)</span>
                     <input
                       type="number"
                       min={5}
                       step={5}
-                      value={softEventDraft.duration_minutes}
-                      onChange={(e) => updateSoftEventDraftField("duration_minutes", e.target.value)}
+                      value={softEventDraft.preferred_duration_minutes}
+                      onChange={(e) => updateSoftEventDraftField("preferred_duration_minutes", e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Minimum Duration (minutes)</span>
+                    <input
+                      type="number"
+                      min={5}
+                      step={5}
+                      value={softEventDraft.min_duration_minutes}
+                      onChange={(e) => updateSoftEventDraftField("min_duration_minutes", e.target.value)}
                     />
                   </label>
                   <label className="field">

@@ -3,10 +3,16 @@ import {
   Message,
   SendTextResponse,
   Job,
+  JobEvent,
   UsageEvent,
   UsageSummary,
   CalendarReplanResult,
   CombinedCalendar,
+  StudyCourse,
+  StudyMaterial,
+  StudyMaterialProcessResponse,
+  StudyExam,
+  StudyTopic,
   SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
@@ -21,6 +27,16 @@ export type ApiConfig = {
   baseUrl: string;
   getToken?: TokenGetter;
 };
+
+type NativeUploadFile = {
+  uri: string;
+  name: string;
+  type?: string | null;
+};
+
+function isNativeUploadFile(value: unknown): value is NativeUploadFile {
+  return !!value && typeof value === "object" && "uri" in value && "name" in value;
+}
 
 async function resolveToken(getToken?: TokenGetter): Promise<string | null> {
   if (!getToken) return null;
@@ -133,6 +149,20 @@ export function createApi(config: ApiConfig) {
         method: "POST",
       });
     },
+    fetchJobEvents(job_id: string) {
+      return request<{ job_id: string; events: JobEvent[] }>(
+        config,
+        `/orchestration/jobs/${job_id}/events`,
+      );
+    },
+    restartStudyJob(job_id: string, force = false) {
+      const formData = new FormData();
+      formData.append("force", force ? "true" : "false");
+      return request<{ job: Job }>(config, `/study/jobs/${job_id}/restart`, {
+        method: "POST",
+        body: formData,
+      });
+    },
     fetchUsageRecent(limit = 50) {
       return request<UsageEvent[]>(config, `/orchestration/usage/recent?limit=${limit}`);
     },
@@ -143,6 +173,7 @@ export function createApi(config: ApiConfig) {
       return request<{
         frontman_model: string;
         caller_model: string;
+        study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
       }>(config, "/orchestration/settings");
@@ -150,12 +181,14 @@ export function createApi(config: ApiConfig) {
     updateSettings(payload: {
       frontman_model?: string;
       caller_model?: string;
+      study_model?: string;
       cache_mode?: string;
       max_function_result_chars?: number;
     }) {
       return request<{
         frontman_model: string;
         caller_model: string;
+        study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
       }>(config, "/orchestration/settings", {
@@ -166,6 +199,169 @@ export function createApi(config: ApiConfig) {
     fetchCalendarCombined(params: { days?: number } = {}) {
       const qs = params.days ? `?days=${params.days}` : "";
       return request<CombinedCalendar>(config, `/orchestration/calendar/combined${qs}`);
+    },
+    fetchStudyCourses(status?: string) {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      return request<{ courses: StudyCourse[] }>(config, `/study/courses${qs}`);
+    },
+    createStudyCourse(payload: {
+      title: string;
+      code?: string;
+      description?: string;
+      term_start_date?: string;
+      term_end_date?: string;
+      status?: string;
+    }) {
+      const formData = new FormData();
+      formData.append("title", payload.title);
+      if (payload.code) formData.append("code", payload.code);
+      if (payload.description) formData.append("description", payload.description);
+      if (payload.term_start_date) formData.append("term_start_date", payload.term_start_date);
+      if (payload.term_end_date) formData.append("term_end_date", payload.term_end_date);
+      if (payload.status) formData.append("status", payload.status);
+      return request<StudyCourse>(config, `/study/courses`, {
+        method: "POST",
+        body: formData,
+      });
+    },
+    updateStudyCourse(
+      course_id: string,
+      payload: Partial<Pick<StudyCourse, "title" | "code" | "description" | "term_start_date" | "term_end_date" | "status">>,
+    ) {
+      const formData = new FormData();
+      if (payload.title !== undefined) formData.append("title", payload.title);
+      if (payload.code !== undefined) formData.append("code", payload.code);
+      if (payload.description !== undefined) formData.append("description", payload.description);
+      if (payload.term_start_date !== undefined) formData.append("term_start_date", payload.term_start_date || "");
+      if (payload.term_end_date !== undefined) formData.append("term_end_date", payload.term_end_date || "");
+      if (payload.status !== undefined) formData.append("status", payload.status);
+      return request<StudyCourse>(config, `/study/courses/${course_id}`, { method: "PATCH", body: formData });
+    },
+    deleteStudyCourse(course_id: string) {
+      return request<{ ok: boolean }>(config, `/study/courses/${course_id}`, { method: "DELETE" });
+    },
+    fetchStudyMaterials(course_id?: string) {
+      const qs = course_id ? `?course_id=${encodeURIComponent(course_id)}` : "";
+      return request<{ materials: StudyMaterial[] }>(config, `/study/materials${qs}`);
+    },
+    fetchStudyTopics(course_id: string) {
+      return request<{ topics: StudyTopic[] }>(config, `/study/topics?course_id=${encodeURIComponent(course_id)}`);
+    },
+    fetchStudyExams(course_id: string) {
+      return request<{ exams: StudyExam[] }>(config, `/study/exams?course_id=${encodeURIComponent(course_id)}`);
+    },
+    createStudyTopic(payload: {
+      course_id: string;
+      name: string;
+      description?: string;
+      order_index?: number;
+      estimated_effort_minutes?: number;
+      weight?: number;
+    }) {
+      const formData = new FormData();
+      formData.append("course_id", payload.course_id);
+      formData.append("name", payload.name);
+      if (payload.description) formData.append("description", payload.description);
+      if (payload.order_index !== undefined) formData.append("order_index", String(payload.order_index));
+      if (payload.estimated_effort_minutes !== undefined) {
+        formData.append("estimated_effort_minutes", String(payload.estimated_effort_minutes));
+      }
+      if (payload.weight !== undefined) formData.append("weight", String(payload.weight));
+      return request<StudyTopic>(config, `/study/topics`, { method: "POST", body: formData });
+    },
+    createStudyExam(payload: {
+      course_id: string;
+      title: string;
+      kind?: string;
+      scheduled_at?: string;
+      weight?: number;
+      notes?: string;
+    }) {
+      const formData = new FormData();
+      formData.append("course_id", payload.course_id);
+      formData.append("title", payload.title);
+      if (payload.kind) formData.append("kind", payload.kind);
+      if (payload.scheduled_at) formData.append("scheduled_at", payload.scheduled_at);
+      if (payload.weight !== undefined) formData.append("weight", String(payload.weight));
+      if (payload.notes) formData.append("notes", payload.notes);
+      return request<StudyExam>(config, `/study/exams`, { method: "POST", body: formData });
+    },
+    updateStudyExam(
+      exam_id: string,
+      payload: Partial<Pick<StudyExam, "title" | "kind" | "scheduled_at" | "weight" | "notes">>,
+    ) {
+      const formData = new FormData();
+      if (payload.title !== undefined) formData.append("title", payload.title);
+      if (payload.kind !== undefined) formData.append("kind", payload.kind);
+      if (payload.scheduled_at !== undefined) formData.append("scheduled_at", payload.scheduled_at || "");
+      if (payload.weight !== undefined) formData.append("weight", String(payload.weight));
+      if (payload.notes !== undefined) formData.append("notes", payload.notes);
+      return request<StudyExam>(config, `/study/exams/${exam_id}`, { method: "PATCH", body: formData });
+    },
+    deleteStudyExam(exam_id: string) {
+      return request<{ ok: boolean }>(config, `/study/exams/${exam_id}`, { method: "DELETE" });
+    },
+    updateStudyTopic(
+      topic_id: string,
+      payload: Partial<Pick<StudyTopic, "name" | "description" | "order_index" | "estimated_effort_minutes" | "weight" | "status" | "passed" | "grade">>,
+    ) {
+      const formData = new FormData();
+      if (payload.name !== undefined) formData.append("name", payload.name);
+      if (payload.description !== undefined) formData.append("description", payload.description);
+      if (payload.order_index !== undefined) formData.append("order_index", String(payload.order_index));
+      if (payload.estimated_effort_minutes !== undefined) {
+        formData.append("estimated_effort_minutes", String(payload.estimated_effort_minutes));
+      }
+      if (payload.weight !== undefined) formData.append("weight", String(payload.weight));
+      if (payload.status !== undefined) formData.append("status", payload.status);
+      if (payload.passed !== undefined) formData.append("passed", payload.passed ? "true" : "false");
+      if (payload.grade !== undefined && payload.grade !== null) formData.append("grade", String(payload.grade));
+      return request<StudyTopic>(config, `/study/topics/${topic_id}`, { method: "PATCH", body: formData });
+    },
+    deleteStudyTopic(topic_id: string) {
+      return request<{ ok: boolean }>(config, `/study/topics/${topic_id}`, { method: "DELETE" });
+    },
+    uploadStudyMaterial(payload: {
+      course_id: string;
+      title: string;
+      kind?: string;
+      notes?: string;
+      source_text?: string;
+      topic_id?: string;
+      exam_id?: string;
+      source_url?: string;
+      process_now?: boolean;
+      file?: NativeUploadFile | File | Blob | null;
+    }) {
+      const formData = new FormData();
+      formData.append("course_id", payload.course_id);
+      formData.append("title", payload.title);
+      if (payload.kind) formData.append("kind", payload.kind);
+      if (payload.notes) formData.append("notes", payload.notes);
+      if (payload.source_text) formData.append("source_text", payload.source_text);
+      if (payload.topic_id) formData.append("topic_id", payload.topic_id);
+      if (payload.exam_id) formData.append("exam_id", payload.exam_id);
+      if (payload.source_url) formData.append("source_url", payload.source_url);
+      if (typeof payload.process_now === "boolean") {
+        formData.append("process_now", payload.process_now ? "true" : "false");
+      }
+      if (payload.file && isNativeUploadFile(payload.file)) {
+        formData.append(
+          "file",
+          {
+            uri: payload.file.uri,
+            name: payload.file.name,
+            type: payload.file.type || "application/octet-stream",
+          } as any,
+        );
+      } else if (payload.file) {
+        const fileName = payload.file instanceof File ? payload.file.name : "study-material";
+        formData.append("file", payload.file, fileName);
+      }
+      return request<StudyMaterialProcessResponse>(config, "/study/materials/upload", {
+        method: "POST",
+        body: formData,
+      });
     },
     createSoftEvent(payload: Partial<SoftEventDetail> & { title: string }) {
       return request<SoftEventDetail>(config, "/orchestration/soft_events", {

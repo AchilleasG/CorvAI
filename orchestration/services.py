@@ -557,6 +557,7 @@ class ModelConfigService:
 
     DEFAULT_FRONTMAN_MODEL = "gpt-5-mini"
     DEFAULT_CALLER_MODEL = "gpt-5-mini"
+    DEFAULT_STUDY_MODEL = "gpt-5-mini"
     DEFAULT_CACHE_MODE = "off"
     DEFAULT_PRICING_JSON = "{}"
     DEFAULT_USER_INFO_EMBED_MODEL = "text-embedding-3-small"
@@ -586,6 +587,12 @@ class ModelConfigService:
     def get_caller_model() -> str:
         return ModelConfigService.get_setting(
             "caller_model", ModelConfigService.DEFAULT_CALLER_MODEL
+        )
+
+    @staticmethod
+    def get_study_model() -> str:
+        return ModelConfigService.get_setting(
+            "study_model", ModelConfigService.DEFAULT_STUDY_MODEL
         )
 
     @staticmethod
@@ -750,6 +757,13 @@ class SoftEventService:
                 notify_at = SoftEventService._parse_dt(action.get("notify_at"))
                 if not start_at or not end_at:
                     continue
+                min_minutes = max(int(se.min_duration_minutes or 1), 1)
+                preferred_minutes = max(int(se.preferred_duration_minutes or min_minutes), min_minutes)
+                requested_minutes = int((end_at - start_at).total_seconds() // 60)
+                if requested_minutes < min_minutes:
+                    continue
+                if requested_minutes > preferred_minutes:
+                    end_at = start_at + timedelta(minutes=preferred_minutes)
                 slot = SoftEventSlot.objects.create(
                     soft_event=se,
                     start_at=start_at,
@@ -793,7 +807,7 @@ class SoftEventService:
                 updated += 1
             elif atype == "update_slot":
                 try:
-                    slot = SoftEventSlot.objects.get(id=action["slot_id"])
+                    slot = SoftEventSlot.objects.select_related("soft_event").get(id=action["slot_id"])
                 except SoftEventSlot.DoesNotExist:
                     continue
                 fields = []
@@ -813,6 +827,18 @@ class SoftEventService:
                                 continue
                         setattr(slot, key, val)
                         fields.append(key)
+                if "start_at" in fields or "end_at" in fields:
+                    min_minutes = max(int(slot.soft_event.min_duration_minutes or 1), 1)
+                    preferred_minutes = max(
+                        int(slot.soft_event.preferred_duration_minutes or min_minutes),
+                        min_minutes,
+                    )
+                    duration_minutes = int((slot.end_at - slot.start_at).total_seconds() // 60)
+                    if duration_minutes < min_minutes:
+                        continue
+                    if duration_minutes > preferred_minutes:
+                        slot.end_at = slot.start_at + timedelta(minutes=preferred_minutes)
+                        fields.append("end_at")
                 if planner_trace_id:
                     slot.planner_trace_id = planner_trace_id
                     fields.append("planner_trace_id")

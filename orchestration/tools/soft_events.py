@@ -36,7 +36,8 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
             "title": {"type": "string"},
             "description": {"type": "string"},
             "notes": {"type": "string", "description": "Optional scheduling notes"},
-            "duration_minutes": {"type": "integer", "default": 30},
+            "preferred_duration_minutes": {"type": "integer", "default": 60, "description": "Preferred duration in minutes"},
+            "min_duration_minutes": {"type": "integer", "default": 30, "description": "Minimum acceptable duration"},
             "soft_deadline": {"type": "string", "description": "ISO datetime deadline (soft)"},
             "hard_deadline": {"type": "string", "description": "ISO datetime deadline (hard)"},
             "frequency": {"type": "string", "description": "Optional recurrence description (e.g., weekly)"},
@@ -59,7 +60,8 @@ def create_soft_event(
     title: str,
     description: str = "",
     notes: str = "",
-    duration_minutes: int = 30,
+    preferred_duration_minutes: int = 60,
+    min_duration_minutes: int = 30,
     soft_deadline: Optional[str] = None,
     hard_deadline: Optional[str] = None,
     frequency: str = "",
@@ -74,11 +76,17 @@ def create_soft_event(
         except Chat.DoesNotExist:
             chat = None
 
+    preferred = max(preferred_duration_minutes or 0, 1)
+    minimum = max(min_duration_minutes or 0, 1)
+    if minimum > preferred:
+        minimum = preferred
+
     se = SoftEvent.objects.create(
         title=title,
         description=description or "",
         notes=notes or "",
-        duration_minutes=max(duration_minutes or 0, 1),
+        preferred_duration_minutes=preferred,
+        min_duration_minutes=minimum,
         soft_deadline=_parse_dt(soft_deadline),
         hard_deadline=_parse_dt(hard_deadline),
         frequency=frequency or "",
@@ -151,7 +159,8 @@ def list_soft_events(
                 "notes": se.notes,
                 "status": se.status,
                 "priority": se.priority,
-                "duration_minutes": se.duration_minutes,
+                "preferred_duration_minutes": se.preferred_duration_minutes,
+                "min_duration_minutes": se.min_duration_minutes,
                 "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
                 "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
                 "slots": slot_payload,

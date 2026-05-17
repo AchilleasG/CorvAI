@@ -9,3 +9,4 @@ media/voices/
 mobile/.env
 frontend/.vite/
 celerybeat-schedule
+media/study/materials/*

@@ -21,6 +21,28 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _resolve_log_file(filename: str) -> str:
+    """Return a writable log path, falling back to /tmp when project root isn't writable."""
+    primary = os.path.join(BASE_DIR, filename)
+    try:
+        if os.path.exists(primary):
+            if os.access(primary, os.W_OK):
+                return primary
+        else:
+            parent = os.path.dirname(primary) or "."
+            if os.access(parent, os.W_OK):
+                return primary
+    except Exception:
+        pass
+
+    fallback_dir = os.getenv("CORV_LOG_DIR", "/tmp")
+    try:
+        os.makedirs(fallback_dir, exist_ok=True)
+    except Exception:
+        fallback_dir = "/tmp"
+    return os.path.join(fallback_dir, filename)
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
@@ -54,6 +76,7 @@ INSTALLED_APPS = [
     'api',
     'chat',
     'orchestration.apps.OrchestrationConfig',
+    'study.apps.StudyConfig',
     'openai_integration',
 ]
 
@@ -185,19 +208,19 @@ LOGGING = {
         "call_monitor_file": {
             "level": "INFO",
             "class": "logging.FileHandler",
-            "filename": os.path.join(BASE_DIR, "call_monitor.log"),
+            "filename": _resolve_log_file("call_monitor.log"),
             "formatter": "simple",
         },
         "fcm_push_file": {
             "level": "INFO",
             "class": "logging.FileHandler",
-            "filename": os.path.join(BASE_DIR, "fcm_push.log"),
+            "filename": _resolve_log_file("fcm_push.log"),
             "formatter": "simple",
         },
         "call_sessions_file": {
             "level": "INFO",
             "class": "logging.FileHandler",
-            "filename": os.path.join(BASE_DIR, "call_sessions.log"),
+            "filename": _resolve_log_file("call_sessions.log"),
             "formatter": "simple",
         },
     },

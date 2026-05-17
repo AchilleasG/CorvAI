@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 class ChatService:
+    _UPSTREAM_FAILURE_REPLY = (
+        "I'm having trouble reaching the model service right now. Please try again in a moment."
+    )
+
     @staticmethod
     def get_chat_by_id(chat_id: int):
         try:
@@ -104,11 +108,21 @@ class ChatService:
         chat_context = ChatService.construct_chat_context(chat_id)
         print(f"Chat context for chat {chat_id}: {chat_context}")
         if not chat_context:
-            return {"success": False, "message": "Chat not found"}
-        response = ChatAIService.frontman_decision(chat_context)
+            return "I couldn't find that chat. Please refresh and try again."
+
+        try:
+            response = ChatAIService.frontman_decision(chat_context)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.exception("Frontman decision failed for chat %s", chat_id)
+            return ChatService._safe_assistant_reply(exc)
+
         print(f"Frontman decision raw: {response}")
         if not response:
-            return {"success": False, "message": "Failed to generate response"}
+            return ChatService._UPSTREAM_FAILURE_REPLY
+
+        if ChatService._looks_like_upstream_html_error(response):
+            logger.warning("Blocked upstream HTML error payload in chat %s", chat_id)
+            return ChatService._UPSTREAM_FAILURE_REPLY
 
         decision = ChatService._parse_decision(response)
         if not decision:
@@ -191,6 +205,29 @@ class ChatService:
         if not last_assistant or last_assistant.text != response:
             ChatService.add_message_to_chat(chat_id, response, role="assistant")
         return {"success": True, "message": response, "chat_id": str(chat_id)}
+
+    @staticmethod
+    def _safe_assistant_reply(exc: Exception) -> str:
+        msg = str(exc)
+        if ChatService._looks_like_upstream_html_error(msg):
+            return ChatService._UPSTREAM_FAILURE_REPLY
+        return "I ran into a temporary internal error. Please try again."
+
+    @staticmethod
+    def _looks_like_upstream_html_error(text: str) -> bool:
+        if not text:
+            return False
+        probe = text.strip().lower()
+        if "<html" in probe or "<!doctype html" in probe:
+            return True
+        markers = (
+            "cloudflare",
+            "bad gateway",
+            "error code: 502",
+            "502 bad gateway",
+            "origin server",
+        )
+        return any(marker in probe for marker in markers)
 
     @staticmethod
     def _run_job_async(chat_id: int, job_id):

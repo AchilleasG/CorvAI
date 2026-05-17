@@ -19,6 +19,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
+import * as DocumentPicker from "expo-document-picker";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
@@ -42,10 +43,14 @@ import {
   fetchUsageRecent,
   fetchUsageSummary,
   fetchCalendarCombined,
+  fetchStudyCourses,
+  fetchStudyMaterials,
   createSoftEvent,
   promoteSoftSlot,
   replanCalendar,
   fetchSoftEvent,
+  createStudyCourse,
+  uploadStudyMaterial,
   renameChat,
   sendText,
   sendVoice,
@@ -74,6 +79,8 @@ import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
   CombinedCalendar,
+  StudyCourse,
+  StudyMaterial,
   SoftEventDetail,
   Job,
   Message,
@@ -88,14 +95,15 @@ import {
 import { Audio } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 
-type TabKey = "chat" | "settings" | "calendar" | "scheduler" | "messages" | "calls";
+type TabKey = "chat" | "settings" | "study" | "calendar" | "scheduler" | "messages" | "calls";
 
 type SoftEventDraft = {
   id: string;
   title: string;
   description: string;
   notes: string;
-  duration_minutes: string;
+  preferred_duration_minutes: string;
+  min_duration_minutes: string;
   soft_deadline: string;
   hard_deadline: string;
   frequency: string;
@@ -105,6 +113,12 @@ type SoftEventDraft = {
 };
 
 type SoftEventMode = "create" | "edit";
+
+type StudyFileDraft = {
+  uri: string;
+  name: string;
+  type?: string | null;
+};
 
 function formatChatLabel(chat: ChatListItem) {
   if (chat.chat_nickname && chat.chat_nickname.trim()) {
@@ -188,6 +202,19 @@ function InnerApp() {
   const [settingsDraft, setSettingsDraft] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [studyCourses, setStudyCourses] = useState<StudyCourse[]>([]);
+  const [studyMaterials, setStudyMaterials] = useState<StudyMaterial[]>([]);
+  const [studyLoading, setStudyLoading] = useState(false);
+  const [studySaving, setStudySaving] = useState(false);
+  const [studyError, setStudyError] = useState<string | null>(null);
+  const [studyCourseTitle, setStudyCourseTitle] = useState("");
+  const [studyCourseCode, setStudyCourseCode] = useState("");
+  const [studyCourseDescription, setStudyCourseDescription] = useState("");
+  const [studyMaterialTitle, setStudyMaterialTitle] = useState("");
+  const [studyMaterialKind, setStudyMaterialKind] = useState("lecture");
+  const [studyMaterialNotes, setStudyMaterialNotes] = useState("");
+  const [studyMaterialFile, setStudyMaterialFile] = useState<StudyFileDraft | null>(null);
+  const [studySelectedCourseId, setStudySelectedCourseId] = useState<string | null>(null);
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([]);
   const [schedulerError, setSchedulerError] = useState<string | null>(null);
   const [schedulerLoading, setSchedulerLoading] = useState(false);
@@ -251,6 +278,11 @@ function InnerApp() {
   const messagesListRef = useRef<FlatList<Message> | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const callSeqRef = useRef(0);
+
+  const selectedStudyCourse = useMemo(
+    () => studyCourses.find((course) => course.id === studySelectedCourseId) || null,
+    [studyCourses, studySelectedCourseId],
+  );
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -514,6 +546,12 @@ function InnerApp() {
     if (activeTab !== "calls") return;
     refreshCallSessions();
   }, [activeTab, authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (activeTab !== "study") return;
+    refreshStudyData();
+  }, [activeTab, authed, studySelectedCourseId]);
 
   useEffect(() => {
     if (!authed) return;
@@ -815,6 +853,111 @@ function InnerApp() {
     }
   }
 
+  async function refreshStudyData() {
+    try {
+      setStudyLoading(true);
+      setStudyError(null);
+      const [{ courses }, materialsResp] = await Promise.all([
+        fetchStudyCourses(),
+        studySelectedCourseId ? fetchStudyMaterials(studySelectedCourseId) : Promise.resolve({ materials: [] as StudyMaterial[] }),
+      ]);
+      setStudyCourses(courses);
+      if (!studySelectedCourseId && courses.length) {
+        setStudySelectedCourseId(courses[0].id);
+      }
+      setStudyMaterials(materialsResp.materials || []);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to load study data");
+    } finally {
+      setStudyLoading(false);
+    }
+  }
+
+  async function handlePickStudyFile() {
+    try {
+      const result: any = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+      } as any);
+      if (result?.canceled || result?.cancelled) return;
+      const asset = (result?.assets && result.assets[0]) || result;
+      if (!asset?.uri) return;
+      setStudyMaterialFile({
+        uri: asset.uri,
+        name: asset.name || "study-material",
+        type: asset.mimeType || asset.type || "application/octet-stream",
+      });
+    } catch (err: any) {
+      setStudyError(err.message || "Failed to pick file");
+    }
+  }
+
+  async function handleCreateStudyCourse() {
+    if (!studyCourseTitle.trim()) {
+      setStudyError("Course title is required");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      const created = await createStudyCourse({
+        title: studyCourseTitle.trim(),
+        code: studyCourseCode.trim() || undefined,
+        description: studyCourseDescription.trim() || undefined,
+      });
+      setStudyCourseTitle("");
+      setStudyCourseCode("");
+      setStudyCourseDescription("");
+      setStudySelectedCourseId(created.id);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to create course");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleUploadStudyMaterial() {
+    if (!studySelectedCourseId) {
+      setStudyError("Select or create a course first");
+      return;
+    }
+    if (!studyMaterialTitle.trim()) {
+      setStudyError("Material title is required");
+      return;
+    }
+    if (!studyMaterialFile) {
+      setStudyError("Pick a file first");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      const created = await uploadStudyMaterial({
+        course_id: studySelectedCourseId,
+        title: studyMaterialTitle.trim(),
+        kind: studyMaterialKind,
+        notes: studyMaterialNotes.trim(),
+        file: studyMaterialFile,
+        process_now: true,
+      });
+      setStudyMaterialTitle("");
+      setStudyMaterialNotes("");
+      setStudyMaterialFile(null);
+      if (created?.job?.user_visible_summary) {
+        setStudyError(`Queued: ${created.job.user_visible_summary}`);
+      }
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to upload material");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
   async function handleCreateScheduledTask() {
     if (!schedulerPrompt.trim()) {
       setSchedulerError("Prompt is required");
@@ -904,7 +1047,8 @@ function InnerApp() {
       title: detail.title || "",
       description: detail.description || "",
       notes: detail.notes || "",
-      duration_minutes: String(detail.duration_minutes ?? ""),
+      preferred_duration_minutes: String(detail.preferred_duration_minutes ?? ""),
+      min_duration_minutes: String(detail.min_duration_minutes ?? ""),
       soft_deadline: detail.soft_deadline || "",
       hard_deadline: detail.hard_deadline || "",
       frequency: detail.frequency || "",
@@ -920,7 +1064,8 @@ function InnerApp() {
       title: "",
       description: "",
       notes: "",
-      duration_minutes: "30",
+      preferred_duration_minutes: "60",
+      min_duration_minutes: "30",
       soft_deadline: "",
       hard_deadline: "",
       frequency: "",
@@ -961,14 +1106,21 @@ function InnerApp() {
         return;
       }
       setSoftEventLoading(true);
-      const duration = parseInt(softEventDraft.duration_minutes, 10);
+      const preferredDuration = parseInt(softEventDraft.preferred_duration_minutes, 10);
+      const minDuration = parseInt(softEventDraft.min_duration_minutes, 10);
       const deferral = parseInt(softEventDraft.deferral_limit, 10);
       const priority = parseInt(softEventDraft.priority, 10);
+      const preferred = Number.isFinite(preferredDuration) ? preferredDuration : undefined;
+      const minimum = Number.isFinite(minDuration) ? minDuration : undefined;
       const payload = {
         title: softEventDraft.title,
         description: softEventDraft.description,
         notes: softEventDraft.notes,
-        duration_minutes: Number.isFinite(duration) ? duration : undefined,
+        preferred_duration_minutes: preferred,
+        min_duration_minutes:
+          minimum !== undefined && preferred !== undefined
+            ? Math.min(minimum, preferred)
+            : minimum,
         soft_deadline: softEventDraft.soft_deadline.trim() ? softEventDraft.soft_deadline.trim() : null,
         hard_deadline: softEventDraft.hard_deadline.trim() ? softEventDraft.hard_deadline.trim() : null,
         frequency: softEventDraft.frequency,
@@ -1494,6 +1646,14 @@ function InnerApp() {
             </Text>
           </TouchableOpacity>
           <TouchableOpacity
+            style={[styles.tabButton, activeTab === "study" && styles.tabButtonActive]}
+            onPress={() => setActiveTab("study")}
+          >
+            <Text style={[styles.tabButtonText, activeTab === "study" && styles.tabButtonTextActive]}>
+              Study
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
             style={[styles.tabButton, activeTab === "calendar" && styles.tabButtonActive]}
             onPress={() => setActiveTab("calendar")}
           >
@@ -1766,6 +1926,158 @@ function InnerApp() {
                 </View>
               ))}
             </>
+          )}
+        </ScrollView>
+      ) : activeTab === "study" ? (
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          <Text style={styles.sectionTitle}>Study</Text>
+          {studyError && <Text style={styles.errorText}>{studyError}</Text>}
+
+          <View style={styles.calendarRow}>
+            <Text style={styles.calendarTitle}>Create course</Text>
+            <Text style={styles.muted}>Add a course before uploading materials.</Text>
+            <Text style={styles.label}>Title</Text>
+            <TextInput
+              style={styles.input}
+              value={studyCourseTitle}
+              onChangeText={setStudyCourseTitle}
+              placeholder="Calculus I"
+              placeholderTextColor="#94a3b8"
+            />
+            <Text style={styles.label}>Code</Text>
+            <TextInput
+              style={styles.input}
+              value={studyCourseCode}
+              onChangeText={setStudyCourseCode}
+              placeholder="MATH101"
+              placeholderTextColor="#94a3b8"
+            />
+            <Text style={styles.label}>Description</Text>
+            <TextInput
+              style={[styles.input, styles.textarea]}
+              value={studyCourseDescription}
+              onChangeText={setStudyCourseDescription}
+              placeholder="Course notes"
+              placeholderTextColor="#94a3b8"
+              multiline
+            />
+            <TouchableOpacity
+              style={[styles.primaryButton, studySaving && styles.buttonDisabled]}
+              onPress={handleCreateStudyCourse}
+              disabled={studySaving}
+            >
+              <Text style={styles.primaryButtonText}>{studySaving ? "Saving" : "Create course"}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.sectionTitle}>Courses</Text>
+          {studyLoading && !studyCourses.length ? (
+            <ActivityIndicator />
+          ) : studyCourses.length ? (
+            <View style={styles.cacheRow}>
+              {studyCourses.map((course) => (
+                <TouchableOpacity
+                  key={course.id}
+                  style={[
+                    styles.cachePill,
+                    studySelectedCourseId === course.id && styles.cachePillActive,
+                  ]}
+                  onPress={() => setStudySelectedCourseId(course.id)}
+                >
+                  <Text
+                    style={[
+                      styles.cachePillText,
+                      studySelectedCourseId === course.id && styles.cachePillTextActive,
+                    ]}
+                  >
+                    {course.code ? `${course.code} · ` : ""}
+                    {course.title}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.muted}>No study courses yet.</Text>
+          )}
+
+          <Text style={styles.sectionTitle}>Upload material</Text>
+          <View style={styles.calendarRow}>
+            <Text style={styles.calendarTitle}>Selected course</Text>
+            <Text style={styles.muted}>{selectedStudyCourse ? selectedStudyCourse.title : "None"}</Text>
+            <Text style={styles.label}>Material title</Text>
+            <TextInput
+              style={styles.input}
+              value={studyMaterialTitle}
+              onChangeText={setStudyMaterialTitle}
+              placeholder="Lecture 3 - Chain Rule"
+              placeholderTextColor="#94a3b8"
+            />
+            <Text style={styles.label}>Kind</Text>
+            <View style={styles.cacheRow}>
+              {[
+                ["lecture", "Lecture"],
+                ["slides", "Slides"],
+                ["past_exam", "Past Exam"],
+                ["notes", "Notes"],
+                ["link", "Link"],
+                ["other", "Other"],
+              ].map(([value, label]) => (
+                <TouchableOpacity
+                  key={value}
+                  style={[
+                    styles.cachePill,
+                    studyMaterialKind === value && styles.cachePillActive,
+                  ]}
+                  onPress={() => setStudyMaterialKind(value)}
+                >
+                  <Text
+                    style={[
+                      styles.cachePillText,
+                      studyMaterialKind === value && styles.cachePillTextActive,
+                    ]}
+                  >
+                    {label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <Text style={styles.label}>Notes</Text>
+            <TextInput
+              style={[styles.input, styles.textarea]}
+              value={studyMaterialNotes}
+              onChangeText={setStudyMaterialNotes}
+              placeholder="Anything Corv should know about this file"
+              placeholderTextColor="#94a3b8"
+              multiline
+            />
+            <TouchableOpacity style={styles.secondaryButton} onPress={handlePickStudyFile}>
+              <Text style={styles.secondaryButtonText}>
+                {studyMaterialFile ? `Picked: ${studyMaterialFile.name}` : "Pick file"}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.primaryButton, studySaving && styles.buttonDisabled]}
+              onPress={handleUploadStudyMaterial}
+              disabled={studySaving}
+            >
+              <Text style={styles.primaryButtonText}>{studySaving ? "Uploading" : "Upload & process"}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <Text style={styles.sectionTitle}>Materials</Text>
+          {studyMaterials.length ? (
+            studyMaterials.map((material) => (
+              <View key={material.id} style={styles.calendarRow}>
+                <Text style={styles.calendarTitle}>{material.title}</Text>
+                <Text style={styles.muted}>{material.kind} · {material.ingestion_status}</Text>
+                <Text style={styles.muted}>Pages: {material.page_count}</Text>
+                {!!material.processing_error && (
+                  <Text style={styles.errorText}>{material.processing_error}</Text>
+                )}
+              </View>
+            ))
+          ) : (
+            <Text style={styles.muted}>No uploaded materials yet.</Text>
           )}
         </ScrollView>
       ) : activeTab === "scheduler" ? (
@@ -2302,11 +2614,20 @@ function InnerApp() {
                 />
                 <TextInput
                   style={styles.input}
-                  value={softEventDraft.duration_minutes}
+                  value={softEventDraft.preferred_duration_minutes}
                   onChangeText={(value) =>
-                    setSoftEventDraft((prev) => (prev ? { ...prev, duration_minutes: value } : prev))
+                    setSoftEventDraft((prev) => (prev ? { ...prev, preferred_duration_minutes: value } : prev))
                   }
-                  placeholder="Duration minutes"
+                  placeholder="Preferred duration minutes"
+                  keyboardType="numeric"
+                />
+                <TextInput
+                  style={styles.input}
+                  value={softEventDraft.min_duration_minutes}
+                  onChangeText={(value) =>
+                    setSoftEventDraft((prev) => (prev ? { ...prev, min_duration_minutes: value } : prev))
+                  }
+                  placeholder="Minimum duration minutes"
                   keyboardType="numeric"
                 />
                 <TouchableOpacity

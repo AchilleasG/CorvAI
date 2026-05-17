@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+from typing import List, Optional
+from datetime import timedelta
+
+from django.utils.dateparse import parse_date, parse_datetime
+from django.utils import timezone
+from ninja import File, Form, Router
+from ninja.errors import HttpError
+from ninja.files import UploadedFile
+from django.http import FileResponse
+
+from orchestration.models import Job, ToolModule
+from orchestration.services import JobService
+from study.models import StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
+from study.services import StudyIngestionService, StudyPlannerService
+from study.tasks import process_study_material_job
+
+router = Router(tags=["Study"])
+
+
+def _normalize_material_kind(kind: Optional[str]) -> str:
+    if kind == StudyMaterial.KIND_LECTURE_PDF:
+        return StudyMaterial.KIND_LECTURE
+    return kind or StudyMaterial.KIND_OTHER
+
+
+def _course_payload(course: StudyCourse) -> dict:
+    return {
+        "id": str(course.id),
+        "title": course.title,
+        "code": course.code,
+        "description": course.description,
+        "term_start_date": course.term_start_date.isoformat() if course.term_start_date else None,
+        "term_end_date": course.term_end_date.isoformat() if course.term_end_date else None,
+        "status": course.status,
+        "chat_id": str(course.chat_id) if course.chat_id else None,
+        "metadata": course.metadata,
+        "created_at": course.created_at.isoformat() if course.created_at else None,
+        "updated_at": course.updated_at.isoformat() if course.updated_at else None,
+    }
+
+
+def _material_payload(material: StudyMaterial) -> dict:
+    return {
+        "id": str(material.id),
+        "course_id": str(material.course_id),
+        "topic_id": str(material.topic_id) if material.topic_id else None,
+        "exam_id": str(material.exam_id) if material.exam_id else None,
+        "kind": material.kind,
+        "title": material.title,
+        "source_url": material.source_url,
+        "uploaded_file_url": material.uploaded_file.url if material.uploaded_file else None,
+        "uploaded_file_name": material.uploaded_file.name if material.uploaded_file else None,
+        "file_path": material.file_path,
+        "raw_text": material.raw_text,
+        "parsed_text": material.parsed_text,
+        "ingestion_status": material.ingestion_status,
+        "page_count": material.page_count,
+        "converted_markdown": material.converted_markdown,
+        "solved_markdown": material.solved_markdown,
+        "theory_markdown": material.theory_markdown,
+        "extracted_data": material.extracted_data,
+        "processed_at": material.processed_at.isoformat() if material.processed_at else None,
+        "processing_error": material.processing_error,
+        "notes": material.notes,
+        "metadata": material.metadata,
+        "created_at": material.created_at.isoformat() if material.created_at else None,
+        "updated_at": material.updated_at.isoformat() if material.updated_at else None,
+    }
+
+
+def _exam_payload(exam: StudyExam) -> dict:
+    return {
+        "id": str(exam.id),
+        "course_id": str(exam.course_id),
+        "course_title": exam.course.title if exam.course_id and exam.course else None,
+        "title": exam.title,
+        "kind": exam.kind,
+        "scheduled_at": exam.scheduled_at.isoformat() if exam.scheduled_at else None,
+        "weight": exam.weight,
+        "notes": exam.notes,
+        "metadata": exam.metadata,
+        "created_at": exam.created_at.isoformat() if exam.created_at else None,
+        "updated_at": exam.updated_at.isoformat() if exam.updated_at else None,
+    }
+
+
+def _topic_payload(topic: StudyTopic) -> dict:
+    return {
+        "id": str(topic.id),
+        "course_id": str(topic.course_id),
+        "name": topic.name,
+        "description": topic.description,
+        "summary": topic.summary,
+        "order_index": topic.order_index,
+        "estimated_effort_minutes": topic.estimated_effort_minutes,
+        "weight": topic.weight,
+        "status": topic.status,
+        "passed": topic.passed,
+        "passed_at": topic.passed_at.isoformat() if topic.passed_at else None,
+        "grade": topic.grade,
+        "metadata": topic.metadata,
+        "created_at": topic.created_at.isoformat() if topic.created_at else None,
+        "updated_at": topic.updated_at.isoformat() if topic.updated_at else None,
+    }
+
+
+def _job_payload(job: Job) -> dict:
+    return {
+        "id": str(job.id),
+        "status": job.status,
+        "user_visible_summary": job.user_visible_summary,
+        "progress": job.progress,
+        "module_slug": job.module.slug if job.module else None,
+        "active_function": job.active_function.manifest_id if job.active_function else None,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "cancel_requested": job.cancel_requested,
+        "error_summary": job.error_summary,
+    }
+
+
+def _queue_material_processing_job(material: StudyMaterial, *, max_pages: Optional[int] = None) -> Job:
+    module = ToolModule.objects.filter(slug="study").first()
+    job = JobService.create_job(
+        chat=material.course.chat,
+        module=module,
+        user_visible_summary=f"Queued study processing for {material.title}",
+    )
+    job.metadata = {
+        "study_material_id": str(material.id),
+        "study_course_id": str(material.course_id),
+        "study_material_title": material.title,
+    }
+    job.save(update_fields=["metadata", "updated_at"])
+    try:
+        process_study_material_job.delay(str(job.id), str(material.id), max_pages=max_pages)
+    except Exception as exc:
+        JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+        job.user_visible_summary = f"Failed to queue study processing for {material.title}"
+        job.save(update_fields=["user_visible_summary", "updated_at"])
+    return job
+
+
+@router.get("/courses")
+def list_courses(request, status: Optional[str] = None):
+    qs = StudyCourse.objects.all().order_by("title")
+    if status:
+        qs = qs.filter(status=status)
+    return {"courses": [_course_payload(course) for course in qs]}
+
+
+@router.post("/courses")
+def create_course(
+    request,
+    title: str = Form(...),
+    code: str = Form(""),
+    description: str = Form(""),
+    term_start_date: Optional[str] = Form(None),
+    term_end_date: Optional[str] = Form(None),
+    status: str = Form(StudyCourse.STATUS_ACTIVE),
+):
+    course = StudyCourse.objects.create(
+        title=title,
+        code=code or "",
+        description=description or "",
+        term_start_date=parse_date(term_start_date) if term_start_date else None,
+        term_end_date=parse_date(term_end_date) if term_end_date else None,
+        status=status or StudyCourse.STATUS_ACTIVE,
+    )
+    return _course_payload(course)
+
+
+@router.patch("/courses/{course_id}")
+def update_course(
+    request,
+    course_id: str,
+    title: Optional[str] = Form(None),
+    code: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    term_start_date: Optional[str] = Form(None),
+    term_end_date: Optional[str] = Form(None),
+    status: Optional[str] = Form(None),
+):
+    course = StudyCourse.objects.get(id=course_id)
+    fields: List[str] = []
+    if title is not None:
+        course.title = title
+        fields.append("title")
+    if code is not None:
+        course.code = code
+        fields.append("code")
+    if description is not None:
+        course.description = description
+        fields.append("description")
+    if term_start_date is not None:
+        course.term_start_date = parse_date(term_start_date) if term_start_date else None
+        fields.append("term_start_date")
+    if term_end_date is not None:
+        course.term_end_date = parse_date(term_end_date) if term_end_date else None
+        fields.append("term_end_date")
+    if status is not None:
+        course.status = status
+        fields.append("status")
+    if fields:
+        course.save(update_fields=fields + ["updated_at"])
+    return _course_payload(course)
+
+
+@router.delete("/courses/{course_id}")
+def delete_course(request, course_id: str):
+    course = StudyCourse.objects.get(id=course_id)
+    course.delete()
+    return {"ok": True}
+
+
+@router.get("/materials")
+def list_materials(request, course_id: Optional[str] = None):
+    qs = StudyMaterial.objects.select_related("course", "topic", "exam").all().order_by("-created_at")
+    if course_id:
+        qs = qs.filter(course_id=course_id)
+    return {"materials": [_material_payload(material) for material in qs]}
+
+@router.get("/materials/{material_id}/original")
+def get_material_original_file(request, material_id: str):
+    material = StudyMaterial.objects.get(id=material_id)
+    if not material.uploaded_file:
+        raise HttpError(404, "Material has no uploaded file")
+    file_name = (material.uploaded_file.name or "").split("/")[-1] or f"material-{material.id}"
+    try:
+        return FileResponse(material.uploaded_file.open("rb"), filename=file_name)
+    except FileNotFoundError:
+        raise HttpError(404, "Uploaded file not found")
+
+
+@router.post("/materials/upload")
+def upload_material(
+    request,
+    course_id: str = Form(...),
+    title: str = Form(...),
+    kind: str = Form(StudyMaterial.KIND_OTHER),
+    notes: str = Form(""),
+    process_now: bool = Form(True),
+    file: Optional[UploadedFile] = File(None),
+    source_text: str = Form(""),
+    topic_id: Optional[str] = Form(None),
+    exam_id: Optional[str] = Form(None),
+    source_url: str = Form(""),
+):
+    course = StudyCourse.objects.get(id=course_id)
+    topic = StudyTopic.objects.filter(id=topic_id).first() if topic_id else None
+    exam = StudyExam.objects.filter(id=exam_id).first() if exam_id else None
+
+    material = StudyMaterial.objects.create(
+        course=course,
+        topic=topic,
+        exam=exam,
+        kind=_normalize_material_kind(kind),
+        title=title,
+        source_url=source_url or "",
+        uploaded_file=file if file else None,
+        file_path=file.name if file else "",
+        raw_text=source_text or "",
+        notes=notes or "",
+    )
+
+    if process_now:
+        job = _queue_material_processing_job(material)
+    else:
+        job = None
+
+    return {"material": _material_payload(material), "job": _job_payload(job) if job else None}
+
+
+@router.get("/materials/{material_id}")
+def get_material(request, material_id: str):
+    material = StudyMaterial.objects.select_related("course", "topic", "exam").get(id=material_id)
+    return _material_payload(material)
+
+
+@router.post("/materials/{material_id}/process")
+def process_material(request, material_id: str):
+    material = StudyMaterial.objects.get(id=material_id)
+    job = _queue_material_processing_job(material)
+    return {"material": _material_payload(material), "job": _job_payload(job)}
+
+
+@router.post("/jobs/{job_id}/restart")
+def restart_processing_job(request, job_id: str, force: bool = Form(False)):
+    job = Job.objects.select_related("module").filter(id=job_id).first()
+    if not job:
+        raise HttpError(404, "Job not found")
+
+    module_slug = job.module.slug if job.module else None
+    material_id = (job.metadata or {}).get("study_material_id")
+    if module_slug != "study" or not material_id:
+        raise HttpError(400, "Only study processing jobs can be restarted")
+
+    active_statuses = {Job.STATUS_PENDING, Job.STATUS_RUNNING, Job.STATUS_WAITING_USER}
+    is_active = job.status in active_statuses and not job.cancel_requested
+    if is_active and not force:
+        stale_cutoff = timezone.now() - timedelta(minutes=2)
+        if job.updated_at and job.updated_at > stale_cutoff:
+            raise HttpError(409, "Job is still active; pass force=true to restart anyway")
+
+    if is_active:
+        JobService.request_cancel(job, reason="Restart requested by user")
+
+    material = StudyMaterial.objects.filter(id=material_id).first()
+    if not material:
+        raise HttpError(404, "Study material linked to this job no longer exists")
+
+    restarted_job = _queue_material_processing_job(material)
+    restarted_job.metadata = {
+        **(restarted_job.metadata or {}),
+        "restarted_from_job_id": str(job.id),
+    }
+    restarted_job.save(update_fields=["metadata", "updated_at"])
+    return {"job": _job_payload(restarted_job)}
+
+
+@router.get("/plans/active")
+def get_active_plan(request, course_id: str):
+    plan = StudyPlan.objects.filter(course_id=course_id, status=StudyPlan.STATUS_ACTIVE).order_by("-created_at").first()
+    if not plan:
+        return {"found": False}
+    return {
+        "found": True,
+        "plan": {
+            "id": str(plan.id),
+            "course_id": str(plan.course_id),
+            "name": plan.name,
+            "status": plan.status,
+            "window_start": plan.window_start.isoformat() if plan.window_start else None,
+            "window_end": plan.window_end.isoformat() if plan.window_end else None,
+            "summary": plan.summary,
+            "plan_json": plan.plan_json,
+        },
+    }
+
+
+@router.post("/plans/active")
+def create_active_plan(request, course_id: str = Form(...), name: str = Form("")):
+    course = StudyCourse.objects.get(id=course_id)
+    plan = StudyPlannerService.create_or_replace_active_plan(course, name=name or None)
+    return {
+        "id": str(plan.id),
+        "course_id": str(plan.course_id),
+        "name": plan.name,
+        "status": plan.status,
+        "window_start": plan.window_start.isoformat() if plan.window_start else None,
+        "window_end": plan.window_end.isoformat() if plan.window_end else None,
+        "summary": plan.summary,
+        "plan_json": plan.plan_json,
+    }
+
+
+@router.get("/topics")
+def list_topics(request, course_id: str):
+    qs = StudyTopic.objects.filter(course_id=course_id).order_by("order_index", "name")
+    return {
+        "topics": [_topic_payload(topic) for topic in qs]
+    }
+
+
+@router.post("/topics")
+def create_topic(
+    request,
+    course_id: str = Form(...),
+    name: str = Form(...),
+    description: str = Form(""),
+    order_index: int = Form(0),
+    estimated_effort_minutes: int = Form(60),
+    weight: float = Form(1.0),
+):
+    course = StudyCourse.objects.get(id=course_id)
+    topic = StudyTopic.objects.create(
+        course=course,
+        name=name,
+        description=description or "",
+        order_index=max(order_index, 0),
+        estimated_effort_minutes=max(estimated_effort_minutes, 1),
+        weight=weight or 1.0,
+    )
+    return _topic_payload(topic)
+
+
+@router.post("/exams")
+def create_exam(
+    request,
+    course_id: str = Form(...),
+    title: str = Form(...),
+    kind: str = Form(StudyExam.KIND_OTHER),
+    scheduled_at: Optional[str] = Form(None),
+    weight: float = Form(1.0),
+    notes: str = Form(""),
+):
+    course = StudyCourse.objects.get(id=course_id)
+    exam = StudyExam.objects.create(
+        course=course,
+        title=title,
+        kind=kind or StudyExam.KIND_OTHER,
+        scheduled_at=parse_datetime(scheduled_at) if scheduled_at else None,
+        weight=weight or 1.0,
+        notes=notes or "",
+    )
+    return _exam_payload(exam)
+
+
+@router.get("/exams")
+def list_exams(request, course_id: str):
+    qs = StudyExam.objects.filter(course_id=course_id).order_by("scheduled_at", "title")
+    return {"exams": [_exam_payload(exam) for exam in qs]}
+
+
+@router.patch("/exams/{exam_id}")
+def update_exam(
+    request,
+    exam_id: str,
+    title: Optional[str] = Form(None),
+    kind: Optional[str] = Form(None),
+    scheduled_at: Optional[str] = Form(None),
+    weight: Optional[float] = Form(None),
+    notes: Optional[str] = Form(None),
+):
+    exam = StudyExam.objects.get(id=exam_id)
+    fields: List[str] = []
+    if title is not None:
+        exam.title = title
+        fields.append("title")
+    if kind is not None:
+        exam.kind = kind or StudyExam.KIND_OTHER
+        fields.append("kind")
+    if scheduled_at is not None:
+        exam.scheduled_at = parse_datetime(scheduled_at) if scheduled_at else None
+        fields.append("scheduled_at")
+    if weight is not None:
+        exam.weight = weight or 1.0
+        fields.append("weight")
+    if notes is not None:
+        exam.notes = notes
+        fields.append("notes")
+    if fields:
+        exam.save(update_fields=fields + ["updated_at"])
+    return _exam_payload(exam)
+
+
+@router.delete("/exams/{exam_id}")
+def delete_exam(request, exam_id: str):
+    exam = StudyExam.objects.get(id=exam_id)
+    exam.delete()
+    return {"ok": True}
+
+
+@router.patch("/topics/{topic_id}")
+def update_topic(
+    request,
+    topic_id: str,
+    name: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    order_index: Optional[int] = Form(None),
+    estimated_effort_minutes: Optional[int] = Form(None),
+    weight: Optional[float] = Form(None),
+    status: Optional[str] = Form(None),
+    passed: Optional[bool] = Form(None),
+    grade: Optional[float] = Form(None),
+):
+    topic = StudyTopic.objects.get(id=topic_id)
+    fields: List[str] = []
+    if name is not None:
+        topic.name = name
+        fields.append("name")
+    if description is not None:
+        topic.description = description
+        fields.append("description")
+    if order_index is not None:
+        topic.order_index = max(order_index, 0)
+        fields.append("order_index")
+    if estimated_effort_minutes is not None:
+        topic.estimated_effort_minutes = max(estimated_effort_minutes, 1)
+        fields.append("estimated_effort_minutes")
+    if weight is not None:
+        topic.weight = weight
+        fields.append("weight")
+    if status is not None:
+        topic.status = status
+        fields.append("status")
+    if passed is not None:
+        topic.passed = passed
+        fields.append("passed")
+        if passed and not topic.passed_at:
+            topic.passed_at = timezone.now()
+            fields.append("passed_at")
+        elif not passed:
+            topic.passed_at = None
+            fields.append("passed_at")
+    if grade is not None:
+        topic.grade = grade
+        fields.append("grade")
+    topic.save(update_fields=fields + ["updated_at"] if fields else ["updated_at"])
+    return _topic_payload(topic)
+
+
+@router.delete("/topics/{topic_id}")
+def delete_topic(request, topic_id: str):
+    topic = StudyTopic.objects.get(id=topic_id)
+    cleanup_stats = StudyPlannerService.cleanup_topic_soft_events(topic)
+    topic.delete()
+    return {"ok": True, "cleanup": cleanup_stats}

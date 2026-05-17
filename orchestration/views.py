@@ -1,5 +1,6 @@
 from typing import List, Optional
 import logging
+import json
 from uuid import UUID
 from ninja import Router
 from ninja.errors import HttpError
@@ -161,6 +162,7 @@ def get_settings(request):
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
+        "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }
@@ -475,13 +477,31 @@ def set_settings(
     request,
     frontman_model: Optional[str] = None,
     caller_model: Optional[str] = None,
+    study_model: Optional[str] = None,
     cache_mode: Optional[str] = None,
     max_function_result_chars: Optional[int] = None,
 ):
+    body_payload = {}
+    try:
+        if getattr(request, "body", None):
+            parsed = json.loads(request.body.decode("utf-8"))
+            if isinstance(parsed, dict):
+                body_payload = parsed
+    except Exception:
+        body_payload = {}
+
+    frontman_model = body_payload.get("frontman_model", frontman_model)
+    caller_model = body_payload.get("caller_model", caller_model)
+    study_model = body_payload.get("study_model", study_model)
+    cache_mode = body_payload.get("cache_mode", cache_mode)
+    max_function_result_chars = body_payload.get("max_function_result_chars", max_function_result_chars)
+
     if frontman_model:
         ModelConfigService.set_setting("frontman_model", frontman_model)
     if caller_model:
         ModelConfigService.set_setting("caller_model", caller_model)
+    if study_model:
+        ModelConfigService.set_setting("study_model", study_model)
     if cache_mode:
         ModelConfigService.set_setting("cache_mode", cache_mode.lower())
     if max_function_result_chars is not None:
@@ -489,6 +509,7 @@ def set_settings(
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
+        "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
     }

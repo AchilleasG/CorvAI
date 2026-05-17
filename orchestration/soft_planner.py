@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from orchestration.model_providers import resolve_provider, get_client
 from orchestration.services import ModelConfigService
+from orchestration.services import UserInfoService
 from orchestration.models import OrchestrationSetting
 
 
@@ -39,7 +40,7 @@ def plan_soft_window(
 
     instructions = (
         "You are the Soft Event Planner. Given hard calendar events and flexible soft events, propose scheduling changes within the window.\n"
-        "Hard events are fixed. Soft events have duration, deadlines, deferral limits, and may include notes/description. Existing soft slots may already be planned.\n"
+        "Hard events are fixed. Soft events have preferred/min duration bounds, deadlines, deferral limits, and may include notes/description. Existing soft slots may already be planned.\n"
         "If a user scheduling constraint is provided, treat it as a hard requirement.\n"
         "Return JSON with 'actions' (array) and an optional 'summary'.\n" \
         "If a soft event is reaching its deadline and you deem the user might not get another good chance to do it later, promote it to a hard event.\n" \
@@ -54,6 +55,10 @@ def plan_soft_window(
         "Rules:\n"
         "- Keep scheduling within the window provided.\n"
         "- Avoid overlapping hard events and existing slots.\n"
+        "- Hard calendar events may include all_day, duration_minutes, and spans_multiple_days. Treat all_day or spans_multiple_days events as full-day or multi-day blocks, not ordinary short meetings.\n"
+        "- If a hard event looks like a reminder, habit, or background note (for example medication, vitamins, take pill, reminder, journal, or similar) and it has no meaningful time block, do not treat it as blocking calendar time unless the event clearly occupies time.\n"
+        "- For each soft event, planned slot duration must be between min_duration_minutes and preferred_duration_minutes (inclusive).\n"
+        "- Prefer slots close to preferred_duration_minutes, but use shorter valid durations when needed.\n"
         "- Respect deferral limits and deadlines; prioritize sooner deadlines and higher priority.\n"
         "- If a soft event is at risk (few remaining viable slots, deadline near, or max deferrals), propose promote_slot so it lands on the calendar.\n"
         "- Keep output concise; avoid redundant updates."
@@ -73,7 +78,11 @@ def plan_soft_window(
         or ""
     )
     habits_block = f"\nScheduling habits:\n{habits}" if habits else ""
-    prompt_text = f"{instructions}{habits_block}\n{window_block}\nData:\n{json.dumps(payload, default=str)}"
+    core_profile_block = UserInfoService.format_core_profile_block()
+    core_notes = ""
+    if core_profile_block:
+        core_notes = f"\nCore user context:\n{core_profile_block}"
+    prompt_text = f"{instructions}{core_notes}{habits_block}\n{window_block}\nData:\n{json.dumps(payload, default=str)}"
 
     actions: List[dict] = []
     if provider == "openai":
@@ -95,7 +104,7 @@ def plan_soft_window(
             messages=[
                 {
                     "role": "system",
-                    "content": f"{instructions}{habits_block}",
+                    "content": f"{instructions}{core_notes}{habits_block}",
                 },
                 {"role": "user", "content": f"{window_block}\nData:\n{json.dumps(payload, default=str)}"},
             ],

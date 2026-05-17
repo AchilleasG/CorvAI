@@ -284,7 +284,14 @@ class SoftEvent(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, default="")
     notes = models.TextField(blank=True, default="")
-    duration_minutes = models.PositiveIntegerField(default=30)
+    preferred_duration_minutes = models.PositiveIntegerField(
+        default=60,
+        help_text="Preferred session duration in minutes.",
+    )
+    min_duration_minutes = models.PositiveIntegerField(
+        default=30,
+        help_text="Minimum acceptable duration; scheduler will pack shorter slots if needed.",
+    )
     soft_deadline = models.DateTimeField(null=True, blank=True)
     hard_deadline = models.DateTimeField(null=True, blank=True)
     frequency = models.CharField(
