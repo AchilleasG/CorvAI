@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import timedelta
 
 from django.utils.dateparse import parse_date, parse_datetime
@@ -56,9 +56,13 @@ def _request_form_dict(request) -> dict:
 
 
 def _normalize_material_kind(kind: Optional[str]) -> str:
-    if kind == StudyMaterial.KIND_LECTURE_PDF:
+    normalized = str(kind or "").strip().lower()
+    if normalized == StudyMaterial.KIND_LECTURE_PDF:
         return StudyMaterial.KIND_LECTURE
-    return kind or StudyMaterial.KIND_OTHER
+    # Frontend historically sent "exam" for past papers; keep it mapped.
+    if normalized == "exam":
+        return StudyMaterial.KIND_PAST_EXAM
+    return normalized or StudyMaterial.KIND_OTHER
 
 
 def _course_payload(course: StudyCourse) -> dict:
@@ -396,8 +400,24 @@ def create_active_plan(request, course_id: str = Form(...), name: str = Form("")
 @router.get("/topics")
 def list_topics(request, course_id: str):
     qs = StudyTopic.objects.filter(course_id=course_id).order_by("order_index", "name")
+    topics = list(qs)
+
+    # Self-heal missing homework assignments for courses that already have processed homework-source materials.
+    has_homework = any(isinstance(topic.homework, list) and len(topic.homework) > 0 for topic in topics)
+    if topics and not has_homework:
+        has_exam_material = StudyMaterial.objects.filter(
+            course_id=course_id,
+            kind__in=[StudyMaterial.KIND_PAST_EXAM, "exam", "assignment", "worksheet"],
+            ingestion_status=StudyMaterial.INGESTION_PROCESSED,
+        ).exists()
+        if has_exam_material:
+            course = StudyCourse.objects.filter(id=course_id).first()
+            if course:
+                StudyPlannerService.assign_past_exam_homework_to_topics(course)
+                topics = list(StudyTopic.objects.filter(course_id=course_id).order_by("order_index", "name"))
+
     return {
-        "topics": [_topic_payload(topic) for topic in qs]
+        "topics": [_topic_payload(topic) for topic in topics]
     }
 
 
@@ -561,6 +581,52 @@ def update_topic(
             except (TypeError, ValueError):
                 raise HttpError(400, "grade must be a number")
 
+    homework_provided = False
+    normalized_homework: List[dict[str, Any]] = []
+    if "homework" in payload:
+        homework_provided = True
+        raw_homework = payload.get("homework")
+        if isinstance(raw_homework, str):
+            try:
+                raw_homework = json.loads(raw_homework)
+            except Exception:
+                raise HttpError(400, "homework must be a JSON array")
+        if raw_homework is None:
+            raw_homework = []
+        if not isinstance(raw_homework, list):
+            raise HttpError(400, "homework must be a list")
+
+        for idx, item in enumerate(raw_homework):
+            if isinstance(item, str):
+                text = item.strip()
+                if not text:
+                    continue
+                normalized_homework.append(
+                    {
+                        "assignment_id": f"manual:{topic.id}:{idx+1}",
+                        "text": text,
+                        "done": False,
+                    }
+                )
+                continue
+            if not isinstance(item, dict):
+                continue
+
+            text = str(item.get("text") or item.get("question") or "").strip()
+            if not text:
+                continue
+            normalized_homework.append(
+                {
+                    "assignment_id": str(item.get("assignment_id") or f"manual:{topic.id}:{idx+1}"),
+                    "source_material_id": item.get("source_material_id"),
+                    "source_material_title": item.get("source_material_title"),
+                    "source_exercise_label": item.get("source_exercise_label"),
+                    "question_index": item.get("question_index"),
+                    "text": text,
+                    "done": bool(item.get("done")),
+                }
+            )
+
     fields: List[str] = []
     if name is not None:
         topic.name = name
@@ -595,6 +661,9 @@ def update_topic(
     if grade is not None:
         topic.grade = grade
         fields.append("grade")
+    if homework_provided:
+        topic.homework = normalized_homework
+        fields.append("homework")
     topic.save(update_fields=fields + ["updated_at"] if fields else ["updated_at"])
     return _topic_payload(topic)
 

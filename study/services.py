@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import base64
 import ast
+import concurrent.futures
 import json
 import logging
 import mimetypes
 import os
 import re
+import time as time_module
 from datetime import date, datetime, time, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +108,18 @@ TOPIC_RECONCILIATION_INSTRUCTIONS = (
     "For create and update actions, include at least 3 bullets in what_to_know, at least 3 bullets in mastery_checks, and at least 2 bullets in common_pitfalls. "
     "If detail is missing in the material, explicitly state what is unknown rather than fabricating. "
     "Base your decision on the solved material outputs and the full existing topic catalog provided."
+)
+
+HOMEWORK_ASSIGNMENT_INSTRUCTIONS = (
+    "You are assigning solved homework questions from past exams and assignments to an existing ordered lesson catalog. "
+    "Return JSON only with keys: summary, assignments. "
+    "assignments must be an array of objects with keys: assignment_id, topic_id, rationale. "
+    "Assign EVERY provided question to exactly one existing topic whenever reasonably possible. "
+    "Prefer broad semantic relevance over exact keyword matching. "
+    "Use lesson order_index to keep the study plan coherent and sequential: foundational questions should usually go to earlier lessons. "
+    "Do not create topics. Do not duplicate questions across topics. Do not omit a question just because the fit is imperfect; choose the best lesson. "
+    "Base the assignment on lesson name, summary, description, metadata, the exact question text, and the source material reference. "
+    "Write all strings in English."
 )
 
 
@@ -443,6 +457,39 @@ class StudyIngestionService:
             "extracted_data": data.get("extracted_data", {}) or {},
             "raw_response": raw,
         }
+
+    @staticmethod
+    def _extract_page_with_heartbeat(
+        material: StudyMaterial,
+        page: RenderedPage,
+        *,
+        page_index: int,
+        page_total: int,
+        model: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        heartbeat_seconds: float = 12.0,
+    ) -> Dict[str, Any]:
+        start = time_module.monotonic()
+        heartbeat_count = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(StudyIngestionService._extract_page, material, page, model)
+            while True:
+                StudyIngestionService._ensure_not_canceled(cancel_check)
+                try:
+                    return future.result(timeout=heartbeat_seconds)
+                except concurrent.futures.TimeoutError:
+                    heartbeat_count += 1
+                    elapsed = int(time_module.monotonic() - start)
+                    StudyIngestionService._emit_progress(
+                        progress_callback,
+                        0.1 + (0.6 * ((page_index - 1) / max(page_total, 1))),
+                        (
+                            f"Still analyzing page {page_index} of {page_total} "
+                            f"({elapsed}s elapsed, heartbeat {heartbeat_count})"
+                        ),
+                    )
+                    continue
 
     @staticmethod
     def _merge_text_blocks(blocks: Sequence[str]) -> str:
@@ -898,7 +945,15 @@ class StudyIngestionService:
                         f"Analyzing page {page_index} of {page_total}",
                     )
                     try:
-                        result = StudyIngestionService._extract_page(material, page, model=model)
+                        result = StudyIngestionService._extract_page_with_heartbeat(
+                            material,
+                            page,
+                            page_index=page_index,
+                            page_total=page_total,
+                            model=model,
+                            progress_callback=progress_callback,
+                            cancel_check=cancel_check,
+                        )
                     except Exception as exc:
                         if "timed out" in str(exc).lower():
                             raise TimeoutError(
@@ -1227,11 +1282,181 @@ class StudyPlannerService:
         if isinstance(raw_question, str):
             return raw_question.strip()
         if isinstance(raw_question, dict):
-            for key in ("question", "prompt", "text", "title", "body"):
+            for key in ("question", "prompt", "text", "task", "title", "body", "label"):
                 value = raw_question.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+            # Fallback: collect meaningful string fragments from arbitrary model output.
+            preferred: List[str] = []
+            secondary: List[str] = []
+
+            def collect_strings(value: Any, *, depth: int = 0, key_name: str = "") -> None:
+                if depth > 2:
+                    return
+                if isinstance(value, str):
+                    text = value.strip()
+                    if not text:
+                        return
+                    lowered = key_name.lower()
+                    if lowered in {"label", "question_number", "number", "exercise"}:
+                        preferred.append(text)
+                    else:
+                        secondary.append(text)
+                    return
+                if isinstance(value, dict):
+                    for child_key, child_value in value.items():
+                        collect_strings(child_value, depth=depth + 1, key_name=str(child_key))
+                    return
+                if isinstance(value, list):
+                    for child in value[:6]:
+                        collect_strings(child, depth=depth + 1, key_name=key_name)
+
+            collect_strings(raw_question)
+            merged = [part for part in [*preferred, *secondary] if part]
+            if merged:
+                return " — ".join(merged[:3])[:500].strip()
         return ""
+
+    @staticmethod
+    def _topic_text_for_homework_scoring(topic: StudyTopic) -> str:
+        metadata = topic.metadata if isinstance(topic.metadata, dict) else {}
+        metadata_bits: List[str] = []
+        for value in metadata.values():
+            if isinstance(value, str) and value.strip():
+                metadata_bits.append(value.strip())
+            elif isinstance(value, list):
+                metadata_bits.extend(str(item).strip() for item in value if str(item).strip())
+        return "\n".join(
+            part for part in [topic.name, topic.summary, topic.description, *metadata_bits] if str(part).strip()
+        )
+
+    @staticmethod
+    def _tokenize_homework_text(text: str) -> set[str]:
+        return {token for token in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(token) >= 3}
+
+    @staticmethod
+    def _fallback_topic_for_homework_question(question: Dict[str, Any], topics: List[StudyTopic]) -> StudyTopic:
+        question_text = " ".join(
+            str(part).strip()
+            for part in [
+                question.get("text"),
+                question.get("source_exercise_label"),
+                question.get("source_material_title"),
+            ]
+            if str(part or "").strip()
+        )
+        question_tokens = StudyPlannerService._tokenize_homework_text(question_text)
+        scored: List[Tuple[int, int, StudyTopic]] = []
+        for topic in topics:
+            topic_tokens = StudyPlannerService._tokenize_homework_text(
+                StudyPlannerService._topic_text_for_homework_scoring(topic)
+            )
+            overlap = len(question_tokens & topic_tokens)
+            score = overlap * 10
+            if topic.name and topic.name.lower() in question_text.lower():
+                score += 15
+            scored.append((score, -int(topic.order_index), topic))
+        scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+        return scored[0][2] if scored else topics[0]
+
+    @staticmethod
+    def _request_homework_topic_assignments(
+        course: StudyCourse,
+        topics: List[StudyTopic],
+        questions: List[Dict[str, Any]],
+        *,
+        model: Optional[str] = None,
+        source_material: Optional[StudyMaterial] = None,
+    ) -> Dict[str, str]:
+        if not topics or not questions:
+            return {}
+
+        model_name = model or ModelConfigService.get_study_model()
+        topic_payload = [
+            {
+                "id": str(topic.id),
+                "name": topic.name,
+                "order_index": topic.order_index,
+                "summary": topic.summary,
+                "description": topic.description,
+                "metadata": topic.metadata if isinstance(topic.metadata, dict) else {},
+            }
+            for topic in topics
+        ]
+        question_payload = [
+            {
+                "assignment_id": str(question.get("assignment_id") or ""),
+                "text": str(question.get("text") or "").strip(),
+                "source_material_title": str(question.get("source_material_title") or "").strip(),
+                "source_exercise_label": str(question.get("source_exercise_label") or "").strip(),
+                "question_index": question.get("question_index"),
+            }
+            for question in questions
+        ]
+        payload = {
+            "course": {
+                "id": str(course.id),
+                "title": course.title,
+                "code": course.code,
+            },
+            "source_material": {
+                "id": str(source_material.id),
+                "title": source_material.title,
+                "kind": source_material.kind,
+            }
+            if source_material
+            else None,
+            "topics": topic_payload,
+            "questions": question_payload,
+        }
+
+        resp = get_client("openai").with_options(max_retries=0).responses.create(
+            model=model_name,
+            input=[
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": HOMEWORK_ASSIGNMENT_INSTRUCTIONS}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": json.dumps(payload, ensure_ascii=True)}],
+                },
+            ],
+            text={"format": {"type": "json_object"}, "verbosity": "low"},
+            reasoning={"effort": "low"},
+            store=False,
+            timeout=120,
+        )
+        usage_obj = getattr(resp, "usage", None)
+        if usage_obj:
+            UsageService.log_usage(
+                source="study_homework_assignment",
+                model=model_name,
+                cache_mode=ModelConfigService.get_cache_mode(),
+                usage=usage_obj,
+                job=None,
+            )
+
+        raw = getattr(resp, "output_text", "") or "{}"
+        data = _safe_json_load(raw)
+        assignments = data.get("assignments") if isinstance(data.get("assignments"), list) else []
+        valid_topic_ids = {str(topic.id) for topic in topics}
+        valid_assignment_ids = {str(question.get("assignment_id") or "") for question in questions}
+
+        mapped: Dict[str, str] = {}
+        for item in assignments:
+            if not isinstance(item, dict):
+                continue
+            assignment_id = str(item.get("assignment_id") or "").strip()
+            topic_id = str(item.get("topic_id") or "").strip()
+            if not assignment_id or not topic_id:
+                continue
+            if assignment_id not in valid_assignment_ids or topic_id not in valid_topic_ids:
+                continue
+            if assignment_id in mapped:
+                continue
+            mapped[assignment_id] = topic_id
+        return mapped
 
     @staticmethod
     def _collect_past_exam_questions(course: StudyCourse) -> List[Dict[str, Any]]:
@@ -1239,7 +1464,7 @@ class StudyPlannerService:
         materials = (
             StudyMaterial.objects.filter(
                 course=course,
-                kind=StudyMaterial.KIND_PAST_EXAM,
+                kind__in=[StudyMaterial.KIND_PAST_EXAM, "exam", "assignment", "worksheet"],
                 ingestion_status=StudyMaterial.INGESTION_PROCESSED,
             )
             .order_by("created_at")
@@ -1274,6 +1499,17 @@ class StudyPlannerService:
                         "assignment_id": f"{material.id}:{idx}",
                         "source_material_id": str(material.id),
                         "source_material_title": material.title,
+                        "source_exercise_label": (
+                            str(
+                                raw_question.get("label")
+                                or raw_question.get("question_number")
+                                or raw_question.get("number")
+                                or raw_question.get("exercise")
+                                or ""
+                            ).strip()
+                            if isinstance(raw_question, dict)
+                            else ""
+                        ),
                         "question_index": idx,
                         "text": text,
                         "raw": raw_question if isinstance(raw_question, dict) else {"question": text},
@@ -1283,22 +1519,91 @@ class StudyPlannerService:
         return questions
 
     @staticmethod
-    def assign_past_exam_homework_to_topics(course: StudyCourse) -> Dict[str, int]:
+    def assign_past_exam_homework_to_topics(
+        course: StudyCourse,
+        *,
+        source_material: Optional[StudyMaterial] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, int]:
         topics = list(course.topics.all().order_by("order_index", "name"))
         if not topics:
             return {
                 "past_exam_question_count": 0,
                 "topics_with_homework": 0,
+                "model_assigned_count": 0,
+                "fallback_assigned_count": 0,
             }
 
         questions = StudyPlannerService._collect_past_exam_questions(course)
-        buckets: List[List[Dict[str, Any]]] = [[] for _ in topics]
-        for idx, question in enumerate(questions):
-            buckets[idx % len(topics)].append(question)
+        existing_done_state: Dict[str, bool] = {}
+        for topic in topics:
+            if not isinstance(topic.homework, list):
+                continue
+            for item in topic.homework:
+                if not isinstance(item, dict):
+                    continue
+                assignment_id = str(item.get("assignment_id") or "").strip()
+                if assignment_id:
+                    existing_done_state[assignment_id] = bool(item.get("done"))
+
+        if not questions:
+            for topic in topics:
+                if topic.homework:
+                    topic.homework = []
+                    topic.save(update_fields=["homework", "updated_at"])
+            return {
+                "past_exam_question_count": 0,
+                "topics_with_homework": 0,
+                "model_assigned_count": 0,
+                "fallback_assigned_count": 0,
+            }
+
+        assignment_map: Dict[str, str] = {}
+        try:
+            assignment_map = StudyPlannerService._request_homework_topic_assignments(
+                course,
+                topics,
+                questions,
+                model=model,
+                source_material=source_material,
+            )
+        except Exception:
+            StudyIngestionService.logger.exception(
+                "Homework assignment model call failed for course %s; using semantic fallback",
+                course.id,
+            )
+
+        topic_buckets: Dict[str, List[Dict[str, Any]]] = {str(topic.id): [] for topic in topics}
+        model_assigned_count = 0
+        fallback_assigned_count = 0
+        topics_by_id = {str(topic.id): topic for topic in topics}
+        for question in questions:
+            assignment_id = str(question.get("assignment_id") or "").strip()
+            topic_id = assignment_map.get(assignment_id)
+            topic = topics_by_id.get(topic_id) if topic_id else None
+            if topic is None:
+                topic = StudyPlannerService._fallback_topic_for_homework_question(question, topics)
+                fallback_assigned_count += 1
+            else:
+                model_assigned_count += 1
+
+            topic_buckets[str(topic.id)].append(
+                {
+                    **question,
+                    "done": existing_done_state.get(assignment_id, False),
+                }
+            )
 
         topics_with_homework = 0
-        for idx, topic in enumerate(topics):
-            assigned = buckets[idx]
+        for topic in topics:
+            assigned = topic_buckets[str(topic.id)]
+            assigned.sort(
+                key=lambda item: (
+                    str(item.get("source_material_title") or "").lower(),
+                    str(item.get("source_exercise_label") or "").lower(),
+                    int(item.get("question_index") or 0),
+                )
+            )
             topic.homework = assigned
             topic.save(update_fields=["homework", "updated_at"])
             if assigned:
@@ -1307,6 +1612,8 @@ class StudyPlannerService:
         return {
             "past_exam_question_count": len(questions),
             "topics_with_homework": topics_with_homework,
+            "model_assigned_count": model_assigned_count,
+            "fallback_assigned_count": fallback_assigned_count,
         }
 
     @staticmethod
@@ -1483,7 +1790,10 @@ class StudyPlannerService:
             start_date=start_date,
             end_date=end_date,
         )
-        homework_stats = StudyPlannerService.assign_past_exam_homework_to_topics(course)
+        homework_stats = StudyPlannerService.assign_past_exam_homework_to_topics(
+            course,
+            source_material=source_material,
+        )
         soft_event_stats = StudyPlannerService.sync_session_targets_to_soft_events(plan)
         plan.summary = (
             f"Auto-recalculated from {course.topics.count()} topics"

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import {
   createChat,
   createStudyCourse,
@@ -97,8 +98,22 @@ type SoftEventMode = "create" | "edit";
 type SoftEventModalTab = "details" | "metadata";
 type StudyOutputModalKind = "converted" | "solved" | "theory";
 
-type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "exam" | "other";
+type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "past_exam" | "other";
 type StudyMaterialInputMode = "file" | "text";
+type StudyDeleteTarget = {
+  kind: "course" | "lesson" | "exam";
+  id: string;
+  label: string;
+};
+type LessonHomeworkItem = {
+  assignment_id: string;
+  text: string;
+  done: boolean;
+  source_material_id?: string;
+  source_material_title?: string;
+  source_exercise_label?: string;
+  question_index?: number;
+};
 const STUDY_PREVIEW_COUNT = 3;
 const STUDY_TOPIC_STATUS_OPTIONS = ["not_started", "in_progress", "review", "mastered"] as const;
 
@@ -209,6 +224,62 @@ function parseTopicSummaryLines(summary: string): string[] {
     .split(/[•\u2022]+/)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function normalizeLessonHomework(value: unknown): LessonHomeworkItem[] {
+  if (!Array.isArray(value)) return [];
+  const items: LessonHomeworkItem[] = [];
+  value.forEach((entry, idx) => {
+    if (typeof entry === "string") {
+      const text = entry.trim();
+      if (!text) return;
+      items.push({ assignment_id: `manual:${idx + 1}`, text, done: false });
+      return;
+    }
+    if (!entry || typeof entry !== "object") return;
+    const obj = entry as Record<string, unknown>;
+    const raw = obj.raw && typeof obj.raw === "object" ? (obj.raw as Record<string, unknown>) : undefined;
+    const text = String(obj.text ?? obj.question ?? "").trim();
+    if (!text) return;
+    items.push({
+      assignment_id: String(obj.assignment_id ?? `manual:${idx + 1}`),
+      text,
+      done: Boolean(obj.done),
+      source_material_id: obj.source_material_id ? String(obj.source_material_id) : undefined,
+      source_material_title: obj.source_material_title ? String(obj.source_material_title) : undefined,
+      source_exercise_label: obj.source_exercise_label
+        ? String(obj.source_exercise_label)
+        : raw?.label
+          ? String(raw.label)
+          : raw?.question_number
+            ? String(raw.question_number)
+            : raw?.exercise
+              ? String(raw.exercise)
+              : undefined,
+      question_index:
+        typeof obj.question_index === "number"
+          ? obj.question_index
+          : typeof raw?.question_index === "number"
+            ? raw.question_index
+            : undefined,
+    });
+  });
+  return items;
+}
+
+function formatHomeworkReference(item: LessonHomeworkItem): string {
+  const source = item.source_material_title || "Past exam";
+  const exercise = item.source_exercise_label?.trim();
+  if (exercise) return `${source} - ${exercise}`;
+  if (typeof item.question_index === "number") return `${source} - Q${item.question_index}`;
+  return source;
+}
+
+function homeworkProgress(items: LessonHomeworkItem[]) {
+  const total = items.length;
+  const done = items.filter((item) => item.done).length;
+  const percent = total ? Math.round((done / total) * 100) : 0;
+  return { total, done, percent };
 }
 
 type MessageBubbleProps = {
@@ -390,6 +461,7 @@ export default function App() {
   const [studyExamKind, setStudyExamKind] = useState("other");
   const [studyExamDate, setStudyExamDate] = useState("");
   const [studyExamWeight, setStudyExamWeight] = useState("1.0");
+  const [studyExamNotes, setStudyExamNotes] = useState("");
   const [studyMaterialTitle, setStudyMaterialTitle] = useState("");
   const [studyMaterialKind, setStudyMaterialKind] = useState<StudyMaterialKind>("lecture");
   const [studyMaterialInputMode, setStudyMaterialInputMode] = useState<StudyMaterialInputMode>("file");
@@ -403,6 +475,13 @@ export default function App() {
   const [showCreateLessonModal, setShowCreateLessonModal] = useState(false);
   const [showCreateExamModal, setShowCreateExamModal] = useState(false);
   const [showCreateMaterialModal, setShowCreateMaterialModal] = useState(false);
+  const [showEditCourseModal, setShowEditCourseModal] = useState(false);
+  const [showEditLessonModal, setShowEditLessonModal] = useState(false);
+  const [showEditExamModal, setShowEditExamModal] = useState(false);
+  const [studyEditingCourseId, setStudyEditingCourseId] = useState<string | null>(null);
+  const [studyEditingLessonId, setStudyEditingLessonId] = useState<string | null>(null);
+  const [studyEditingExamId, setStudyEditingExamId] = useState<string | null>(null);
+  const [studyDeleteTarget, setStudyDeleteTarget] = useState<StudyDeleteTarget | null>(null);
   const [studyShowAllCourses, setStudyShowAllCourses] = useState(false);
   const [studyShowAllLessons, setStudyShowAllLessons] = useState(false);
   const [studyShowAllExams, setStudyShowAllExams] = useState(false);
@@ -580,6 +659,20 @@ export default function App() {
     () => studyTopics.find((topic) => topic.id === studyLessonDetailId) || null,
     [studyTopics, studyLessonDetailId],
   );
+  const selectedCourseTopics = useMemo(
+    () => studyTopics.filter((topic) => topic.course_id === studySelectedCourseId),
+    [studyTopics, studySelectedCourseId],
+  );
+  const selectedCourseHomeworkProgress = useMemo(() => {
+    const totals = selectedCourseTopics
+      .map((topic) => homeworkProgress(normalizeLessonHomework(topic.homework)))
+      .reduce(
+        (acc, value) => ({ total: acc.total + value.total, done: acc.done + value.done }),
+        { total: 0, done: 0 },
+      );
+    const percent = totals.total ? Math.round((totals.done / totals.total) * 100) : 0;
+    return { ...totals, percent };
+  }, [selectedCourseTopics]);
   const selectedStudyOutput = useMemo(() => {
     if (!selectedStudyMaterial || !studyOutputModalKind) return null;
     if (studyOutputModalKind === "converted") {
@@ -872,6 +965,38 @@ export default function App() {
     }
   }
 
+  async function handleToggleLessonHomework(topic: StudyTopic, itemAssignmentId: string, done: boolean) {
+    const currentHomework = normalizeLessonHomework(topic.homework);
+    const nextHomework = currentHomework.map((item) =>
+      item.assignment_id === itemAssignmentId ? { ...item, done } : item,
+    );
+    let persisted = false;
+
+    setStudyTopics((prev) =>
+      prev.map((row) => (row.id === topic.id ? { ...row, homework: nextHomework } : row)),
+    );
+
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await updateStudyTopic(topic.id, {
+        homework: nextHomework as unknown as StudyTopic["homework"],
+      });
+      persisted = true;
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      if (!persisted) {
+        setStudyTopics((prev) =>
+          prev.map((row) => (row.id === topic.id ? { ...row, homework: currentHomework } : row)),
+        );
+      }
+      setStudyError(err.message || "Failed to update homework item");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
   async function handleCreateStudyCourse(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!studyCourseTitle.trim()) {
@@ -940,18 +1065,31 @@ export default function App() {
   }
 
   async function handleEditStudyCourse(course: StudyCourse) {
-    const title = window.prompt("Course title", course.title) ?? course.title;
-    if (!title.trim()) return;
-    const code = window.prompt("Course code", course.code || "") ?? course.code;
-    const description = window.prompt("Course description", course.description || "") ?? course.description;
+    setStudyCourseTitle(course.title || "");
+    setStudyCourseCode(course.code || "");
+    setStudyCourseDescription(course.description || "");
+    setStudyEditingCourseId(course.id);
+    setShowEditCourseModal(true);
+  }
+
+  async function handleSubmitEditStudyCourse(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studyEditingCourseId) return;
+    if (!studyCourseTitle.trim()) {
+      setStudyError("Course title is required");
+      return;
+    }
     try {
       setStudySaving(true);
-      await updateStudyCourse(course.id, {
-        title: title.trim(),
-        code: code.trim(),
-        description: description.trim(),
+      setStudyError(null);
+      await updateStudyCourse(studyEditingCourseId, {
+        title: studyCourseTitle.trim(),
+        code: studyCourseCode.trim(),
+        description: studyCourseDescription.trim(),
       });
       await refreshStudyData();
+      setShowEditCourseModal(false);
+      setStudyEditingCourseId(null);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setStudyError(err.message || "Failed to update course");
@@ -960,38 +1098,34 @@ export default function App() {
     }
   }
 
-  async function handleDeleteStudyCourse(course: StudyCourse) {
-    if (!window.confirm(`Delete course '${course.title}'? This removes related study data.`)) return;
-    try {
-      setStudySaving(true);
-      await deleteStudyCourse(course.id);
-      if (studySelectedCourseId === course.id) {
-        setStudySelectedCourseId(null);
-      }
-      await refreshStudyData();
-    } catch (err: any) {
-      if (handleAuthError(err)) return;
-      setStudyError(err.message || "Failed to delete course");
-    } finally {
-      setStudySaving(false);
-    }
+  async function handleEditStudyLesson(topic: StudyTopic) {
+    setStudyLessonTitle(topic.name || "");
+    setStudyLessonDescription(topic.description || "");
+    setStudyLessonEffort(String(topic.estimated_effort_minutes || 60));
+    setStudyLessonWeight(String(topic.weight || 1));
+    setStudyEditingLessonId(topic.id);
+    setShowEditLessonModal(true);
   }
 
-  async function handleEditStudyLesson(topic: StudyTopic) {
-    const name = window.prompt("Lesson title", topic.name) ?? topic.name;
-    if (!name.trim()) return;
-    const description = window.prompt("Lesson description", topic.description || "") ?? topic.description;
-    const effortRaw = window.prompt("Estimated effort minutes", String(topic.estimated_effort_minutes)) ?? String(topic.estimated_effort_minutes);
-    const weightRaw = window.prompt("Lesson weight", String(topic.weight)) ?? String(topic.weight);
+  async function handleSubmitEditStudyLesson(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studyEditingLessonId) return;
+    if (!studyLessonTitle.trim()) {
+      setStudyError("Lesson title is required");
+      return;
+    }
     try {
       setStudySaving(true);
-      await updateStudyTopic(topic.id, {
-        name: name.trim(),
-        description: description.trim(),
-        estimated_effort_minutes: Number(effortRaw) || topic.estimated_effort_minutes,
-        weight: Number(weightRaw) || topic.weight,
+      setStudyError(null);
+      await updateStudyTopic(studyEditingLessonId, {
+        name: studyLessonTitle.trim(),
+        description: studyLessonDescription.trim(),
+        estimated_effort_minutes: Math.max(1, Number(studyLessonEffort) || 60),
+        weight: Number(studyLessonWeight) || 1,
       });
       await refreshStudyData();
+      setShowEditLessonModal(false);
+      setStudyEditingLessonId(null);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setStudyError(err.message || "Failed to update lesson");
@@ -1000,37 +1134,36 @@ export default function App() {
     }
   }
 
-  async function handleDeleteStudyLesson(topic: StudyTopic) {
-    if (!window.confirm(`Delete lesson '${topic.name}'?`)) return;
-    try {
-      setStudySaving(true);
-      await deleteStudyTopic(topic.id);
-      await refreshStudyData();
-    } catch (err: any) {
-      if (handleAuthError(err)) return;
-      setStudyError(err.message || "Failed to delete lesson");
-    } finally {
-      setStudySaving(false);
-    }
+  async function handleEditStudyExam(exam: StudyExam) {
+    setStudyExamTitle(exam.title || "");
+    setStudyExamKind(exam.kind || "other");
+    setStudyExamDate(toLocalInputValue(exam.scheduled_at));
+    setStudyExamWeight(String(exam.weight || 1));
+    setStudyExamNotes(exam.notes || "");
+    setStudyEditingExamId(exam.id);
+    setShowEditExamModal(true);
   }
 
-  async function handleEditStudyExam(exam: StudyExam) {
-    const title = window.prompt("Exam title", exam.title) ?? exam.title;
-    if (!title.trim()) return;
-    const kind = window.prompt("Exam kind", exam.kind || "other") ?? exam.kind;
-    const scheduledAt = window.prompt("Scheduled at (ISO datetime)", exam.scheduled_at || "") ?? (exam.scheduled_at || "");
-    const weightRaw = window.prompt("Exam weight", String(exam.weight)) ?? String(exam.weight);
-    const notes = window.prompt("Exam notes", exam.notes || "") ?? exam.notes;
+  async function handleSubmitEditStudyExam(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studyEditingExamId) return;
+    if (!studyExamTitle.trim()) {
+      setStudyError("Exam title is required");
+      return;
+    }
     try {
       setStudySaving(true);
-      await updateStudyExam(exam.id, {
-        title: title.trim(),
-        kind: (kind || "other").trim(),
-        scheduled_at: scheduledAt.trim() || undefined,
-        weight: Number(weightRaw) || exam.weight,
-        notes: notes.trim(),
+      setStudyError(null);
+      await updateStudyExam(studyEditingExamId, {
+        title: studyExamTitle.trim(),
+        kind: (studyExamKind || "other").trim(),
+        scheduled_at: toIsoValue(studyExamDate) || undefined,
+        weight: Number(studyExamWeight) || 1,
+        notes: studyExamNotes.trim(),
       });
       await refreshStudyData();
+      setShowEditExamModal(false);
+      setStudyEditingExamId(null);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setStudyError(err.message || "Failed to update exam");
@@ -1039,18 +1172,41 @@ export default function App() {
     }
   }
 
-  async function handleDeleteStudyExam(exam: StudyExam) {
-    if (!window.confirm(`Delete exam '${exam.title}'?`)) return;
+  async function handleConfirmStudyDelete() {
+    if (!studyDeleteTarget) return;
     try {
       setStudySaving(true);
-      await deleteStudyExam(exam.id);
+      setStudyError(null);
+      if (studyDeleteTarget.kind === "course") {
+        await deleteStudyCourse(studyDeleteTarget.id);
+        if (studySelectedCourseId === studyDeleteTarget.id) {
+          setStudySelectedCourseId(null);
+        }
+      } else if (studyDeleteTarget.kind === "lesson") {
+        await deleteStudyTopic(studyDeleteTarget.id);
+      } else {
+        await deleteStudyExam(studyDeleteTarget.id);
+      }
       await refreshStudyData();
+      setStudyDeleteTarget(null);
     } catch (err: any) {
       if (handleAuthError(err)) return;
-      setStudyError(err.message || "Failed to delete exam");
+      setStudyError(err.message || "Failed to delete item");
     } finally {
       setStudySaving(false);
     }
+  }
+
+  function handleDeleteStudyCourse(course: StudyCourse) {
+    setStudyDeleteTarget({ kind: "course", id: course.id, label: course.title });
+  }
+
+  function handleDeleteStudyLesson(topic: StudyTopic) {
+    setStudyDeleteTarget({ kind: "lesson", id: topic.id, label: topic.name });
+  }
+
+  function handleDeleteStudyExam(exam: StudyExam) {
+    setStudyDeleteTarget({ kind: "exam", id: exam.id, label: exam.title });
   }
 
   async function handleUploadStudyMaterial(e: React.FormEvent<HTMLFormElement>) {
@@ -2024,6 +2180,17 @@ export default function App() {
                     <p className="eyebrow">Lessons</p>
                     <h3>All lessons</h3>
                     <p className="muted small">Add lessons and track each topic through a study state workflow.</p>
+                    <div className="study-progress-block">
+                      <div className="study-progress-label muted small">
+                        Course homework progress: {selectedCourseHomeworkProgress.done}/{selectedCourseHomeworkProgress.total}
+                      </div>
+                      <div className="study-progress-track" aria-label="Course homework progress">
+                        <div
+                          className="study-progress-fill"
+                          style={{ width: `${selectedCourseHomeworkProgress.percent}%` }}
+                        />
+                      </div>
+                    </div>
                   </div>
                   <div className="card-head-actions">
                     <span className="pill">{studyTopics.length} lessons</span>
@@ -2041,6 +2208,8 @@ export default function App() {
                     {visibleStudyLessons.map((topic) => {
                       const statusDraft = studyTopicStatusDrafts[topic.id] ?? topic.status;
                       const summaryLines = parseTopicSummaryLines(topic.summary || "");
+                      const lessonHomework = normalizeLessonHomework(topic.homework);
+                      const lessonHomeworkStats = homeworkProgress(lessonHomework);
                       return (
                         <div key={topic.id} className="study-topic-card">
                           <div className="study-topic-header">
@@ -2119,6 +2288,44 @@ export default function App() {
                           <div className="study-topic-meta">
                             Effort {topic.estimated_effort_minutes} min · Weight {topic.weight} · State {formatTopicStatus(statusDraft)}
                           </div>
+                          <div className="study-progress-block">
+                            <div className="study-progress-label muted small">
+                              Homework: {lessonHomeworkStats.done}/{lessonHomeworkStats.total}
+                            </div>
+                            <div className="study-progress-track" aria-label={`Homework progress for ${topic.name}`}>
+                              <div
+                                className="study-progress-fill"
+                                style={{ width: `${lessonHomeworkStats.percent}%` }}
+                              />
+                            </div>
+                          </div>
+                          {lessonHomework.length > 0 && (
+                            <div className="study-homework-list">
+                              {lessonHomework.slice(0, 3).map((item) => (
+                                <label key={`${topic.id}-${item.assignment_id}`} className="study-homework-item">
+                                  <input
+                                    type="checkbox"
+                                    checked={item.done}
+                                    onChange={(e) =>
+                                      handleToggleLessonHomework(topic, item.assignment_id, e.target.checked)
+                                    }
+                                    disabled={studySaving}
+                                  />
+                                  <span>
+                                    {item.text}
+                                    <span className="study-homework-source muted small">
+                                      {formatHomeworkReference(item)}
+                                    </span>
+                                  </span>
+                                </label>
+                              ))}
+                              {lessonHomework.length > 3 && (
+                                <p className="muted small">
+                                  {lessonHomework.length - 3} more item(s) in lesson details.
+                                </p>
+                              )}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -3356,6 +3563,212 @@ export default function App() {
           </div>
         )}
 
+        {showEditCourseModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowEditCourseModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Course</p>
+                  <h3>Edit course</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowEditCourseModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleSubmitEditStudyCourse} className="modal-body">
+                <label className="field">
+                  <span>Title</span>
+                  <input
+                    value={studyCourseTitle}
+                    onChange={(e) => setStudyCourseTitle(e.target.value)}
+                    placeholder="Calculus II"
+                  />
+                </label>
+                <label className="field">
+                  <span>Code</span>
+                  <input
+                    value={studyCourseCode}
+                    onChange={(e) => setStudyCourseCode(e.target.value)}
+                    placeholder="MATH-202"
+                  />
+                </label>
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    rows={4}
+                    value={studyCourseDescription}
+                    onChange={(e) => setStudyCourseDescription(e.target.value)}
+                    placeholder="Exam window, professor emphasis, grading structure..."
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowEditCourseModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studyEditingCourseId}>
+                    {studySaving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showEditLessonModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowEditLessonModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Lesson</p>
+                  <h3>Edit lesson</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowEditLessonModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleSubmitEditStudyLesson} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Lesson title</span>
+                    <input
+                      value={studyLessonTitle}
+                      onChange={(e) => setStudyLessonTitle(e.target.value)}
+                      placeholder="Chain rule"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Estimated effort</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={5}
+                      value={studyLessonEffort}
+                      onChange={(e) => setStudyLessonEffort(e.target.value)}
+                      placeholder="60"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Weight</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={studyLessonWeight}
+                      onChange={(e) => setStudyLessonWeight(e.target.value)}
+                      placeholder="1.0"
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>Description</span>
+                  <textarea
+                    rows={3}
+                    value={studyLessonDescription}
+                    onChange={(e) => setStudyLessonDescription(e.target.value)}
+                    placeholder="What this lesson covers and what success looks like..."
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowEditLessonModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studyEditingLessonId}>
+                    {studySaving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showEditExamModal && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowEditExamModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Exam</p>
+                  <h3>Edit exam</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowEditExamModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleSubmitEditStudyExam} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Exam title</span>
+                    <input
+                      value={studyExamTitle}
+                      onChange={(e) => setStudyExamTitle(e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Kind</span>
+                    <select value={studyExamKind} onChange={(e) => setStudyExamKind(e.target.value)}>
+                      <option value="midterm">Midterm</option>
+                      <option value="final">Final</option>
+                      <option value="quiz">Quiz</option>
+                      <option value="practical">Practical</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Scheduled at</span>
+                    <input
+                      type="datetime-local"
+                      value={studyExamDate}
+                      onChange={(e) => setStudyExamDate(e.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Weight</span>
+                    <input
+                      type="number"
+                      min={0.1}
+                      step={0.1}
+                      value={studyExamWeight}
+                      onChange={(e) => setStudyExamWeight(e.target.value)}
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>Notes</span>
+                  <textarea
+                    rows={3}
+                    value={studyExamNotes}
+                    onChange={(e) => setStudyExamNotes(e.target.value)}
+                    placeholder="Optional exam notes"
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !studySaving && setShowEditExamModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={studySaving || !studyEditingExamId}>
+                    {studySaving ? "Saving…" : "Save changes"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {studyDeleteTarget && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setStudyDeleteTarget(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Confirm delete</p>
+                  <h3>Delete {studyDeleteTarget.kind}</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setStudyDeleteTarget(null)}>Close</button>
+              </div>
+              <div className="modal-body">
+                <p>
+                  Are you sure you want to delete <strong>{studyDeleteTarget.label}</strong>?
+                </p>
+                <p className="muted small">This action cannot be undone.</p>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="ghost" onClick={() => !studySaving && setStudyDeleteTarget(null)}>
+                  Cancel
+                </button>
+                <button type="button" className="primary" onClick={handleConfirmStudyDelete} disabled={studySaving}>
+                  {studySaving ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {showCreateMaterialModal && (
           <div className="modal-backdrop" onClick={() => !studySaving && setShowCreateMaterialModal(false)}>
             <div className="modal-card" onClick={(e) => e.stopPropagation()}>
@@ -3395,7 +3808,7 @@ export default function App() {
                       <option value="lecture">Lecture</option>
                       <option value="worksheet">Worksheet</option>
                       <option value="assignment">Assignment</option>
-                      <option value="exam">Exam</option>
+                      <option value="past_exam">Past exam</option>
                       <option value="other">Other</option>
                     </select>
                   </label>
@@ -3496,6 +3909,55 @@ export default function App() {
                 </button>
               </div>
               <div className="modal-body">
+                {(() => {
+                  const lessonHomework = normalizeLessonHomework(selectedStudyLesson.homework);
+                  const lessonHomeworkStats = homeworkProgress(lessonHomework);
+                  return (
+                    <section className="study-lesson-section">
+                      <h4>Homework checklist</h4>
+                      <div className="study-progress-block">
+                        <div className="study-progress-label muted small">
+                          Completed {lessonHomeworkStats.done}/{lessonHomeworkStats.total}
+                        </div>
+                        <div className="study-progress-track" aria-label="Lesson homework progress">
+                          <div
+                            className="study-progress-fill"
+                            style={{ width: `${lessonHomeworkStats.percent}%` }}
+                          />
+                        </div>
+                      </div>
+                      {lessonHomework.length ? (
+                        <div className="study-homework-list">
+                          {lessonHomework.map((item) => (
+                            <label key={item.assignment_id} className="study-homework-item">
+                              <input
+                                type="checkbox"
+                                checked={item.done}
+                                onChange={(e) =>
+                                  handleToggleLessonHomework(
+                                    selectedStudyLesson,
+                                    item.assignment_id,
+                                    e.target.checked,
+                                  )
+                                }
+                                disabled={studySaving}
+                              />
+                              <span>
+                                {item.text}
+                                <span className="study-homework-source muted small">
+                                  {formatHomeworkReference(item)}
+                                </span>
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted small">No homework assigned to this lesson yet.</p>
+                      )}
+                    </section>
+                  );
+                })()}
+
                 <div className="study-lesson-meta-grid">
                   <div className="study-lesson-chip">Status: {formatTopicStatus(selectedStudyLesson.status)}</div>
                   <div className="study-lesson-chip">Effort: {selectedStudyLesson.estimated_effort_minutes} min</div>
@@ -3600,7 +4062,9 @@ export default function App() {
                 </button>
               </div>
               <div className="modal-body">
-                <div className="study-output-body">{selectedStudyOutput.body}</div>
+                <div className="study-output-body study-output-markdown">
+                  <ReactMarkdown>{selectedStudyOutput.body}</ReactMarkdown>
+                </div>
               </div>
             </div>
           </div>

@@ -303,20 +303,12 @@ export function createApi(config: ApiConfig) {
     },
     updateStudyTopic(
       topic_id: string,
-      payload: Partial<Pick<StudyTopic, "name" | "description" | "order_index" | "estimated_effort_minutes" | "weight" | "status" | "passed" | "grade">>,
+      payload: Partial<Pick<StudyTopic, "name" | "description" | "homework" | "order_index" | "estimated_effort_minutes" | "weight" | "status" | "passed" | "grade">>,
     ) {
-      const formData = new FormData();
-      if (payload.name !== undefined) formData.append("name", payload.name);
-      if (payload.description !== undefined) formData.append("description", payload.description);
-      if (payload.order_index !== undefined) formData.append("order_index", String(payload.order_index));
-      if (payload.estimated_effort_minutes !== undefined) {
-        formData.append("estimated_effort_minutes", String(payload.estimated_effort_minutes));
-      }
-      if (payload.weight !== undefined) formData.append("weight", String(payload.weight));
-      if (payload.status !== undefined) formData.append("status", payload.status);
-      if (payload.passed !== undefined) formData.append("passed", payload.passed ? "true" : "false");
-      if (payload.grade !== undefined && payload.grade !== null) formData.append("grade", String(payload.grade));
-      return request<StudyTopic>(config, `/study/topics/${topic_id}`, { method: "PATCH", body: formData });
+      return request<StudyTopic>(config, `/study/topics/${topic_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
     },
     deleteStudyTopic(topic_id: string) {
       return request<{ ok: boolean }>(config, `/study/topics/${topic_id}`, { method: "DELETE" });
