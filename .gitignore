@@ -10,3 +10,5 @@ mobile/.env
 frontend/.vite/
 celerybeat-schedule
 media/study/materials/*
+core
+core.*

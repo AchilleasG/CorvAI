@@ -335,6 +335,26 @@ def promote_slot(**kwargs):
 
 
 @register_function(
+    manifest_id="calendar_manager.mark_slot_outcome",
+    module="calendar_manager",
+    description="Mark a planned soft-event session as completed or not performed and record why.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "slot_id": {"type": "string"},
+            "outcome": {"type": "string", "description": "completed or not_performed"},
+            "reason": {"type": "string"},
+            "minutes_spent": {"type": "integer"},
+            "completed_task_ids": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["slot_id", "outcome"],
+    },
+)
+def mark_slot_outcome(**kwargs):
+    return soft_events.mark_slot_outcome(**kwargs)
+
+
+@register_function(
     manifest_id="calendar_manager.replan_window",
     module="calendar_manager",
     description="Trigger a replan of the next N days with an optional note.",

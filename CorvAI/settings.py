@@ -43,6 +43,24 @@ def _resolve_log_file(filename: str) -> str:
     return os.path.join(fallback_dir, filename)
 
 
+def _resolve_media_root() -> str:
+    """Return a writable media root, falling back when the project media dir is root-owned."""
+    configured = os.getenv("CORV_MEDIA_DIR", os.path.join(BASE_DIR, "media"))
+    candidates = [
+        configured,
+        os.path.join(BASE_DIR, ".media"),
+        os.path.join("/tmp", "corvai-media"),
+    ]
+    for candidate in candidates:
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return candidate
+        except Exception:
+            continue
+    return os.path.join("/tmp", "corvai-media")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
@@ -61,7 +79,7 @@ APP_ACCESS_TOKEN = os.getenv("APP_ACCESS_TOKEN", "")
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = os.path.join(BASE_DIR, "media")
+MEDIA_ROOT = _resolve_media_root()
 # Application definition
 
 INSTALLED_APPS = [
@@ -253,6 +271,10 @@ CELERY_TIMEZONE = os.getenv("TIME_ZONE", TIME_ZONE)
 CELERY_BEAT_SCHEDULE = {
     "poll-soft-events": {
         "task": "orchestration.tasks.poll_soft_events_task",
+        "schedule": 300.0,  # every 5 minutes
+    },
+    "poll-soft-event-slots": {
+        "task": "orchestration.tasks.poll_soft_event_slots_task",
         "schedule": 300.0,  # every 5 minutes
     },
     "poll-scheduled-tasks": {

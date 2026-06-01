@@ -4,6 +4,7 @@ import uuid
 from django.db import models
 from django.db.models import Q
 from chat.models import Chat
+from orchestration.models import Objective
 
 
 class StudyCourse(models.Model):
@@ -24,6 +25,11 @@ class StudyCourse(models.Model):
     term_start_date = models.DateField(null=True, blank=True)
     term_end_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    objective = models.OneToOneField(
+        Objective,
+        on_delete=models.CASCADE,
+        related_name="study_course",
+    )
     chat = models.ForeignKey(Chat, null=True, blank=True, on_delete=models.SET_NULL, related_name="study_courses")
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -103,6 +109,11 @@ class StudyTopic(models.Model):
     passed = models.BooleanField(default=False)
     passed_at = models.DateTimeField(null=True, blank=True)
     grade = models.FloatField(null=True, blank=True)
+    objective = models.OneToOneField(
+        Objective,
+        on_delete=models.CASCADE,
+        related_name="study_topic",
+    )
     prerequisites = models.ManyToManyField("self", symmetrical=False, blank=True, related_name="dependent_topics")
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -339,3 +350,55 @@ class StudySessionLog(models.Model):
 
     def __str__(self):
         return f"{self.course} — {self.result}"
+
+
+class StudyAssignment(models.Model):
+    STATUS_DRAFT = "draft"
+    STATUS_PROCESSING = "processing"
+    STATUS_READY = "ready"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_SUBMITTED = "submitted"
+    STATUS_GRADED = "graded"
+
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_READY, "Ready"),
+        (STATUS_IN_PROGRESS, "In Progress"),
+        (STATUS_SUBMITTED, "Submitted"),
+        (STATUS_GRADED, "Graded"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    course = models.ForeignKey(StudyCourse, on_delete=models.CASCADE, related_name="assignments")
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    due_at = models.DateTimeField()
+    uploaded_file = models.FileField(upload_to="study/assignments/", blank=True, null=True)
+    material_text = models.TextField(blank=True, default="", help_text="Converted markdown from uploaded PDF or material")
+    plan = models.TextField(blank=True, default="", help_text="LLM-generated approach/strategy for the assignment")
+    checklist = models.JSONField(default=list, blank=True, help_text="Array of step objects: [{step_number, title, description}, ...]")
+    session_count = models.PositiveIntegerField(default=1, help_text="Number of sessions to break assignment into")
+    soft_event_refs = models.JSONField(default=list, blank=True, help_text="List of soft event IDs created for this assignment")
+    objective = models.OneToOneField(
+        Objective,
+        on_delete=models.CASCADE,
+        related_name="study_assignment",
+        blank=True,
+        null=True,
+    )
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-due_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["course", "status"]),
+            models.Index(fields=["due_at"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.course} — {self.title}"

@@ -13,7 +13,11 @@ from datetime import datetime
 
 from orchestration.api_schemas import (
     JobOut,
+    ObjectiveLogOut,
+    ObjectiveOut,
+    ObjectiveTaskOut,
     ScheduledTaskOut,
+    UpdateScheduledTaskIn,
     ScheduledTaskRunOut,
     ScheduledTaskLogOut,
     PushTokenOut,
@@ -24,6 +28,9 @@ from orchestration.api_schemas import (
 from orchestration.models import (
     Job,
     JobEvent,
+    Objective,
+    ObjectiveLog,
+    ObjectiveTask,
     UsageEvent,
     SoftEvent,
     SoftEventSlot,
@@ -35,6 +42,7 @@ from orchestration.models import (
     CallSession,
     CallTranscriptEntry,
 )
+from orchestration.objectives import ObjectiveService
 from orchestration.call_processing import (
     create_call_session,
     accept_call,
@@ -49,10 +57,21 @@ from orchestration.services import JobService, ModelConfigService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
 from orchestration.tools.calendar import list_events
-from orchestration.tools import soft_events
+from orchestration.tools import calendar_manager, soft_events
 
 router = Router(tags=["orchestration"])
 logger = logging.getLogger(__name__)
+
+
+def _request_json_dict(request) -> dict:
+    try:
+        raw = request.body.decode("utf-8") if getattr(request, "body", None) else ""
+        if not raw:
+            return {}
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 @router.get("/jobs", response=List[JobOut])
@@ -194,6 +213,7 @@ def get_settings(request):
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
+        "soft_planner_model": ModelConfigService.get_soft_planner_model(),
         "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
@@ -435,36 +455,33 @@ def create_scheduled_task(
 def update_scheduled_task(
     request,
     task_id: UUID,
-    prompt: Optional[str] = None,
-    start_at: Optional[str] = None,
-    recurrence: Optional[str] = None,
-    status: Optional[str] = None,
+    payload: UpdateScheduledTaskIn,
 ):
     try:
         task = ScheduledTask.objects.get(id=task_id)
     except ScheduledTask.DoesNotExist:
         raise HttpError(404, "Scheduled task not found")
 
-    if recurrence and recurrence not in dict(ScheduledTask.RECURRENCE_CHOICES):
+    if payload.recurrence and payload.recurrence not in dict(ScheduledTask.RECURRENCE_CHOICES):
         raise HttpError(400, "Invalid recurrence value")
-    if status and status not in dict(ScheduledTask.STATUS_CHOICES):
+    if payload.status and payload.status not in dict(ScheduledTask.STATUS_CHOICES):
         raise HttpError(400, "Invalid status value")
 
-    if prompt is not None:
-        task.prompt = prompt
-    if recurrence is not None:
-        task.recurrence = recurrence
-    if start_at is not None:
-        dt = _parse_dt(start_at)
+    if payload.prompt is not None:
+        task.prompt = payload.prompt
+    if payload.recurrence is not None:
+        task.recurrence = payload.recurrence
+    if payload.start_at is not None:
+        dt = _parse_dt(payload.start_at)
         if not dt:
             raise HttpError(400, "Invalid start_at datetime")
         task.start_at = dt
         task.next_run_at = dt if task.status == ScheduledTask.STATUS_ACTIVE else task.next_run_at
-    if status is not None:
-        task.status = status
-        if status == ScheduledTask.STATUS_ACTIVE and task.next_run_at is None:
+    if payload.status is not None:
+        task.status = payload.status
+        if payload.status == ScheduledTask.STATUS_ACTIVE and task.next_run_at is None:
             task.next_run_at = task.start_at
-        if status != ScheduledTask.STATUS_ACTIVE:
+        if payload.status != ScheduledTask.STATUS_ACTIVE:
             task.is_running = False
 
     task.save(update_fields=["prompt", "recurrence", "start_at", "next_run_at", "status", "is_running", "updated_at"])
@@ -509,6 +526,7 @@ def set_settings(
     request,
     frontman_model: Optional[str] = None,
     caller_model: Optional[str] = None,
+    soft_planner_model: Optional[str] = None,
     study_model: Optional[str] = None,
     cache_mode: Optional[str] = None,
     max_function_result_chars: Optional[int] = None,
@@ -524,6 +542,7 @@ def set_settings(
 
     frontman_model = body_payload.get("frontman_model", frontman_model)
     caller_model = body_payload.get("caller_model", caller_model)
+    soft_planner_model = body_payload.get("soft_planner_model", soft_planner_model)
     study_model = body_payload.get("study_model", study_model)
     cache_mode = body_payload.get("cache_mode", cache_mode)
     max_function_result_chars = body_payload.get("max_function_result_chars", max_function_result_chars)
@@ -532,6 +551,8 @@ def set_settings(
         ModelConfigService.set_setting("frontman_model", frontman_model)
     if caller_model:
         ModelConfigService.set_setting("caller_model", caller_model)
+    if soft_planner_model:
+        ModelConfigService.set_setting("soft_planner_model", soft_planner_model)
     if study_model:
         ModelConfigService.set_setting("study_model", study_model)
     if cache_mode:
@@ -541,6 +562,7 @@ def set_settings(
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
+        "soft_planner_model": ModelConfigService.get_soft_planner_model(),
         "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
@@ -643,6 +665,7 @@ def calendar_combined(
         "hard_events": mapped_hard,
         "soft_slots": soft_slots,
         "soft_events_unscheduled": unscheduled,
+        "objective_coverage": ObjectiveService.coverage_snapshot(start, end),
     }
 
 
@@ -650,6 +673,240 @@ def calendar_combined(
 def calendar_replan(request, days: int = 14, note: Optional[str] = None):
     result = soft_events.replan_window(days=days, note=note)
     return result
+
+
+@router.get("/objectives/roots", response=List[ObjectiveOut])
+def list_objective_roots(request):
+    roots = (
+        Objective.objects.filter(parent__isnull=True)
+        .prefetch_related("tasks", "logs", "children")
+        .order_by("deadline_at", "-priority", "created_at")
+    )
+    return [ObjectiveOut.from_model(objective, include_children=False) for objective in roots]
+
+
+@router.get("/objectives/tree/{objective_id}", response=ObjectiveOut)
+def get_objective_tree(request, objective_id: UUID):
+    try:
+        objective = Objective.objects.prefetch_related(
+            "tasks",
+            "logs",
+            "children__tasks",
+            "children__logs",
+            "children__children",
+        ).get(id=objective_id)
+    except Objective.DoesNotExist:
+        raise HttpError(404, "Objective not found")
+    return ObjectiveOut.from_model(objective, include_children=True)
+
+
+@router.get("/objectives/{objective_id}", response=ObjectiveOut)
+def get_objective_detail(request, objective_id: UUID):
+    try:
+        objective = Objective.objects.prefetch_related("tasks", "logs", "children").get(id=objective_id)
+    except Objective.DoesNotExist:
+        raise HttpError(404, "Objective not found")
+    return ObjectiveOut.from_model(objective, include_children=False)
+
+
+@router.post("/objectives", response=ObjectiveOut)
+def create_objective(request):
+    payload = _request_json_dict(request)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HttpError(400, "title is required")
+    parent = None
+    parent_id = str(payload.get("parent_id") or "").strip()
+    if parent_id:
+        parent = Objective.objects.filter(id=parent_id).first()
+        if parent is None:
+            raise HttpError(404, "Parent objective not found")
+    deadline_at = _parse_dt(payload.get("deadline_at")) if payload.get("deadline_at") else None
+    objective = Objective.objects.create(
+        parent=parent,
+        title=title,
+        description=str(payload.get("description") or ""),
+        status=str(payload.get("status") or Objective.STATUS_ACTIVE),
+        deadline_at=deadline_at,
+        estimated_effort_minutes=payload.get("estimated_effort_minutes"),
+        remaining_effort_minutes=payload.get("remaining_effort_minutes"),
+        priority=int(payload.get("priority") or 0),
+        notes=str(payload.get("notes") or ""),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        chat=parent.chat if parent else None,
+    )
+    return ObjectiveOut.from_model(objective)
+
+
+@router.patch("/objectives/{objective_id}", response=ObjectiveOut)
+def update_objective(request, objective_id: UUID):
+    try:
+        objective = Objective.objects.prefetch_related("tasks", "logs", "children").get(id=objective_id)
+    except Objective.DoesNotExist:
+        raise HttpError(404, "Objective not found")
+    payload = _request_json_dict(request)
+    updates: list[str] = []
+    if "parent_id" in payload:
+        parent_id = str(payload.get("parent_id") or "").strip()
+        if parent_id:
+            parent = Objective.objects.filter(id=parent_id).first()
+            if parent is None:
+                raise HttpError(404, "Parent objective not found")
+            objective.parent = parent
+        else:
+            objective.parent = None
+        updates.append("parent")
+    for key in ["title", "description", "status", "notes"]:
+        if key in payload:
+            setattr(objective, key, str(payload.get(key) or ""))
+            updates.append(key)
+    if "deadline_at" in payload:
+        objective.deadline_at = _parse_dt(payload.get("deadline_at")) if payload.get("deadline_at") else None
+        updates.append("deadline_at")
+    for key in ["estimated_effort_minutes", "remaining_effort_minutes", "priority"]:
+        if key in payload:
+            value = payload.get(key)
+            setattr(objective, key, int(value) if value not in (None, "") else None if key != "priority" else 0)
+            updates.append(key)
+    if "metadata" in payload and isinstance(payload.get("metadata"), dict):
+        objective.metadata = payload.get("metadata")
+        updates.append("metadata")
+    if updates:
+        objective.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
+    return ObjectiveOut.from_model(objective)
+
+
+@router.delete("/objectives/{objective_id}")
+def delete_objective(request, objective_id: UUID):
+    try:
+        objective = Objective.objects.get(id=objective_id)
+    except Objective.DoesNotExist:
+        raise HttpError(404, "Objective not found")
+    objective.delete()
+    return {"ok": True}
+
+
+@router.post("/objectives/{objective_id}/tasks", response=ObjectiveTaskOut)
+def create_objective_task(request, objective_id: UUID):
+    objective = Objective.objects.filter(id=objective_id).first()
+    if objective is None:
+        raise HttpError(404, "Objective not found")
+    payload = _request_json_dict(request)
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        raise HttpError(400, "title is required")
+    task = ObjectiveTask.objects.create(
+        objective=objective,
+        title=title,
+        description=str(payload.get("description") or ""),
+        status=str(payload.get("status") or ObjectiveTask.STATUS_TODO),
+        estimated_effort_minutes=payload.get("estimated_effort_minutes"),
+        remaining_effort_minutes=payload.get("remaining_effort_minutes"),
+        due_at=_parse_dt(payload.get("due_at")) if payload.get("due_at") else None,
+        sort_order=int(payload.get("sort_order") or 0),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+    )
+    return ObjectiveTaskOut.from_model(task)
+
+
+@router.patch("/objective_tasks/{task_id}", response=ObjectiveTaskOut)
+def update_objective_task(request, task_id: UUID):
+    try:
+        task = ObjectiveTask.objects.get(id=task_id)
+    except ObjectiveTask.DoesNotExist:
+        raise HttpError(404, "Objective task not found")
+    payload = _request_json_dict(request)
+    updates: list[str] = []
+    for key in ["title", "description", "status"]:
+        if key in payload:
+            setattr(task, key, str(payload.get(key) or ""))
+            updates.append(key)
+    for key in ["estimated_effort_minutes", "remaining_effort_minutes", "sort_order"]:
+        if key in payload:
+            value = payload.get(key)
+            setattr(task, key, int(value) if value not in (None, "") else None)
+            updates.append(key)
+    if "due_at" in payload:
+        task.due_at = _parse_dt(payload.get("due_at")) if payload.get("due_at") else None
+        updates.append("due_at")
+    if "metadata" in payload and isinstance(payload.get("metadata"), dict):
+        task.metadata = payload.get("metadata")
+        updates.append("metadata")
+    if "status" in payload:
+        task.completed_at = timezone.now() if task.status == ObjectiveTask.STATUS_DONE else None
+        updates.append("completed_at")
+    if updates:
+        task.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
+    return ObjectiveTaskOut.from_model(task)
+
+
+@router.delete("/objective_tasks/{task_id}")
+def delete_objective_task(request, task_id: UUID):
+    deleted, _ = ObjectiveTask.objects.filter(id=task_id).delete()
+    if not deleted:
+        raise HttpError(404, "Objective task not found")
+    return {"ok": True}
+
+
+@router.get("/objectives/{objective_id}/logs", response=List[ObjectiveLogOut])
+def list_objective_logs(request, objective_id: UUID):
+    logs = ObjectiveLog.objects.filter(objective_id=objective_id).order_by("-logged_at", "-created_at")
+    return [ObjectiveLogOut.from_model(log) for log in logs]
+
+
+@router.post("/objectives/{objective_id}/logs", response=ObjectiveLogOut)
+def create_objective_log(request, objective_id: UUID):
+    objective = Objective.objects.filter(id=objective_id).first()
+    if objective is None:
+        raise HttpError(404, "Objective not found")
+    payload = _request_json_dict(request)
+    log = ObjectiveLog.objects.create(
+        objective=objective,
+        task_id=payload.get("task_id"),
+        kind=str(payload.get("kind") or ObjectiveLog.KIND_NOTE),
+        text=str(payload.get("text") or ""),
+        minutes_spent=payload.get("minutes_spent"),
+        logged_at=_parse_dt(payload.get("logged_at")) if payload.get("logged_at") else timezone.now(),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+    )
+    return ObjectiveLogOut.from_model(log)
+
+
+@router.patch("/objective_logs/{log_id}", response=ObjectiveLogOut)
+def update_objective_log(request, log_id: UUID):
+    try:
+        log = ObjectiveLog.objects.get(id=log_id)
+    except ObjectiveLog.DoesNotExist:
+        raise HttpError(404, "Objective log not found")
+    payload = _request_json_dict(request)
+    updates: list[str] = []
+    for key in ["kind", "text"]:
+        if key in payload:
+            setattr(log, key, str(payload.get(key) or ""))
+            updates.append(key)
+    if "minutes_spent" in payload:
+        log.minutes_spent = int(payload.get("minutes_spent")) if payload.get("minutes_spent") not in (None, "") else None
+        updates.append("minutes_spent")
+    if "task_id" in payload:
+        log.task_id = payload.get("task_id") or None
+        updates.append("task")
+    if "logged_at" in payload:
+        log.logged_at = _parse_dt(payload.get("logged_at")) if payload.get("logged_at") else timezone.now()
+        updates.append("logged_at")
+    if "metadata" in payload and isinstance(payload.get("metadata"), dict):
+        log.metadata = payload.get("metadata")
+        updates.append("metadata")
+    if updates:
+        log.save(update_fields=list(dict.fromkeys(updates)))
+    return ObjectiveLogOut.from_model(log)
+
+
+@router.delete("/objective_logs/{log_id}")
+def delete_objective_log(request, log_id: UUID):
+    deleted, _ = ObjectiveLog.objects.filter(id=log_id).delete()
+    if not deleted:
+        raise HttpError(404, "Objective log not found")
+    return {"ok": True}
 
 
 @router.get("/soft_events/{soft_event_id}")
@@ -860,4 +1117,37 @@ def create_soft_event_detail(
 @router.post("/soft_slots/{slot_id}/promote")
 def promote_soft_slot(request, slot_id: UUID):
     result = soft_events.promote_slot(slot_id=str(slot_id))
+    return result
+
+
+@router.delete("/soft_events/{soft_event_id}")
+def delete_soft_event_route(request, soft_event_id: UUID):
+    return calendar_manager.delete_soft_event(soft_event_id=str(soft_event_id))
+
+
+@router.post("/soft_slots/{slot_id}/outcome")
+def mark_soft_slot_outcome(request, slot_id: UUID):
+    payload = _request_json_dict(request)
+    outcome = str(payload.get("outcome") or "").strip()
+    if not outcome:
+        raise HttpError(400, "outcome is required")
+    reason = str(payload.get("reason") or "")
+    minutes_spent = payload.get("minutes_spent")
+    if minutes_spent not in (None, ""):
+        try:
+            minutes_spent = int(minutes_spent)
+        except (TypeError, ValueError):
+            raise HttpError(400, "minutes_spent must be an integer")
+    else:
+        minutes_spent = None
+    completed_task_ids = payload.get("completed_task_ids")
+    if completed_task_ids is not None and not isinstance(completed_task_ids, list):
+        raise HttpError(400, "completed_task_ids must be a list")
+    result = soft_events.mark_slot_outcome(
+        slot_id=str(slot_id),
+        outcome=outcome,
+        reason=reason,
+        minutes_spent=minutes_spent,
+        completed_task_ids=[str(item) for item in (completed_task_ids or []) if str(item).strip()],
+    )
     return result

@@ -8,11 +8,16 @@ import {
   UsageSummary,
   CalendarReplanResult,
   CombinedCalendar,
+  Objective,
+  ObjectiveLog,
+  ObjectiveTask,
+  SoftSlotOutcomeResult,
   StudyCourse,
   StudyMaterial,
   StudyMaterialProcessResponse,
   StudyExam,
   StudyTopic,
+  StudyAssignment,
   SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
@@ -173,6 +178,7 @@ export function createApi(config: ApiConfig) {
       return request<{
         frontman_model: string;
         caller_model: string;
+        soft_planner_model: string;
         study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
@@ -181,6 +187,7 @@ export function createApi(config: ApiConfig) {
     updateSettings(payload: {
       frontman_model?: string;
       caller_model?: string;
+      soft_planner_model?: string;
       study_model?: string;
       cache_mode?: string;
       max_function_result_chars?: number;
@@ -188,6 +195,7 @@ export function createApi(config: ApiConfig) {
       return request<{
         frontman_model: string;
         caller_model: string;
+        soft_planner_model: string;
         study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
@@ -199,6 +207,69 @@ export function createApi(config: ApiConfig) {
     fetchCalendarCombined(params: { days?: number } = {}) {
       const qs = params.days ? `?days=${params.days}` : "";
       return request<CombinedCalendar>(config, `/orchestration/calendar/combined${qs}`);
+    },
+    fetchObjectiveRoots() {
+      return request<Objective[]>(config, `/orchestration/objectives/roots`);
+    },
+    fetchObjectiveTree(objective_id: string) {
+      return request<Objective>(config, `/orchestration/objectives/tree/${objective_id}`);
+    },
+    fetchObjective(objective_id: string) {
+      return request<Objective>(config, `/orchestration/objectives/${objective_id}`);
+    },
+    createObjective(payload: Record<string, unknown>) {
+      return request<Objective>(config, `/orchestration/objectives`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateObjective(objective_id: string, payload: Record<string, unknown>) {
+      return request<Objective>(config, `/orchestration/objectives/${objective_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteObjective(objective_id: string) {
+      return request<{ ok: boolean }>(config, `/orchestration/objectives/${objective_id}`, {
+        method: "DELETE",
+      });
+    },
+    createObjectiveTask(objective_id: string, payload: Record<string, unknown>) {
+      return request<ObjectiveTask>(config, `/orchestration/objectives/${objective_id}/tasks`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateObjectiveTask(task_id: string, payload: Record<string, unknown>) {
+      return request<ObjectiveTask>(config, `/orchestration/objective_tasks/${task_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteObjectiveTask(task_id: string) {
+      return request<{ ok: boolean }>(config, `/orchestration/objective_tasks/${task_id}`, {
+        method: "DELETE",
+      });
+    },
+    fetchObjectiveLogs(objective_id: string) {
+      return request<ObjectiveLog[]>(config, `/orchestration/objectives/${objective_id}/logs`);
+    },
+    createObjectiveLog(objective_id: string, payload: Record<string, unknown>) {
+      return request<ObjectiveLog>(config, `/orchestration/objectives/${objective_id}/logs`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateObjectiveLog(log_id: string, payload: Record<string, unknown>) {
+      return request<ObjectiveLog>(config, `/orchestration/objective_logs/${log_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteObjectiveLog(log_id: string) {
+      return request<{ ok: boolean }>(config, `/orchestration/objective_logs/${log_id}`, {
+        method: "DELETE",
+      });
     },
     fetchStudyCourses(status?: string) {
       const qs = status ? `?status=${encodeURIComponent(status)}` : "";
@@ -389,9 +460,28 @@ export function createApi(config: ApiConfig) {
         body: JSON.stringify(payload),
       });
     },
+    deleteSoftEvent(soft_event_id: string) {
+      return request<{ deleted: number; canceled_slots: number }>(config, `/orchestration/soft_events/${soft_event_id}`, {
+        method: "DELETE",
+      });
+    },
     promoteSoftSlot(slot_id: string) {
       return request<{ updated: number }>(config, `/orchestration/soft_slots/${slot_id}/promote`, {
         method: "POST",
+      });
+    },
+    markSoftSlotOutcome(
+      slot_id: string,
+      payload: {
+        outcome: string;
+        reason?: string;
+        minutes_spent?: number;
+        completed_task_ids?: string[];
+      },
+    ) {
+      return request<SoftSlotOutcomeResult>(config, `/orchestration/soft_slots/${slot_id}/outcome`, {
+        method: "POST",
+        body: JSON.stringify(payload),
       });
     },
     fetchScheduledTasks() {
@@ -477,6 +567,72 @@ export function createApi(config: ApiConfig) {
     createRealtimeToken(session_id: string) {
       return request<any>(config, `/orchestration/call_sessions/${session_id}/realtime_token`, {
         method: "POST",
+      });
+    },
+    fetchStudyAssignments(course_id?: string, status?: string) {
+      const params = new URLSearchParams();
+      if (course_id) params.set("course_id", course_id);
+      if (status) params.set("status", status);
+      const qs = params.toString() ? `?${params.toString()}` : "";
+      return request<StudyAssignment[]>(config, `/study/assignments${qs}`);
+    },
+    getStudyAssignment(assignment_id: string) {
+      return request<StudyAssignment>(config, `/study/assignments/${assignment_id}`);
+    },
+    getStudyAssignmentOriginalUrl(assignment_id: string) {
+      return `${config.baseUrl}/study/assignments/${assignment_id}/original`;
+    },
+    createStudyAssignment(payload: {
+      course_id: string;
+      title: string;
+      description?: string;
+      due_at: string;
+      material_text?: string;
+      session_count?: number;
+      file?: NativeUploadFile | File | Blob | null;
+    }) {
+      if (payload.file) {
+        const formData = new FormData();
+        formData.append("course_id", payload.course_id);
+        formData.append("title", payload.title);
+        formData.append("due_at", payload.due_at);
+        if (payload.description) formData.append("description", payload.description);
+        if (payload.material_text) formData.append("material_text", payload.material_text);
+        if (payload.session_count !== undefined) {
+          formData.append("session_count", String(payload.session_count));
+        }
+        if (isNativeUploadFile(payload.file)) {
+          formData.append(
+            "file",
+            {
+              uri: payload.file.uri,
+              name: payload.file.name,
+              type: payload.file.type || "application/octet-stream",
+            } as any,
+          );
+        } else {
+          const fileName = payload.file instanceof File ? payload.file.name : "assignment-material";
+          formData.append("file", payload.file, fileName);
+        }
+        return request<StudyAssignment>(config, "/study/assignments", {
+          method: "POST",
+          body: formData,
+        });
+      }
+      return request<StudyAssignment>(config, "/study/assignments", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateStudyAssignmentStatus(assignment_id: string, status: string) {
+      const params = new URLSearchParams({ status });
+      return request<StudyAssignment>(config, `/study/assignments/${assignment_id}?${params.toString()}`, {
+        method: "PATCH",
+      });
+    },
+    deleteStudyAssignment(assignment_id: string) {
+      return request<{ ok: boolean }>(config, `/study/assignments/${assignment_id}`, {
+        method: "DELETE",
       });
     },
   };

@@ -46,3 +46,15 @@ def poll_call_sessions_task():
     except Exception as exc:
         logger.exception("poll_call_sessions failed: %s", exc)
         raise
+
+
+@shared_task(name="orchestration.tasks.poll_soft_event_slots_task")
+def poll_soft_event_slots_task():
+    """
+    Poll for soft event slots due within ±5 minutes and make calls (used by Celery beat every 5 minutes).
+    """
+    try:
+        call_command("poll_soft_event_slots")
+    except Exception as exc:
+        logger.exception("poll_soft_event_slots failed: %s", exc)
+        raise

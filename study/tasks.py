@@ -4,7 +4,7 @@ import logging
 
 from celery import shared_task
 
-from study.services import StudyProcessingJobService
+from study.services import AssignmentProcessingJobService, StudyProcessingJobService
 
 logger = logging.getLogger(__name__)
 
@@ -21,4 +21,24 @@ def process_study_material_job(job_id: str, material_id: str, model: str | None 
         return {"job_id": job_id, "material_id": material_id, "status": "completed"}
     except Exception as exc:
         logger.exception("Study material job failed for %s: %s", material_id, exc)
+        raise
+
+
+@shared_task(name="study.tasks.process_study_assignment_job")
+def process_study_assignment_job(
+    job_id: str,
+    assignment_id: str,
+    uploaded_file_path: str | None = None,
+    requested_session_count: int | None = None,
+):
+    try:
+        AssignmentProcessingJobService.run_assignment_processing_job(
+            job_id,
+            assignment_id,
+            uploaded_file_path=uploaded_file_path,
+            requested_session_count=requested_session_count,
+        )
+        return {"job_id": job_id, "assignment_id": assignment_id, "status": "completed"}
+    except Exception as exc:
+        logger.exception("Study assignment job failed for %s: %s", assignment_id, exc)
         raise

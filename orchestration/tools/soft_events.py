@@ -5,6 +5,7 @@ from typing import Optional, List
 
 from django.utils import timezone
 
+from orchestration.objectives import ObjectiveService
 from orchestration.models import SoftEvent, SoftEventSlot, Chat
 from orchestration.registry import register_function
 from orchestration.services import SoftEventService
@@ -208,6 +209,44 @@ def promote_slot(
 
 
 @register_function(
+    manifest_id="soft_events.mark_slot_outcome",
+    module="soft_events",
+    name="soft_events.mark_slot_outcome",
+    description="Mark a planned soft-event session as completed or not performed and optionally log why.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "slot_id": {"type": "string"},
+            "outcome": {"type": "string", "description": "completed or not_performed"},
+            "reason": {"type": "string", "description": "Optional note about what happened or why it failed."},
+            "minutes_spent": {"type": "integer", "description": "Optional number of minutes actually spent."},
+            "completed_task_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional linked objective task ids to mark done when the session was completed.",
+            },
+        },
+        "required": ["slot_id", "outcome"],
+    },
+)
+def mark_slot_outcome(
+    slot_id: str,
+    outcome: str,
+    reason: str = "",
+    minutes_spent: Optional[int] = None,
+    completed_task_ids: Optional[List[str]] = None,
+):
+    normalized = "not_performed" if outcome.strip().lower() in {"not_performed", "not_executed", "missed", "skipped"} else outcome
+    return ObjectiveService.mark_slot_outcome(
+        slot_id,
+        outcome=normalized,
+        reason=reason,
+        minutes_spent=minutes_spent,
+        completed_task_ids=completed_task_ids,
+    )
+
+
+@register_function(
     manifest_id="soft_events.replan_window",
     module="soft_events",
     name="soft_events.replan_window",
@@ -225,6 +264,8 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     window_start = now
     window_end = now + timedelta(days=max(days or 1, 1))
 
+    objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(window_start, window_end)
+
     hard_resp = list_events(
         time_min=window_start.isoformat(),
         time_max=window_end.isoformat(),
@@ -232,6 +273,7 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     )
     hard_events = hard_resp.get("events", [])
     soft_state = collect_window_state(window_start, window_end)
+    soft_state["objective_inputs"] = ObjectiveService.scheduler_snapshot(window_start, window_end)
 
     if note:
         # Add a planner note as a pseudo event to steer scheduling.
@@ -251,9 +293,12 @@ def replan_window(days: int = 14, note: Optional[str] = None):
         window_end=window_end,
     )
     created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
+    coverage = ObjectiveService.coverage_snapshot(window_start, window_end)
     return {
         "actions": len(actions),
         "created": created,
         "updated": updated,
         "trace_id": trace_id,
+        "objective_sync": objective_sync,
+        "coverage": coverage,
     }

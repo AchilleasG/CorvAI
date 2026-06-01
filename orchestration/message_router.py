@@ -49,6 +49,7 @@ class MessageRouter:
         job: Optional[Job] = None,
         trace_id: Optional[str] = None,
         call_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ):
         envelope = MessageEnvelope(
             trace_id=trace_id or (job.trace_id if job else str(uuid.uuid4())),
@@ -58,5 +59,6 @@ class MessageRouter:
             content=content,
             call_id=call_id,
             job_id=str(job.id) if job else None,
+            metadata=metadata or {},
         )
         return MessageRouter.emit(chat_id, envelope, job=job)

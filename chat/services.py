@@ -40,16 +40,25 @@ class ChatService:
         return ChatMessage.objects.filter(chat_id=chat_id).order_by("created_at")
 
     @staticmethod
-    def construct_chat_context(chat_id: int, limit: int = 20):
+    def construct_chat_context(chat_id: int, limit: int = 40):
         chat = ChatService.get_chat_by_id(chat_id)
         if not chat:
             return None
 
-        # Grab most recent N (index uses chat+created_at), then reverse to oldest→newest
-        recent_qs = ChatMessage.objects.filter(chat_id=chat_id).order_by("-created_at")[
-            :limit
-        ]
-        messages = list(reversed(recent_qs))
+        visible_qs = ChatMessage.objects.filter(chat_id=chat_id).exclude(
+            message_type="tool_only"
+        ).order_by("-created_at")[: max(limit * 2, 30)]
+        tool_summary_qs = ChatMessage.objects.filter(
+            chat_id=chat_id,
+            message_type="tool_only",
+            audience="ai_stack",
+            metadata__include_in_context=True,
+        ).order_by("-created_at")[: max(limit // 3, 6)]
+
+        merged: dict[str, ChatMessage] = {}
+        for message in list(visible_qs) + list(tool_summary_qs):
+            merged[str(message.id)] = message
+        messages = sorted(merged.values(), key=lambda item: item.created_at)
 
         return {
             "chat": chat,

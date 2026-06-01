@@ -825,6 +825,7 @@ function InnerApp() {
       const payload: SettingsPayload = {
         frontman_model: settingsDraft.frontman_model?.trim() || undefined,
         caller_model: settingsDraft.caller_model?.trim() || undefined,
+        soft_planner_model: settingsDraft.soft_planner_model?.trim() || undefined,
         cache_mode: settingsDraft.cache_mode?.trim() || undefined,
         max_function_result_chars: settingsDraft.max_function_result_chars || undefined,
       };
@@ -1846,6 +1847,15 @@ function InnerApp() {
               setSettingsDraft((prev) => ({ ...prev, caller_model: value }))
             }
             placeholder="gpt-5-mini"
+          />
+          <Text style={styles.label}>Soft planner model</Text>
+          <TextInput
+            style={styles.input}
+            value={settingsDraft.soft_planner_model || ""}
+            onChangeText={(value) =>
+              setSettingsDraft((prev) => ({ ...prev, soft_planner_model: value }))
+            }
+            placeholder={settingsDraft.caller_model || "gpt-5-mini"}
           />
           <Text style={styles.label}>Cache mode</Text>
           <View style={styles.cacheRow}>

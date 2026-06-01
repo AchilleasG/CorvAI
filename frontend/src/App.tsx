@@ -24,10 +24,15 @@ import {
   fetchSettings,
   updateSettings,
   fetchCalendarCombined,
+  fetchObjective,
+  fetchObjectiveRoots,
+  fetchObjectiveTree,
   createSoftEvent,
   updateSoftEvent,
   fetchSoftEvent,
+  deleteSoftEvent,
   promoteSoftSlot,
+  markSoftSlotOutcome,
   replanCalendar,
   createStudyTopic,
   createStudyExam,
@@ -46,6 +51,12 @@ import {
   updateCallSession,
   uploadStudyMaterial,
   restartStudyJob,
+  fetchStudyAssignments,
+  getStudyAssignment,
+  getStudyAssignmentOriginalUrl,
+  createStudyAssignment,
+  updateStudyAssignmentStatus,
+  deleteStudyAssignment,
 } from "./api";
 import {
   ChatListItem,
@@ -56,6 +67,7 @@ import {
   UsageSummary,
   SettingsPayload,
   CombinedCalendar,
+  Objective,
   SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
@@ -63,6 +75,7 @@ import {
   StudyExam,
   StudyMaterial,
   StudyTopic,
+  StudyAssignment,
   UserMessage,
   CallSession,
 } from "./types";
@@ -130,6 +143,14 @@ function topicStatusTone(status: string): "pending" | "processing" | "processed"
   return "pending";
 }
 
+function assignmentStatusTone(status: string): "pending" | "processing" | "processed" | "failed" {
+  if (status === "graded") return "processed";
+  if (status === "submitted" || status === "in_progress" || status === "ready") return "processing";
+  if (status === "processing") return "processing";
+  if (status === "draft") return "pending";
+  return "failed";
+}
+
 function formatDateTime(value?: string | null) {
   if (!value) return "";
   return new Date(value).toLocaleString([], {
@@ -138,6 +159,53 @@ function formatDateTime(value?: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function startOfLocalDay(value: Date) {
+  const next = new Date(value);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function addLocalDays(value: Date, days: number) {
+  const next = new Date(value);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function dayKey(value: Date) {
+  return startOfLocalDay(value).toISOString().slice(0, 10);
+}
+
+function minutesSinceMidnight(value: Date) {
+  return value.getHours() * 60 + value.getMinutes();
+}
+
+function formatCalendarDayHeader(value: Date) {
+  return value.toLocaleDateString([], {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatHourLabel(hour: number) {
+  const normalized = ((hour % 24) + 24) % 24;
+  const suffix = normalized >= 12 ? "PM" : "AM";
+  const display = normalized % 12 || 12;
+  return `${display} ${suffix}`;
+}
+
+function formatWeekRangeLabel(start: Date, endExclusive: Date) {
+  const end = addLocalDays(endExclusive, -1);
+  return `${start.toLocaleDateString([], { month: "short", day: "numeric" })} – ${end.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+  })}`;
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function toLocalInputValue(value?: string | null) {
@@ -157,6 +225,13 @@ function toIsoValue(value: string) {
 
 function formatMaterialKind(kind: string) {
   return kind
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatObjectiveStatus(status: string) {
+  return status
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
@@ -410,14 +485,38 @@ export default function App() {
   const [showMicSettings, setShowMicSettings] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const studyFileInputRef = useRef<HTMLInputElement | null>(null);
+  const assignmentFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
+  const [selectedCalendarWeekStart, setSelectedCalendarWeekStart] = useState<string | null>(null);
+  const [objectiveRoots, setObjectiveRoots] = useState<Objective[]>([]);
+  const [selectedObjectiveRootId, setSelectedObjectiveRootId] = useState<string | null>(null);
+  const [objectiveTree, setObjectiveTree] = useState<Objective | null>(null);
+  const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null);
+  const [selectedObjectiveDetail, setSelectedObjectiveDetail] = useState<Objective | null>(null);
+  const [objectiveLoading, setObjectiveLoading] = useState(false);
+  const [objectiveError, setObjectiveError] = useState<string | null>(null);
   const [replanLoading, setReplanLoading] = useState(false);
   const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
+  const [calendarDetailEntry, setCalendarDetailEntry] = useState<null | {
+    kind: "hard" | "soft";
+    id: string;
+    title: string;
+    description?: string;
+    segmentStart: Date;
+    segmentEnd: Date;
+    soft_event_id?: string;
+    status?: string;
+    rationale?: string;
+    deferral_count?: number;
+    promoted?: boolean;
+    soft_deadline?: string | null;
+    hard_deadline?: string | null;
+  }>(null);
   const [softEventModalOpen, setSoftEventModalOpen] = useState(false);
   const [softEventLoading, setSoftEventLoading] = useState(false);
   const [softEventError, setSoftEventError] = useState<string | null>(null);
@@ -431,6 +530,10 @@ export default function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskRuns, setTaskRuns] = useState<ScheduledTaskRun[]>([]);
   const [taskRunsLoading, setTaskRunsLoading] = useState(false);
+  const [showSchedulerCreateModal, setShowSchedulerCreateModal] = useState(false);
+  const [showSchedulerDetailModal, setShowSchedulerDetailModal] = useState(false);
+  const [selectedSchedulerTask, setSelectedSchedulerTask] = useState<ScheduledTask | null>(null);
+  const [schedulerSaving, setSchedulerSaving] = useState(false);
   const [messagesInbox, setMessagesInbox] = useState<UserMessage[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [callSessions, setCallSessions] = useState<CallSession[]>([]);
@@ -440,6 +543,7 @@ export default function App() {
   const [studyTopics, setStudyTopics] = useState<StudyTopic[]>([]);
   const [studyExams, setStudyExams] = useState<StudyExam[]>([]);
   const [studyMaterials, setStudyMaterials] = useState<StudyMaterial[]>([]);
+  const [studyAssignments, setStudyAssignments] = useState<StudyAssignment[]>([]);
   const [studyJobs, setStudyJobs] = useState<Job[]>([]);
   const [studySelectedJobId, setStudySelectedJobId] = useState<string | null>(null);
   const [studyJobEvents, setStudyJobEvents] = useState<JobEvent[]>([]);
@@ -475,6 +579,9 @@ export default function App() {
   const [showCreateLessonModal, setShowCreateLessonModal] = useState(false);
   const [showCreateExamModal, setShowCreateExamModal] = useState(false);
   const [showCreateMaterialModal, setShowCreateMaterialModal] = useState(false);
+  const [showCreateAssignmentModal, setShowCreateAssignmentModal] = useState(false);
+  const [showAssignmentDetailModal, setShowAssignmentDetailModal] = useState(false);
+  const [selectedStudyAssignment, setSelectedStudyAssignment] = useState<StudyAssignment | null>(null);
   const [showEditCourseModal, setShowEditCourseModal] = useState(false);
   const [showEditLessonModal, setShowEditLessonModal] = useState(false);
   const [showEditExamModal, setShowEditExamModal] = useState(false);
@@ -487,6 +594,14 @@ export default function App() {
   const [studyShowAllExams, setStudyShowAllExams] = useState(false);
   const [studyShowAllMaterials, setStudyShowAllMaterials] = useState(false);
   const [studyShowAllJobs, setStudyShowAllJobs] = useState(false);
+  const [studyShowAllAssignments, setStudyShowAllAssignments] = useState(false);
+  const [studyAssignmentTitle, setStudyAssignmentTitle] = useState("");
+  const [studyAssignmentDescription, setStudyAssignmentDescription] = useState("");
+  const [studyAssignmentDueAt, setStudyAssignmentDueAt] = useState("");
+  const [studyAssignmentMaterialText, setStudyAssignmentMaterialText] = useState("");
+  const [studyAssignmentSessionCount, setStudyAssignmentSessionCount] = useState("");
+  const [studyAssignmentFile, setStudyAssignmentFile] = useState<File | null>(null);
+  const [studyAssignmentFileDragOver, setStudyAssignmentFileDragOver] = useState(false);
 
   function handleAuthError(err: any): boolean {
     const status = err?.status;
@@ -538,6 +653,7 @@ export default function App() {
     if (!authed) return;
     if (!showCalendar) return;
     refreshCalendar();
+    refreshObjectives();
   }, [authed, showCalendar]);
 
   useEffect(() => {
@@ -646,10 +762,14 @@ export default function App() {
     [studyMaterials, studySelectedMaterialId],
   );
   const selectedStudyMaterialJobs = useMemo(() => {
-    if (!studySelectedMaterialId) return [];
-    return studyJobs.filter(
+    const assignmentJobs = studyJobs.filter(
+      (job) => (job.metadata as Record<string, unknown> | undefined)?.job_kind === "assignment_processing",
+    );
+    if (!studySelectedMaterialId) return studyJobs;
+    const materialJobs = studyJobs.filter(
       (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
     );
+    return [...assignmentJobs, ...materialJobs];
   }, [studyJobs, studySelectedMaterialId]);
   const selectedStudyJob = useMemo(
     () => selectedStudyMaterialJobs.find((job) => job.id === studySelectedJobId) || null,
@@ -712,6 +832,158 @@ export default function App() {
     () => (studyShowAllJobs ? selectedStudyMaterialJobs : selectedStudyMaterialJobs.slice(0, STUDY_PREVIEW_COUNT)),
     [selectedStudyMaterialJobs, studyShowAllJobs],
   );
+  const visibleStudyAssignments = useMemo(
+    () => (studyShowAllAssignments ? studyAssignments : studyAssignments.slice(0, STUDY_PREVIEW_COUNT)),
+    [studyAssignments, studyShowAllAssignments],
+  );
+  const selectedObjectiveRoot = useMemo(
+    () => objectiveRoots.find((objective) => objective.id === selectedObjectiveRootId) || null,
+    [objectiveRoots, selectedObjectiveRootId],
+  );
+  const objectiveCoverage = calendarData?.objective_coverage || null;
+  const urgentCoverageItems = useMemo(
+    () =>
+      (objectiveCoverage?.items || []).filter(
+        (item) => item.coverage_state === "partial" || item.coverage_state === "uncovered",
+      ),
+    [objectiveCoverage],
+  );
+  const calendarWeekOptions = useMemo(() => {
+    if (!calendarData) return [] as Array<{ key: string; start: Date; endExclusive: Date }>;
+    const windowStart = startOfLocalDay(new Date(calendarData.window_start));
+    const windowEndExclusive = addLocalDays(startOfLocalDay(new Date(calendarData.window_end)), 1);
+    const options: Array<{ key: string; start: Date; endExclusive: Date }> = [];
+    let cursor = new Date(windowStart);
+    while (cursor < windowEndExclusive) {
+      const next = addLocalDays(cursor, 7);
+      options.push({ key: cursor.toISOString(), start: new Date(cursor), endExclusive: next < windowEndExclusive ? next : windowEndExclusive });
+      cursor = next;
+    }
+    return options;
+  }, [calendarData]);
+  const calendarEntries = useMemo(() => {
+    if (!calendarData) return [] as Array<
+      | (HardCalendarEvent & { kind: "hard"; startDate: Date; endDate: Date })
+      | (SoftSlot & { kind: "soft"; startDate: Date; endDate: Date })
+    >;
+    return [
+      ...calendarData.hard_events.map((event) => ({
+        ...event,
+        kind: "hard" as const,
+        startDate: new Date(event.start),
+        endDate: new Date(event.end),
+      })),
+      ...calendarData.soft_slots.map((slot) => ({
+        ...slot,
+        kind: "soft" as const,
+        startDate: new Date(slot.start),
+        endDate: new Date(slot.end),
+      })),
+    ]
+      .filter((item) => !Number.isNaN(item.startDate.getTime()) && !Number.isNaN(item.endDate.getTime()))
+      .sort((a, b) => a.startDate.getTime() - b.startDate.getTime());
+  }, [calendarData]);
+  const selectedCalendarWeek = useMemo(() => {
+    if (!calendarWeekOptions.length) return null;
+    return (
+      calendarWeekOptions.find((option) => option.key === selectedCalendarWeekStart) || calendarWeekOptions[0]
+    );
+  }, [calendarWeekOptions, selectedCalendarWeekStart]);
+  const calendarGridModel = useMemo(() => {
+    if (!selectedCalendarWeek) return null;
+    const dayDates = Array.from({ length: Math.max(Math.ceil((selectedCalendarWeek.endExclusive.getTime() - selectedCalendarWeek.start.getTime()) / (24 * 60 * 60 * 1000)), 1) }, (_, index) =>
+      addLocalDays(selectedCalendarWeek.start, index),
+    );
+    const dayKeys = dayDates.map((day) => dayKey(day));
+    const dayMap = new Map(
+      dayKeys.map((key, index) => [
+        key,
+        {
+          date: dayDates[index],
+          allDay: [] as Array<(typeof calendarEntries)[number]>,
+          timed: [] as Array<
+            (typeof calendarEntries)[number] & {
+              segmentStart: Date;
+              segmentEnd: Date;
+              startMinutes: number;
+              endMinutes: number;
+              lane?: number;
+              laneCount?: number;
+            }
+          >,
+        },
+      ]),
+    );
+    for (const entry of calendarEntries) {
+      if (entry.endDate <= selectedCalendarWeek.start || entry.startDate >= selectedCalendarWeek.endExclusive) continue;
+      let cursor = startOfLocalDay(entry.startDate > selectedCalendarWeek.start ? entry.startDate : selectedCalendarWeek.start);
+      const lastMoment = new Date(Math.min(entry.endDate.getTime() - 1, selectedCalendarWeek.endExclusive.getTime() - 1));
+      const lastDay = startOfLocalDay(lastMoment);
+      while (cursor <= lastDay) {
+        const key = dayKey(cursor);
+        const bucket = dayMap.get(key);
+        if (!bucket) {
+          cursor = addLocalDays(cursor, 1);
+          continue;
+        }
+        const dayStart = new Date(cursor);
+        const dayEnd = addLocalDays(dayStart, 1);
+        const segmentStart = entry.startDate > dayStart ? entry.startDate : dayStart;
+        const segmentEnd = entry.endDate < dayEnd ? entry.endDate : dayEnd;
+        const isAllDay =
+          entry.kind === "hard" &&
+          ("all_day" in entry ? Boolean(entry.all_day) : false || minutesSinceMidnight(segmentStart) === 0 && minutesSinceMidnight(segmentEnd) === 0);
+        if (isAllDay) {
+          bucket.allDay.push(entry);
+        } else {
+          bucket.timed.push({
+            ...entry,
+            segmentStart,
+            segmentEnd,
+            startMinutes: minutesSinceMidnight(segmentStart),
+            endMinutes: Math.max(minutesSinceMidnight(segmentEnd), minutesSinceMidnight(segmentStart) + 30),
+          });
+        }
+        cursor = addLocalDays(cursor, 1);
+      }
+    }
+    const timedSegments = Array.from(dayMap.values()).flatMap((bucket) => bucket.timed);
+    const hourStart = 6;
+    const hourEnd = 24;
+    for (const bucket of dayMap.values()) {
+      const active: Array<{ lane: number; endMinutes: number }> = [];
+      bucket.timed.sort((a, b) => a.startMinutes - b.startMinutes || a.endMinutes - b.endMinutes);
+      bucket.timed.forEach((entry, index) => {
+        for (let cursor = active.length - 1; cursor >= 0; cursor -= 1) {
+          if (active[cursor].endMinutes <= entry.startMinutes) {
+            active.splice(cursor, 1);
+          }
+        }
+        const used = new Set(active.map((item) => item.lane));
+        let lane = 0;
+        while (used.has(lane)) lane += 1;
+        entry.lane = lane;
+        active.push({ lane, endMinutes: entry.endMinutes });
+        const overlapping = bucket.timed.filter(
+          (other, otherIndex) =>
+            otherIndex !== index &&
+            other.startMinutes < entry.endMinutes &&
+            other.endMinutes > entry.startMinutes,
+        );
+        entry.laneCount = Math.max(lane + 1, ...overlapping.map((other) => (other.lane ?? 0) + 1), 1);
+      });
+    }
+    return { dayDates, dayMap, hourStart, hourEnd };
+  }, [calendarEntries, selectedCalendarWeek]);
+  useEffect(() => {
+    if (!calendarWeekOptions.length) {
+      if (selectedCalendarWeekStart !== null) setSelectedCalendarWeekStart(null);
+      return;
+    }
+    if (!selectedCalendarWeekStart || !calendarWeekOptions.some((option) => option.key === selectedCalendarWeekStart)) {
+      setSelectedCalendarWeekStart(calendarWeekOptions[0].key);
+    }
+  }, [calendarWeekOptions, selectedCalendarWeekStart]);
   useEffect(() => {
     if (!studySelectedMaterialId) {
       return;
@@ -734,6 +1006,35 @@ export default function App() {
     });
   }, [chats]);
 
+  function renderObjectiveNode(objective: Objective, depth = 0): JSX.Element {
+    const isSelected = objective.id === selectedObjectiveId;
+    const incompleteTasks = objective.tasks.filter((task) => task.status !== "done" && task.status !== "canceled");
+    return (
+      <div key={objective.id} className="objective-tree-branch">
+        <button
+          type="button"
+          className={`objective-tree-node ${isSelected ? "selected" : ""}`}
+          style={{ paddingLeft: `${0.8 + depth * 1}rem` }}
+          onClick={() => loadObjectiveDetail(objective.id).catch((err: any) => {
+            if (handleAuthError(err)) return;
+            setObjectiveError(err.message || "Failed to load objective detail");
+          })}
+        >
+          <span className="objective-tree-title">{objective.title}</span>
+          <span className="objective-tree-meta">
+            {objective.deadline_at ? formatDateTime(objective.deadline_at) : "No deadline"}
+            {incompleteTasks.length ? ` · ${incompleteTasks.length} open task${incompleteTasks.length === 1 ? "" : "s"}` : ""}
+          </span>
+        </button>
+        {objective.children.length > 0 && (
+          <div className="objective-tree-children">
+            {objective.children.map((child) => renderObjectiveNode(child, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   async function handleSaveSettings(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setSavingSettings(true);
@@ -743,6 +1044,7 @@ export default function App() {
       const payload: SettingsPayload = {
         frontman_model: formData.get("frontman_model") as string,
         caller_model: formData.get("caller_model") as string,
+        soft_planner_model: formData.get("soft_planner_model") as string,
         study_model: formData.get("study_model") as string,
         cache_mode: formData.get("cache_mode") as string,
         max_function_result_chars: Number(formData.get("max_function_result_chars") || 0) || undefined,
@@ -785,11 +1087,48 @@ export default function App() {
     }
   }
 
+  async function loadObjectiveDetail(objectiveId: string) {
+    const detail = await fetchObjective(objectiveId);
+    setSelectedObjectiveId(detail.id);
+    setSelectedObjectiveDetail(detail);
+  }
+
+  async function refreshObjectives(preferredRootId?: string | null, preferredObjectiveId?: string | null) {
+    try {
+      setObjectiveLoading(true);
+      setObjectiveError(null);
+      const roots = await fetchObjectiveRoots();
+      setObjectiveRoots(roots);
+      const nextRootId =
+        preferredRootId ||
+        selectedObjectiveRootId ||
+        roots.find((root) => root.id === selectedObjectiveRootId)?.id ||
+        roots[0]?.id ||
+        null;
+      setSelectedObjectiveRootId(nextRootId);
+      if (!nextRootId) {
+        setObjectiveTree(null);
+        setSelectedObjectiveId(null);
+        setSelectedObjectiveDetail(null);
+        return;
+      }
+      const tree = await fetchObjectiveTree(nextRootId);
+      setObjectiveTree(tree);
+      const nextObjectiveId = preferredObjectiveId || selectedObjectiveId || tree.id;
+      await loadObjectiveDetail(nextObjectiveId);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setObjectiveError(err.message || "Failed to load objectives");
+    } finally {
+      setObjectiveLoading(false);
+    }
+  }
+
   async function refreshStudyData() {
     try {
       setStudyLoading(true);
       setStudyError(null);
-      const [{ courses }, materialsResp, topicsResp, examsResp, jobsResp] = await Promise.all([
+      const [{ courses }, materialsResp, topicsResp, examsResp, assignmentsResp, jobsResp] = await Promise.all([
         fetchStudyCourses(),
         studySelectedCourseId
           ? fetchStudyMaterials(studySelectedCourseId)
@@ -800,6 +1139,9 @@ export default function App() {
         studySelectedCourseId
           ? fetchStudyExams(studySelectedCourseId)
           : Promise.resolve({ exams: [] as StudyExam[] }),
+        studySelectedCourseId
+          ? fetchStudyAssignments(studySelectedCourseId)
+          : Promise.resolve([] as StudyAssignment[]),
         fetchJobs(),
       ]);
       // Only update state if data actually changed
@@ -812,6 +1154,7 @@ export default function App() {
       const materials = materialsResp.materials || [];
       const topics = topicsResp.topics || [];
       const exams = examsResp.exams || [];
+      const assignments = assignmentsResp || [];
       setStudyMaterials((prev) =>
         JSON.stringify(prev) !== JSON.stringify(materials) ? materials : prev
       );
@@ -820,6 +1163,9 @@ export default function App() {
       );
       setStudyExams((prev) =>
         JSON.stringify(prev) !== JSON.stringify(exams) ? exams : prev
+      );
+      setStudyAssignments((prev) =>
+        JSON.stringify(prev) !== JSON.stringify(assignments) ? assignments : prev
       );
       setStudyTopicStatusDrafts(
         Object.fromEntries(topics.map((topic) => [topic.id, topic.status || "not_started"])),
@@ -830,9 +1176,13 @@ export default function App() {
       });
       setStudySelectedJobId((prev) => {
         const studyOnly = (jobsResp || []).filter((job) => job.module_slug === "study");
-        const jobsForMaterial = studyOnly.filter(
+        const assignmentJobs = studyOnly.filter(
+          (job) => (job.metadata as Record<string, unknown> | undefined)?.job_kind === "assignment_processing",
+        );
+        const materialJobs = studyOnly.filter(
           (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
         );
+        const jobsForMaterial = studySelectedMaterialId ? [...assignmentJobs, ...materialJobs] : studyOnly;
         if (prev && jobsForMaterial.some((job) => job.id === prev)) return prev;
         return jobsForMaterial[0]?.id || prev;
       });
@@ -1064,6 +1414,33 @@ export default function App() {
     studyFileInputRef.current?.click();
   }
 
+  function handleAssignmentFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const nextFile = e.target.files?.[0] || null;
+    setStudyAssignmentFile(nextFile);
+  }
+
+  function handleAssignmentFileDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setStudyAssignmentFileDragOver(true);
+  }
+
+  function handleAssignmentFileDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setStudyAssignmentFileDragOver(false);
+  }
+
+  function handleAssignmentFileDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setStudyAssignmentFileDragOver(false);
+    const droppedFile = e.dataTransfer.files?.[0] || null;
+    if (!droppedFile) return;
+    setStudyAssignmentFile(droppedFile);
+  }
+
+  function openAssignmentFilePicker() {
+    assignmentFileInputRef.current?.click();
+  }
+
   async function handleEditStudyCourse(course: StudyCourse) {
     setStudyCourseTitle(course.title || "");
     setStudyCourseCode(course.code || "");
@@ -1255,6 +1632,93 @@ export default function App() {
     }
   }
 
+  async function handleCreateStudyAssignment(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!studySelectedCourseId) {
+      setStudyError("Select or create a course first");
+      return;
+    }
+    if (!studyAssignmentTitle.trim()) {
+      setStudyError("Assignment title is required");
+      return;
+    }
+    const dueAtIso = toIsoValue(studyAssignmentDueAt);
+    if (!dueAtIso) {
+      setStudyError("Assignment due date is required");
+      return;
+    }
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await createStudyAssignment({
+        course_id: studySelectedCourseId,
+        title: studyAssignmentTitle.trim(),
+        description: studyAssignmentDescription.trim() || undefined,
+        due_at: dueAtIso,
+        material_text: studyAssignmentMaterialText.trim() || undefined,
+        session_count: studyAssignmentSessionCount.trim() ? Math.max(1, Number(studyAssignmentSessionCount)) : undefined,
+        file: studyAssignmentFile || undefined,
+      });
+      setStudyAssignmentTitle("");
+      setStudyAssignmentDescription("");
+      setStudyAssignmentDueAt("");
+      setStudyAssignmentMaterialText("");
+      setStudyAssignmentSessionCount("");
+      setStudyAssignmentFile(null);
+      await refreshStudyData();
+      setShowCreateAssignmentModal(false);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to create assignment");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleUpdateAssignmentStatus(assignment: StudyAssignment, status: StudyAssignment["status"]) {
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await updateStudyAssignmentStatus(assignment.id, status);
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to update assignment status");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
+  async function handleOpenAssignmentDetail(assignment: StudyAssignment) {
+    try {
+      const full = await getStudyAssignment(assignment.id);
+      setSelectedStudyAssignment(full);
+      setShowAssignmentDetailModal(true);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to load assignment details");
+    }
+  }
+
+  async function handleDeleteAssignment(assignment: StudyAssignment) {
+    if (!window.confirm(`Delete assignment \"${assignment.title}\"? This also removes related soft events.`)) return;
+    try {
+      setStudySaving(true);
+      setStudyError(null);
+      await deleteStudyAssignment(assignment.id);
+      if (selectedStudyAssignment?.id === assignment.id) {
+        setSelectedStudyAssignment(null);
+        setShowAssignmentDetailModal(false);
+      }
+      await refreshStudyData();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to delete assignment");
+    } finally {
+      setStudySaving(false);
+    }
+  }
+
   async function refreshInboxMessages() {
     try {
       setMessagesLoading(true);
@@ -1304,6 +1768,7 @@ export default function App() {
       return;
     }
     try {
+      setSchedulerSaving(true);
       const payload: { prompt: string; recurrence: string; start_at?: string } = {
         prompt: prompt.trim(),
         recurrence,
@@ -1314,9 +1779,12 @@ export default function App() {
       await createScheduledTask(payload);
       e.currentTarget.reset();
       await refreshScheduledTasks();
+      setShowSchedulerCreateModal(false);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setSchedulerError(err.message || "Failed to create scheduled task");
+    } finally {
+      setSchedulerSaving(false);
     }
   }
 
@@ -1343,6 +1811,28 @@ export default function App() {
       setSchedulerError(err.message || "Failed to load task runs");
     } finally {
       setTaskRunsLoading(false);
+    }
+  }
+
+  function handleOpenSchedulerDetail(task: ScheduledTask) {
+    setSelectedSchedulerTask(task);
+    setShowSchedulerDetailModal(true);
+  }
+
+  async function handleCancelSchedulerTask() {
+    if (!selectedSchedulerTask) return;
+    if (!window.confirm("Are you sure you want to cancel this task?")) return;
+    try {
+      setSchedulerSaving(true);
+      await updateScheduledTask(selectedSchedulerTask.id, { status: "canceled" });
+      await refreshScheduledTasks();
+      setShowSchedulerDetailModal(false);
+      setSelectedSchedulerTask(null);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSchedulerError(err.message || "Failed to cancel task");
+    } finally {
+      setSchedulerSaving(false);
     }
   }
 
@@ -1461,6 +1951,24 @@ export default function App() {
     }
   }
 
+  async function handleDeleteSoftEvent() {
+    if (!softEventDraft?.id || softEventMode !== "edit") return;
+    if (!window.confirm(`Delete soft event "${softEventDraft.title}"?`)) return;
+    try {
+      setSoftEventLoading(true);
+      await deleteSoftEvent(softEventDraft.id);
+      setSoftEventModalOpen(false);
+      setSoftEventDraft(null);
+      setSoftEventMetadata(null);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSoftEventError(err.message || "Failed to delete soft event");
+    } finally {
+      setSoftEventLoading(false);
+    }
+  }
+
   async function handlePromoteSoftSlot(slotId: string) {
     try {
       setPromoteLoadingId(slotId);
@@ -1469,6 +1977,33 @@ export default function App() {
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setCalendarError(err.message || "Failed to promote soft slot");
+    } finally {
+      setPromoteLoadingId(null);
+    }
+  }
+
+  async function handleMarkSoftSlotOutcome(slotId: string, outcome: "completed" | "not_performed") {
+    const reasonPrompt =
+      outcome === "completed"
+        ? "Optional note about what happened in this session"
+        : "Why was this session not actually performed?";
+    const reason = window.prompt(reasonPrompt, "") || "";
+    const minutesRaw =
+      outcome === "completed"
+        ? window.prompt("Minutes actually spent? Leave blank if unknown.", "")
+        : "";
+    const parsedMinutes = minutesRaw && minutesRaw.trim() ? parseInt(minutesRaw, 10) : undefined;
+    try {
+      setPromoteLoadingId(slotId);
+      await markSoftSlotOutcome(slotId, {
+        outcome,
+        reason: reason.trim() || undefined,
+        minutes_spent: Number.isFinite(parsedMinutes) ? parsedMinutes : undefined,
+      });
+      await Promise.all([refreshCalendar(), refreshObjectives(selectedObjectiveRootId, selectedObjectiveId)]);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to mark session outcome");
     } finally {
       setPromoteLoadingId(null);
     }
@@ -1929,6 +2464,7 @@ export default function App() {
                   <div className="pill-stack">
                     <span className="pill">Frontman: {settings.frontman_model || "gpt-5-mini"}</span>
                     <span className="pill">Caller: {settings.caller_model || "gpt-5-mini"}</span>
+                    <span className="pill">Planner: {settings.soft_planner_model || settings.caller_model || "gpt-5-mini"}</span>
                     <span className="pill">Study: {settings.study_model || "gpt-5-mini"}</span>
                     <span className="pill">Cache: {settings.cache_mode || "off"}</span>
                     <span className="pill">
@@ -1946,6 +2482,13 @@ export default function App() {
                     <label className="field">
                       <span>Caller model</span>
                       <input name="caller_model" defaultValue={settings.caller_model || "gpt-5-mini"} />
+                    </label>
+                    <label className="field">
+                      <span>Soft planner model</span>
+                      <input
+                        name="soft_planner_model"
+                        defaultValue={settings.soft_planner_model || settings.caller_model || "gpt-5-mini"}
+                      />
                     </label>
                     <label className="field">
                       <span>Study model</span>
@@ -2424,6 +2967,135 @@ export default function App() {
                   Use the <code>+</code> button to add a new material item.
                 </p>
               </div>
+              <div className="card full">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Assignments</p>
+                    <h3>Coursework planner</h3>
+                    <p className="muted small">
+                      Create assignments with due dates and optional source text. Corv will generate a plan, checklist, and session split.
+                    </p>
+                  </div>
+                  <div className="card-head-actions">
+                    <span className="pill">{studyAssignments.length} assignments</span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setShowCreateAssignmentModal(true)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+                <p className="muted small">
+                  Use the <code>+</code> button to create a new assignment.
+                </p>
+
+                {studyAssignments.length ? (
+                  <div className="study-assignment-list">
+                    {visibleStudyAssignments.map((assignment) => (
+                      <div
+                        key={assignment.id}
+                        className="study-assignment-card"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => handleOpenAssignmentDetail(assignment)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            handleOpenAssignmentDetail(assignment);
+                          }
+                        }}
+                      >
+                        <div className="study-topic-header">
+                          <div>
+                            <div className="study-material-title">{assignment.title}</div>
+                            <div className="study-topic-meta">
+                              Due {formatDateTime(assignment.due_at)} · {assignment.session_count} session{assignment.session_count === 1 ? "" : "s"}
+                              {assignment.soft_event_refs?.length ? ` · ${assignment.soft_event_refs.length} planned events` : ""}
+                            </div>
+                          </div>
+                          <span className={`pill study-status ${assignmentStatusTone(assignment.status)}`}>
+                            {assignment.status.replace("_", " ")}
+                          </span>
+                        </div>
+                        {assignment.plan && (
+                          <p className="study-topic-meta study-assignment-plan">{assignment.plan}</p>
+                        )}
+                        {assignment.checklist?.length > 0 && (
+                          <ol className="study-assignment-checklist">
+                            {assignment.checklist.slice(0, 4).map((step) => (
+                              <li key={`${assignment.id}-${step.step_number}`}>
+                                <strong>{step.title || `Step ${step.step_number}`}</strong>
+                                {step.description ? ` - ${step.description}` : ""}
+                              </li>
+                            ))}
+                            {assignment.checklist.length > 4 && (
+                              <li className="muted small">+{assignment.checklist.length - 4} more step(s)</li>
+                            )}
+                          </ol>
+                        )}
+                        <div className="actions-row" onClick={(e) => e.stopPropagation()}>
+                          {assignment.status === "ready" && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => handleUpdateAssignmentStatus(assignment, "in_progress")}
+                              disabled={studySaving}
+                            >
+                              Start sessions
+                            </button>
+                          )}
+                          {assignment.status === "in_progress" && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => handleUpdateAssignmentStatus(assignment, "submitted")}
+                              disabled={studySaving}
+                            >
+                              Mark submitted
+                            </button>
+                          )}
+                          {assignment.status === "submitted" && (
+                            <button
+                              type="button"
+                              className="ghost"
+                              onClick={() => handleUpdateAssignmentStatus(assignment, "graded")}
+                              disabled={studySaving}
+                            >
+                              Mark graded
+                            </button>
+                          )}
+                          {(assignment.status === "processing" || assignment.status === "draft") && (
+                            <span className="muted small">Plan generation in progress.</span>
+                          )}
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => handleDeleteAssignment(assignment)}
+                            disabled={studySaving}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">No assignments for this course yet.</p>
+                )}
+                {studyAssignments.length > STUDY_PREVIEW_COUNT && (
+                  <div className="actions-row">
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setStudyShowAllAssignments((prev) => !prev)}
+                    >
+                      {studyShowAllAssignments ? "Show less" : `Show all (${studyAssignments.length})`}
+                    </button>
+                  </div>
+                )}
+              </div>
               <div className="card">
                 <div className="card-head">
                   <div>
@@ -2663,7 +3335,7 @@ export default function App() {
             {calendarLoading && <div className="muted">Loading calendar…</div>}
             {!calendarLoading && calendarData && (
               <div className="calendar-grid">
-                <div className="card">
+                <div className="card full">
                   <div className="card-head">
                     <div>
                       <p className="eyebrow">Planned</p>
@@ -2674,97 +3346,239 @@ export default function App() {
                       </p>
                     </div>
                   </div>
-                  <div className="calendar-list">
-                    {[...calendarData.hard_events.map((e) => ({ ...e, type: "hard" as const })), ...calendarData.soft_slots.map((s) => ({
-                      id: s.id,
-                      soft_event_id: s.soft_event_id,
-                      title: s.title,
-                      start: s.start,
-                      end: s.end,
-                      status: s.status,
-                      type: "soft" as const,
-                      rationale: s.rationale,
-                      deferral_count: s.deferral_count,
-                      promoted: s.promoted,
-                      soft_deadline: s.soft_deadline,
-                      hard_deadline: s.hard_deadline,
-                    }))].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime()).map((item) => {
-                      const start = new Date(item.start).toLocaleString();
-                      const end = new Date(item.end).toLocaleString();
-                      const isSoft = item.type === "soft";
-                      const softEventId = "soft_event_id" in item ? item.soft_event_id : "";
-                      return (
-                        <div
-                          key={`${item.type}-${item.id}`}
-                          className={`cal-row ${isSoft ? "clickable" : ""}`}
-                          onClick={isSoft ? () => openSoftEventEditor(softEventId) : undefined}
-                          role={isSoft ? "button" : undefined}
-                          tabIndex={isSoft ? 0 : undefined}
-                          onKeyDown={
-                            isSoft
-                              ? (e) => {
-                                  if (e.key === "Enter" || e.key === " ") {
-                                    e.preventDefault();
-                                    openSoftEventEditor(softEventId);
-                                  }
-                                }
-                              : undefined
-                          }
-                        >
-                          <div className={`cal-badge ${isSoft ? "soft" : "hard"}`}>
-                            {isSoft ? "Soft" : "Hard"}
-                          </div>
-                          <div className="cal-body">
-                            <div className="cal-title">
-                              {item.title}
-                              {isSoft && item.promoted && <span className="pill" style={{ marginLeft: "0.5rem" }}>Promoted</span>}
-                            </div>
-                            <div className="cal-time">{start} → {end}</div>
-                            {"description" in item && item.description && (
-                              <div className="cal-note muted small">{item.description}</div>
-                            )}
-                            {"status" in item && item.status && (
-                              <div className="cal-meta muted small">
-                                Status: {item.status}
-                                {"deferral_count" in item && item.deferral_count ? ` · Deferrals: ${item.deferral_count}` : ""}
+                  {calendarGridModel ? (
+                    <>
+                      <div className="calendar-week-switcher">
+                        {calendarWeekOptions.map((option, index) => (
+                          <button
+                            key={option.key}
+                            type="button"
+                            className={`ghost week-chip ${selectedCalendarWeek?.key === option.key ? "active" : ""}`}
+                            onClick={() => setSelectedCalendarWeekStart(option.key)}
+                          >
+                            Week {index + 1}: {formatWeekRangeLabel(option.start, option.endExclusive)}
+                          </button>
+                        ))}
+                      </div>
+                      <div
+                        className="calendar-time-shell"
+                        style={{
+                          ["--calendar-hours" as string]: String(calendarGridModel.hourEnd - calendarGridModel.hourStart),
+                          ["--calendar-days" as string]: String(calendarGridModel.dayDates.length),
+                        }}
+                      >
+                        <div className="calendar-time-header">
+                          <div className="calendar-time-axis-spacer">All day</div>
+                          {calendarGridModel.dayDates.map((day) => {
+                            const bucket = calendarGridModel.dayMap.get(dayKey(day));
+                            return (
+                              <div key={day.toISOString()} className="calendar-day-header">
+                                <div className="calendar-day-label">{formatCalendarDayHeader(day)}</div>
+                                <div className="calendar-all-day-lane">
+                                  {bucket?.allDay.length ? (
+                                    bucket.allDay.map((entry) => (
+                                      <div key={`${entry.kind}-${entry.id}-${day.toISOString()}`} className={`calendar-chip ${entry.kind}`}>
+                                        {entry.title}
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <span className="calendar-chip-empty">No all-day events</span>
+                                  )}
+                                </div>
                               </div>
-                            )}
-                            {"rationale" in item && item.rationale && (
-                              <div className="cal-note muted small">{item.rationale}</div>
-                            )}
-                            {isSoft && (
-                              <div className="cal-actions">
-                                <button
-                                  type="button"
-                                  className="ghost pill-action"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    openSoftEventEditor(softEventId);
-                                  }}
-                                >
-                                  Edit
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ghost pill-action"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handlePromoteSoftSlot(item.id);
-                                  }}
-                                  disabled={promoteLoadingId === item.id}
-                                >
-                                  {promoteLoadingId === item.id ? "Promoting…" : "Promote"}
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
-                    {!calendarData.hard_events.length && !calendarData.soft_slots.length && (
-                      <div className="muted">No events scheduled.</div>
-                    )}
-                  </div>
+                        <div className="calendar-time-body">
+                        <div className="calendar-time-grid">
+                          <div className="calendar-time-axis">
+                            {Array.from({ length: calendarGridModel.hourEnd - calendarGridModel.hourStart }, (_, offset) => {
+                              const hour = calendarGridModel.hourStart + offset;
+                              return (
+                                <div key={hour} className="calendar-hour-label">
+                                  {formatHourLabel(hour)}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          {calendarGridModel.dayDates.map((day) => {
+                            const key = dayKey(day);
+                            const bucket = calendarGridModel.dayMap.get(key);
+                            return (
+                              <div key={day.toISOString()} className="calendar-day-column">
+                                {Array.from({ length: calendarGridModel.hourEnd - calendarGridModel.hourStart }, (_, offset) => (
+                                  <div key={`${key}-${offset}`} className="calendar-hour-cell" />
+                                ))}
+                                {bucket?.timed.map((entry) => {
+                                  const rawTop = ((entry.startMinutes - calendarGridModel.hourStart * 60) / 60) * 72;
+                                  const top = Math.max(rawTop, 0);
+                                  const rawHeight = ((entry.endMinutes - entry.startMinutes) / 60) * 72;
+                                  const height = Math.max(rawHeight - (top - rawTop), 16);
+                                  const laneCount = Math.max(entry.laneCount || 1, 1);
+                                  const lane = entry.lane || 0;
+                                  const width = `calc((100% - ${(laneCount - 1) * 6}px) / ${laneCount})`;
+                                  const left = `calc(${lane} * (${width} + 6px))`;
+                                  const isSoft = entry.kind === "soft";
+                                  return (
+                                    <button
+                                      key={`${entry.kind}-${entry.id}-${entry.segmentStart.toISOString()}`}
+                                      type="button"
+                                      className={`calendar-block ${entry.kind}`}
+                                      style={{ top: `${top}px`, height: `${height}px`, width, left }}
+                                      onClick={() => {
+                                        setCalendarDetailEntry({
+                                          kind: entry.kind,
+                                          id: entry.id,
+                                          title: entry.title,
+                                          description: "description" in entry ? entry.description : undefined,
+                                          segmentStart: entry.segmentStart,
+                                          segmentEnd: entry.segmentEnd,
+                                          soft_event_id: "soft_event_id" in entry ? entry.soft_event_id : undefined,
+                                          status: "status" in entry ? entry.status : undefined,
+                                          rationale: "rationale" in entry ? entry.rationale : undefined,
+                                          deferral_count: "deferral_count" in entry ? entry.deferral_count : undefined,
+                                          promoted: "promoted" in entry ? entry.promoted : undefined,
+                                          soft_deadline: "soft_deadline" in entry ? entry.soft_deadline : undefined,
+                                          hard_deadline: "hard_deadline" in entry ? entry.hard_deadline : undefined,
+                                        });
+                                      }}
+                                    >
+                                      <span className="calendar-block-time">
+                                        {entry.segmentStart.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                      </span>
+                                      <span className="calendar-block-title">{entry.title}</span>
+                                      {isSoft && entry.promoted && <span className="calendar-block-meta">Promoted</span>}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        </div>
+                      </div>
+                      <div className="calendar-agenda-header">
+                        <h4>Agenda for this week</h4>
+                        <p className="muted small">Click any event block above to view details.</p>
+                      </div>
+                      <div className="calendar-list">
+                        {calendarEntries
+                          .filter(
+                            (item) =>
+                              selectedCalendarWeek &&
+                              item.startDate < selectedCalendarWeek.endExclusive &&
+                              item.endDate > selectedCalendarWeek.start,
+                          )
+                          .map((item) => {
+                            const start = item.startDate.toLocaleString();
+                            const end = item.endDate.toLocaleString();
+                            const isSoft = item.kind === "soft";
+                            const softEventId = "soft_event_id" in item ? item.soft_event_id : "";
+                            return (
+                              <div
+                                key={`${item.kind}-${item.id}`}
+                                className={`cal-row ${isSoft ? "clickable" : ""}`}
+                                onClick={isSoft ? () => openSoftEventEditor(softEventId) : undefined}
+                                role={isSoft ? "button" : undefined}
+                                tabIndex={isSoft ? 0 : undefined}
+                                onKeyDown={
+                                  isSoft
+                                    ? (e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                          e.preventDefault();
+                                          openSoftEventEditor(softEventId);
+                                        }
+                                      }
+                                    : undefined
+                                }
+                              >
+                                <div className={`cal-badge ${isSoft ? "soft" : "hard"}`}>{isSoft ? "Soft" : "Hard"}</div>
+                                <div className="cal-body">
+                                  <div className="cal-title">
+                                    {item.title}
+                                    {isSoft && item.promoted && <span className="pill" style={{ marginLeft: "0.5rem" }}>Promoted</span>}
+                                  </div>
+                                  <div className="cal-time">
+                                    {start} → {end}
+                                  </div>
+                                  {"description" in item && item.description && (
+                                    <div className="cal-note muted small">{item.description}</div>
+                                  )}
+                                  {"status" in item && item.status && (
+                                    <div className="cal-meta muted small">
+                                      Status: {item.status}
+                                      {"deferral_count" in item && item.deferral_count ? ` · Deferrals: ${item.deferral_count}` : ""}
+                                    </div>
+                                  )}
+                                  {"rationale" in item && item.rationale && (
+                                    <div className="cal-note muted small">{item.rationale}</div>
+                                  )}
+                                  {isSoft && (
+                                    <div className="cal-actions">
+                                      <button
+                                        type="button"
+                                        className="ghost pill-action"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openSoftEventEditor(softEventId);
+                                        }}
+                                      >
+                                        Edit
+                                      </button>
+                                      {item.status !== "completed" && item.status !== "skipped" && (
+                                        <>
+                                          <button
+                                            type="button"
+                                            className="ghost pill-action"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleMarkSoftSlotOutcome(item.id, "completed");
+                                            }}
+                                            disabled={promoteLoadingId === item.id}
+                                          >
+                                            Done
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="ghost pill-action"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleMarkSoftSlotOutcome(item.id, "not_performed");
+                                            }}
+                                            disabled={promoteLoadingId === item.id}
+                                          >
+                                            Didn't happen
+                                          </button>
+                                        </>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="ghost pill-action"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handlePromoteSoftSlot(item.id);
+                                        }}
+                                        disabled={promoteLoadingId === item.id}
+                                      >
+                                        {promoteLoadingId === item.id ? "Promoting…" : "Promote"}
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        {!calendarEntries.filter(
+                          (item) =>
+                            selectedCalendarWeek &&
+                            item.startDate < selectedCalendarWeek.endExclusive &&
+                            item.endDate > selectedCalendarWeek.start,
+                        ).length && <div className="muted">No events scheduled for this week.</div>}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="muted">No events scheduled.</div>
+                  )}
                 </div>
                 <div className="card">
                   <div className="card-head">
@@ -2806,6 +3620,182 @@ export default function App() {
                     <p className="muted">No unscheduled soft events.</p>
                   )}
                 </div>
+                <div className="card full">
+                  <div className="card-head">
+                    <div>
+                      <p className="eyebrow">Coverage audit</p>
+                      <h3>Deadline-bound tasks in the next 2 weeks</h3>
+                    </div>
+                    {objectiveCoverage && (
+                      <div className="pill-stack">
+                        <span className="pill">Total {objectiveCoverage.summary.total}</span>
+                        <span className="pill">Covered {objectiveCoverage.summary.covered}</span>
+                        <span className={`pill ${objectiveCoverage.summary.partial ? "coverage-pill-warning" : ""}`}>
+                          Partial {objectiveCoverage.summary.partial}
+                        </span>
+                        <span className={`pill ${objectiveCoverage.summary.uncovered ? "coverage-pill-danger" : ""}`}>
+                          Uncovered {objectiveCoverage.summary.uncovered}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  {!objectiveCoverage ? (
+                    <p className="muted">No objective coverage data yet.</p>
+                  ) : urgentCoverageItems.length ? (
+                    <div className="calendar-list">
+                      {urgentCoverageItems.map((item) => (
+                        <div key={item.task_id} className={`cal-row coverage-row ${item.coverage_state}`}>
+                          <div className={`cal-badge ${item.coverage_state === "uncovered" ? "hard" : "soft"}`}>
+                            {item.coverage_state}
+                          </div>
+                          <div className="cal-body">
+                            <div className="cal-title">{item.task_title}</div>
+                            <div className="cal-meta muted small">
+                              {item.objective_title}
+                              {item.due_at ? ` · Due ${formatDateTime(item.due_at)}` : ""}
+                            </div>
+                            <div className="cal-note muted small">
+                              Required {item.required_minutes ?? 0} min · Scheduled {item.scheduled_minutes} min
+                              {typeof item.missing_minutes === "number" ? ` · Missing ${item.missing_minutes} min` : ""}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">Every deadline-bound task in the window currently has slot coverage.</p>
+                  )}
+                </div>
+                <div className="card full">
+                  <div className="card-head">
+                    <div>
+                      <p className="eyebrow">Objectives</p>
+                      <h3>Objective tree</h3>
+                      <p className="muted small">Pick a root and inspect the full subtree that feeds the planner.</p>
+                    </div>
+                    <div className="card-head-actions">
+                      <label className="field objective-root-field">
+                        <span>Root objective</span>
+                        <select
+                          value={selectedObjectiveRootId || ""}
+                          onChange={(e) => {
+                            const nextRootId = e.target.value || null;
+                            setSelectedObjectiveRootId(nextRootId);
+                            refreshObjectives(nextRootId, nextRootId);
+                          }}
+                        >
+                          {objectiveRoots.map((root) => (
+                            <option key={root.id} value={root.id}>
+                              {root.title}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button className="ghost" onClick={() => refreshObjectives()} disabled={objectiveLoading}>
+                        {objectiveLoading ? "Refreshing…" : "Refresh objectives"}
+                      </button>
+                    </div>
+                  </div>
+                  {objectiveError && <div className="alert">{objectiveError}</div>}
+                  {objectiveLoading && !objectiveTree ? (
+                    <p className="muted">Loading objectives…</p>
+                  ) : objectiveTree ? (
+                    <div className="objective-layout">
+                      <div className="objective-column">
+                        <div className="objective-panel-title">
+                          {selectedObjectiveRoot?.title || objectiveTree.title}
+                        </div>
+                        <div className="objective-tree">
+                          {renderObjectiveNode(objectiveTree)}
+                        </div>
+                      </div>
+                      <div className="objective-column">
+                        {selectedObjectiveDetail ? (
+                          <div className="objective-detail">
+                            <div className="objective-detail-header">
+                              <div>
+                                <div className="cal-title">{selectedObjectiveDetail.title}</div>
+                                <div className="cal-meta muted small">
+                                  {formatObjectiveStatus(selectedObjectiveDetail.status)}
+                                  {selectedObjectiveDetail.deadline_at ? ` · Deadline ${formatDateTime(selectedObjectiveDetail.deadline_at)}` : ""}
+                                  {typeof selectedObjectiveDetail.remaining_effort_minutes === "number"
+                                    ? ` · Remaining ${selectedObjectiveDetail.remaining_effort_minutes} min`
+                                    : ""}
+                                </div>
+                              </div>
+                              <div className="pill-stack">
+                                <span className="pill">Priority {selectedObjectiveDetail.priority}</span>
+                                <span className="pill">{selectedObjectiveDetail.children.length} child node{selectedObjectiveDetail.children.length === 1 ? "" : "s"}</span>
+                              </div>
+                            </div>
+                            {selectedObjectiveDetail.description && (
+                              <p className="objective-copy">{selectedObjectiveDetail.description}</p>
+                            )}
+                            {selectedObjectiveDetail.notes && (
+                              <div className="objective-notes">
+                                <div className="objective-panel-title">Notes</div>
+                                <p className="objective-copy">{selectedObjectiveDetail.notes}</p>
+                              </div>
+                            )}
+                            <div className="objective-detail-grid">
+                              <div>
+                                <div className="objective-panel-title">Tasks</div>
+                                {selectedObjectiveDetail.tasks.length ? (
+                                  <div className="calendar-list">
+                                    {selectedObjectiveDetail.tasks.map((task) => (
+                                      <div key={task.id} className="cal-row">
+                                        <div className="cal-badge soft">{task.status}</div>
+                                        <div className="cal-body">
+                                          <div className="cal-title">{task.title}</div>
+                                          {task.description && <div className="cal-note muted small">{task.description}</div>}
+                                          <div className="cal-meta muted small">
+                                            {task.due_at ? `Due ${formatDateTime(task.due_at)}` : "No due date"}
+                                            {typeof task.remaining_effort_minutes === "number"
+                                              ? ` · Remaining ${task.remaining_effort_minutes} min`
+                                              : typeof task.estimated_effort_minutes === "number"
+                                                ? ` · Estimate ${task.estimated_effort_minutes} min`
+                                                : ""}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="muted">No tasks on this objective yet.</p>
+                                )}
+                              </div>
+                              <div>
+                                <div className="objective-panel-title">Recent logs</div>
+                                {selectedObjectiveDetail.logs.length ? (
+                                  <div className="calendar-list">
+                                    {selectedObjectiveDetail.logs.map((log) => (
+                                      <div key={log.id} className="cal-row">
+                                        <div className="cal-badge hard">{log.kind}</div>
+                                        <div className="cal-body">
+                                          <div className="cal-note">{log.text}</div>
+                                          <div className="cal-meta muted small">
+                                            {log.logged_at ? formatDateTime(log.logged_at) : "No timestamp"}
+                                            {typeof log.minutes_spent === "number" ? ` · ${log.minutes_spent} min` : ""}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="muted">No logs on this objective yet.</p>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <p className="muted">Select an objective node to inspect it.</p>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="muted">No objective roots exist yet.</p>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -2817,6 +3807,9 @@ export default function App() {
                 <h2>Scheduled tasks</h2>
               </div>
               <div className="main-actions">
+                <button className="primary" onClick={() => setShowSchedulerCreateModal(true)}>
+                  Create task
+                </button>
                 <button
                   className="ghost"
                   onClick={() => {
@@ -2832,39 +3825,7 @@ export default function App() {
                 </button>
               </div>
             </header>
-            <div className="settings-grid">
-              <div className="card">
-                <div className="card-head">
-                  <div>
-                    <p className="eyebrow">New</p>
-                    <h3>Create task</h3>
-                    <p className="muted small">Tasks run without user clarification.</p>
-                  </div>
-                </div>
-                <form onSubmit={handleCreateScheduledTask} className="settings-form">
-                  {schedulerError && <div className="error-banner">{schedulerError}</div>}
-                  <label className="field">
-                    <span>Prompt</span>
-                    <textarea name="prompt" rows={5} placeholder="Describe the task..." />
-                  </label>
-                  <label className="field">
-                    <span>Start time (local)</span>
-                    <input name="start_at" type="datetime-local" />
-                  </label>
-                  <label className="field">
-                    <span>Recurrence</span>
-                    <select name="recurrence" defaultValue="once">
-                      <option value="once">once</option>
-                      <option value="daily">daily</option>
-                      <option value="weekly">weekly</option>
-                      <option value="monthly">monthly</option>
-                    </select>
-                  </label>
-                  <div className="actions-row">
-                    <button className="primary" type="submit">Schedule</button>
-                  </div>
-                </form>
-              </div>
+            <div style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr", gap: "1rem", marginTop: "1rem" }}>
               <div className="card">
                 <div className="card-head">
                   <div>
@@ -2878,22 +3839,27 @@ export default function App() {
                 {scheduledTasks.length ? (
                   <div className="calendar-list">
                     {scheduledTasks.map((task) => (
-                      <div key={task.id} className="cal-row">
+                      <div key={task.id} className="cal-row clickable" onClick={() => handleOpenSchedulerDetail(task)} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handleOpenSchedulerDetail(task); } }}>
                         <div style={{ flex: 1 }}>
-                          <div className="cal-title">{task.prompt.slice(0, 80)}</div>
+                          <div className="cal-title">{task.prompt.slice(0, 100)}</div>
                           <div className="cal-time muted">
                             Next: {task.next_run_at ? new Date(task.next_run_at).toLocaleString() : "—"}
                           </div>
-                          <div className="muted small">Recurrence: {task.recurrence}</div>
+                          <div className="muted small">Recurrence: {task.recurrence} · Status: {task.status}</div>
                         </div>
-                        <div className="chat-actions">
+                        <div className="chat-actions" onClick={(e) => e.stopPropagation()}>
                           <button className="ghost pill-action" onClick={() => handleLoadRuns(task.id)}>
                             Logs
                           </button>
-                          {task.status !== "completed" && (
-                            <button className="ghost pill-action" onClick={() => handleToggleScheduledTask(task)}>
-                              {task.status === "paused" ? "Resume" : "Pause"}
-                            </button>
+                          {task.status !== "completed" && task.status !== "canceled" && (
+                            <>
+                              <button className="ghost pill-action" onClick={() => handleToggleScheduledTask(task)}>
+                                {task.status === "paused" ? "Resume" : "Pause"}
+                              </button>
+                              <button className="ghost pill-action" onClick={() => { setSelectedSchedulerTask(task); handleCancelSchedulerTask(); }} style={{ color: "var(--alert)" }}>
+                                Cancel
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -2903,7 +3869,7 @@ export default function App() {
                   <p className="muted">No scheduled tasks yet.</p>
                 )}
               </div>
-              <div className="card full">
+              <div className="card">
                 <div className="card-head">
                   <div>
                     <p className="eyebrow">Runs</p>
@@ -2914,7 +3880,7 @@ export default function App() {
                   <div className="muted">Loading runs…</div>
                 ) : selectedTaskId ? (
                   taskRuns.length ? (
-                    <div className="calendar-list">
+                    <div className="calendar-list" style={{ maxHeight: "600px", overflowY: "auto" }}>
                       {taskRuns.map((run) => (
                         <div key={run.id} className="cal-row">
                           <div style={{ flex: 1 }}>
@@ -3893,6 +4859,322 @@ export default function App() {
           </div>
         )}
 
+        {showCreateAssignmentModal && (
+          <div
+            className="modal-backdrop"
+            onClick={() => {
+              if (studySaving) return;
+              setShowCreateAssignmentModal(false);
+              setStudyAssignmentFile(null);
+              setStudyAssignmentFileDragOver(false);
+            }}
+          >
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Assignment</p>
+                  <h3>Create assignment</h3>
+                </div>
+                <button
+                  className="ghost"
+                  onClick={() => {
+                    if (studySaving) return;
+                    setShowCreateAssignmentModal(false);
+                    setStudyAssignmentFile(null);
+                    setStudyAssignmentFileDragOver(false);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              <form onSubmit={handleCreateStudyAssignment} className="modal-body">
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Title</span>
+                    <input
+                      value={studyAssignmentTitle}
+                      onChange={(e) => setStudyAssignmentTitle(e.target.value)}
+                      placeholder="Assignment title"
+                      required
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Due date</span>
+                    <input
+                      type="datetime-local"
+                      value={studyAssignmentDueAt}
+                      onChange={(e) => setStudyAssignmentDueAt(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Session count (optional)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={5}
+                      value={studyAssignmentSessionCount}
+                      onChange={(e) => setStudyAssignmentSessionCount(e.target.value)}
+                      placeholder="Auto"
+                    />
+                  </label>
+                  <label className="field full">
+                    <span>Description</span>
+                    <textarea
+                      rows={2}
+                      value={studyAssignmentDescription}
+                      onChange={(e) => setStudyAssignmentDescription(e.target.value)}
+                      placeholder="What is expected in this assignment?"
+                    />
+                  </label>
+                  <label className="field full">
+                    <span>Material text (optional)</span>
+                    <textarea
+                      rows={4}
+                      value={studyAssignmentMaterialText}
+                      onChange={(e) => setStudyAssignmentMaterialText(e.target.value)}
+                      placeholder="Paste assignment instructions, rubric, or key excerpts"
+                    />
+                  </label>
+                  <label className="field full">
+                    <span>Upload file (optional)</span>
+                    <input
+                      ref={assignmentFileInputRef}
+                      className="visually-hidden"
+                      type="file"
+                      accept=".pdf,.txt,.md,.markdown"
+                      onChange={handleAssignmentFileChange}
+                    />
+                    <div
+                      className={`study-file-dropzone${studyAssignmentFileDragOver ? " active" : ""}`}
+                      onDragOver={handleAssignmentFileDragOver}
+                      onDragLeave={handleAssignmentFileDragLeave}
+                      onDrop={handleAssignmentFileDrop}
+                      onClick={openAssignmentFilePicker}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openAssignmentFilePicker();
+                        }
+                      }}
+                    >
+                      <div className="study-file-dropzone-title">
+                        {studyAssignmentFile ? "Drop to replace file" : "Drag and drop assignment file here"}
+                      </div>
+                      <div className="study-file-dropzone-sub muted small">
+                        Supports PDF, TXT, and Markdown. You can also click to browse.
+                      </div>
+                      <button
+                        type="button"
+                        className="ghost study-file-picker-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openAssignmentFilePicker();
+                        }}
+                      >
+                        {studyAssignmentFile ? "Change file" : "Choose file"}
+                      </button>
+                    </div>
+                  </label>
+                </div>
+                {studyAssignmentFile && (
+                  <div className="study-file-chip">
+                    <span>{studyAssignmentFile.name}</span>
+                    <span className="muted small">{Math.max(1, Math.round(studyAssignmentFile.size / 1024))} KB</span>
+                  </div>
+                )}
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      if (studySaving) return;
+                      setShowCreateAssignmentModal(false);
+                      setStudyAssignmentFile(null);
+                      setStudyAssignmentFileDragOver(false);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button className="primary" type="submit" disabled={studySaving || !studySelectedCourseId}>
+                    {studySaving ? "Creating…" : "Create assignment"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showAssignmentDetailModal && selectedStudyAssignment && (
+          <div className="modal-backdrop" onClick={() => !studySaving && setShowAssignmentDetailModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Assignment detail</p>
+                  <h3>{selectedStudyAssignment.title}</h3>
+                </div>
+                <button className="ghost" onClick={() => !studySaving && setShowAssignmentDetailModal(false)}>Close</button>
+              </div>
+              <div className="modal-body">
+                <div className="study-topic-meta">
+                  Due {formatDateTime(selectedStudyAssignment.due_at)} · {selectedStudyAssignment.session_count} session{selectedStudyAssignment.session_count === 1 ? "" : "s"}
+                </div>
+                <div className="study-topic-meta">
+                  Status: {selectedStudyAssignment.status.replace("_", " ")}
+                </div>
+                {selectedStudyAssignment.description && (
+                  <div className="study-lesson-section">
+                    <h4>Description</h4>
+                    <p className="study-topic-meta">{selectedStudyAssignment.description}</p>
+                  </div>
+                )}
+                {selectedStudyAssignment.plan && (
+                  <div className="study-lesson-section">
+                    <h4>Plan</h4>
+                    <p className="study-topic-meta study-assignment-plan">{selectedStudyAssignment.plan}</p>
+                  </div>
+                )}
+                {selectedStudyAssignment.checklist?.length > 0 && (
+                  <div className="study-lesson-section">
+                    <h4>Checklist</h4>
+                    <ol className="study-assignment-checklist">
+                      {selectedStudyAssignment.checklist.map((step) => (
+                        <li key={`${selectedStudyAssignment.id}-${step.step_number}`}>
+                          <strong>{step.title || `Step ${step.step_number}`}</strong>
+                          {step.description ? ` - ${step.description}` : ""}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+                {selectedStudyAssignment.material_text && (
+                  <div className="study-lesson-section">
+                    <h4>Material text</h4>
+                    <pre className="study-log-dump">{selectedStudyAssignment.material_text}</pre>
+                  </div>
+                )}
+                {selectedStudyAssignment.has_uploaded_file && (
+                  <div className="study-lesson-section">
+                    <h4>Uploaded file</h4>
+                    <a
+                      className="ghost"
+                      href={getStudyAssignmentOriginalUrl(selectedStudyAssignment.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {selectedStudyAssignment.uploaded_file_name || "Download original file"}
+                    </a>
+                  </div>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => handleDeleteAssignment(selectedStudyAssignment)}
+                  disabled={studySaving}
+                >
+                  {studySaving ? "Deleting…" : "Delete assignment"}
+                </button>
+                <button type="button" className="ghost" onClick={() => !studySaving && setShowAssignmentDetailModal(false)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showSchedulerCreateModal && (
+          <div className="modal-backdrop" onClick={() => !schedulerSaving && setShowSchedulerCreateModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Scheduler</p>
+                  <h3>Create task</h3>
+                </div>
+                <button className="ghost" onClick={() => !schedulerSaving && setShowSchedulerCreateModal(false)}>Close</button>
+              </div>
+              <form onSubmit={handleCreateScheduledTask} className="modal-body">
+                {schedulerError && <div className="error-banner">{schedulerError}</div>}
+                <label className="field">
+                  <span>Prompt</span>
+                  <textarea name="prompt" rows={5} placeholder="Describe the task..." />
+                </label>
+                <label className="field">
+                  <span>Start time (local)</span>
+                  <input name="start_at" type="datetime-local" />
+                </label>
+                <label className="field">
+                  <span>Recurrence</span>
+                  <select name="recurrence" defaultValue="once">
+                    <option value="once">once</option>
+                    <option value="daily">daily</option>
+                    <option value="weekly">weekly</option>
+                    <option value="monthly">monthly</option>
+                  </select>
+                </label>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !schedulerSaving && setShowSchedulerCreateModal(false)}>Cancel</button>
+                  <button className="primary" type="submit" disabled={schedulerSaving}>
+                    {schedulerSaving ? "Scheduling…" : "Create task"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {showSchedulerDetailModal && selectedSchedulerTask && (
+          <div className="modal-backdrop" onClick={() => !schedulerSaving && setShowSchedulerDetailModal(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Task detail</p>
+                  <h3>{selectedSchedulerTask.prompt.slice(0, 60)}</h3>
+                </div>
+                <button className="ghost" onClick={() => !schedulerSaving && setShowSchedulerDetailModal(false)}>Close</button>
+              </div>
+              <div className="modal-body">
+                {schedulerError && <div className="error-banner">{schedulerError}</div>}
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                  <div className="field">
+                    <span className="eyebrow">Full prompt</span>
+                    <div style={{ background: "rgba(255, 255, 255, 0.02)", padding: "0.75rem", borderRadius: "8px", fontSize: "0.9rem", lineHeight: "1.5" }}>{selectedSchedulerTask.prompt}</div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                    <div className="field">
+                      <span className="eyebrow">Status</span>
+                      <div style={{ fontSize: "0.95rem", color: "var(--text)" }}><strong>{selectedSchedulerTask.status}</strong></div>
+                    </div>
+                    <div className="field">
+                      <span className="eyebrow">Recurrence</span>
+                      <div style={{ fontSize: "0.95rem", color: "var(--text)" }}><strong>{selectedSchedulerTask.recurrence}</strong></div>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                    <div className="field">
+                      <span className="eyebrow">Next run</span>
+                      <div style={{ fontSize: "0.95rem", color: "var(--muted)" }}>{selectedSchedulerTask.next_run_at ? new Date(selectedSchedulerTask.next_run_at).toLocaleString() : "—"}</div>
+                    </div>
+                    <div className="field">
+                      <span className="eyebrow">Last run</span>
+                      <div style={{ fontSize: "0.95rem", color: "var(--muted)" }}>{selectedSchedulerTask.last_run_at ? new Date(selectedSchedulerTask.last_run_at).toLocaleString() : "—"}</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => handleCancelSchedulerTask()} disabled={schedulerSaving || selectedSchedulerTask.status === "canceled"}>
+                    {schedulerSaving ? "Canceling…" : "Cancel task"}
+                  </button>
+                  <button type="button" className="ghost" onClick={() => !schedulerSaving && setShowSchedulerDetailModal(false)}>Close</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {studyLessonDetailId && selectedStudyLesson && (
           <div
             className="modal-backdrop"
@@ -4069,6 +5351,97 @@ export default function App() {
             </div>
           </div>
         )}
+        {calendarDetailEntry && (
+          <div
+            className="modal-backdrop"
+            onClick={() => setCalendarDetailEntry(null)}
+          >
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">{calendarDetailEntry.kind === "soft" ? "Soft event slot" : "Calendar event"}</p>
+                  <h3>{calendarDetailEntry.title}</h3>
+                </div>
+                <button className="ghost" onClick={() => setCalendarDetailEntry(null)}>Close</button>
+              </div>
+              <div className="modal-body">
+                <div className="cal-detail-grid">
+                  <div className="cal-detail-row">
+                    <span className="cal-detail-label">Time</span>
+                    <span>
+                      {calendarDetailEntry.segmentStart.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                      {" → "}
+                      {calendarDetailEntry.segmentEnd.toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                  {calendarDetailEntry.description && (
+                    <div className="cal-detail-row">
+                      <span className="cal-detail-label">Description</span>
+                      <span>{calendarDetailEntry.description}</span>
+                    </div>
+                  )}
+                  {calendarDetailEntry.kind === "soft" && (
+                    <>
+                      {calendarDetailEntry.status && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Status</span>
+                          <span>{calendarDetailEntry.status}</span>
+                        </div>
+                      )}
+                      {calendarDetailEntry.rationale && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Rationale</span>
+                          <span>{calendarDetailEntry.rationale}</span>
+                        </div>
+                      )}
+                      {typeof calendarDetailEntry.deferral_count === "number" && calendarDetailEntry.deferral_count > 0 && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Deferrals</span>
+                          <span>{calendarDetailEntry.deferral_count}</span>
+                        </div>
+                      )}
+                      {calendarDetailEntry.promoted && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Promoted</span>
+                          <span>Yes — added to hard calendar</span>
+                        </div>
+                      )}
+                      {calendarDetailEntry.soft_deadline && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Soft deadline</span>
+                          <span>{formatDateTime(calendarDetailEntry.soft_deadline)}</span>
+                        </div>
+                      )}
+                      {calendarDetailEntry.hard_deadline && (
+                        <div className="cal-detail-row">
+                          <span className="cal-detail-label">Hard deadline</span>
+                          <span>{formatDateTime(calendarDetailEntry.hard_deadline)}</span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                {calendarDetailEntry.kind === "soft" && calendarDetailEntry.soft_event_id && (
+                  <div className="modal-actions" style={{ marginTop: "1.25rem" }}>
+                    <div />
+                    <div className="modal-actions-right">
+                      <button className="ghost" onClick={() => setCalendarDetailEntry(null)}>Close</button>
+                      <button
+                        className="primary"
+                        onClick={() => {
+                          openSoftEventEditor(calendarDetailEntry.soft_event_id!);
+                          setCalendarDetailEntry(null);
+                        }}
+                      >
+                        Edit soft event
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {softEventModalOpen && (
           <div
             className="modal-backdrop"
@@ -4235,20 +5608,34 @@ export default function App() {
                 </div>
               )}
               <div className="modal-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    if (softEventLoading) return;
-                    setSoftEventModalOpen(false);
-                    setSoftEventDraft(null);
-                    setSoftEventMetadata(null);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button className="primary" onClick={saveSoftEventDraft} disabled={softEventLoading || !softEventDraft}>
-                  {softEventLoading ? "Saving…" : "Save"}
-                </button>
+                {softEventMode === "edit" && softEventDraft?.id ? (
+                  <button
+                    type="button"
+                    className="ghost pill-action danger"
+                    onClick={handleDeleteSoftEvent}
+                    disabled={softEventLoading}
+                  >
+                    {softEventLoading ? "Deleting…" : "Delete"}
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <div className="modal-actions-right">
+                  <button
+                    className="ghost"
+                    onClick={() => {
+                      if (softEventLoading) return;
+                      setSoftEventModalOpen(false);
+                      setSoftEventDraft(null);
+                      setSoftEventMetadata(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button className="primary" onClick={saveSoftEventDraft} disabled={softEventLoading || !softEventDraft}>
+                    {softEventLoading ? "Saving…" : "Save"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>

@@ -5,13 +5,16 @@ import ast
 import concurrent.futures
 import json
 import logging
+from math import ceil
 import mimetypes
 import os
 import re
+import tempfile
 import time as time_module
 from datetime import date, datetime, time, timedelta
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import fitz  # PyMuPDF
@@ -22,10 +25,21 @@ from django.utils import timezone
 
 from Corv.config import settings
 from openai_integration.services import ChatAIService
+from orchestration.objectives import ObjectiveService
 from orchestration.model_providers import resolve_provider, get_client
-from orchestration.models import Job, JobEvent, SoftEvent, SoftEventSlot, ToolFunction
+from orchestration.models import (
+    Job,
+    JobEvent,
+    ObjectiveTask,
+    SoftEvent,
+    SoftEventObjective,
+    SoftEventSlot,
+    SoftEventTask,
+    ToolFunction,
+)
 from orchestration.services import JobService, ModelConfigService, UserInfoService, UsageService
 from study.models import (
+    StudyAssignment,
     StudyCourse,
     StudyExam,
     StudyMaterial,
@@ -808,11 +822,23 @@ class StudyIngestionService:
                         updated_count += 1
                     else:
                         noop_count += 1
+                    ObjectiveService.ensure_topic_objective(existing)
                     StudyIngestionService._ensure_topic_mastery(course, existing)
                     touched_topics.append(existing)
                     continue
+                course_objective = ObjectiveService.ensure_course_objective(course)
                 topic = StudyTopic.objects.create(
                     course=course,
+                    objective=ObjectiveService.create_child_objective(
+                        parent=course_objective,
+                        title=f"Study {raw_name}",
+                        description=StudyIngestionService._build_rich_topic_description(raw_name, action),
+                        deadline_at=course_objective.deadline_at,
+                        estimated_effort_minutes=max(int(action.get("estimated_effort_minutes") or 60), 1),
+                        remaining_effort_minutes=max(int(action.get("estimated_effort_minutes") or 60), 1),
+                        priority=int(round(float(action.get("weight") or 1.0) * 10)),
+                        metadata={"source": "study_topic"},
+                    ),
                     name=raw_name,
                     description=StudyIngestionService._build_rich_topic_description(raw_name, action),
                     summary=_normalize_topic_summary(action.get("summary")),
@@ -822,6 +848,7 @@ class StudyIngestionService:
                     status=(str(action.get("status") or StudyTopic.STATUS_NOT_STARTED).strip() if str(action.get("status") or "").strip() in valid_statuses else StudyTopic.STATUS_NOT_STARTED),
                     metadata=StudyIngestionService._topic_metadata_from_action(action),
                 )
+                ObjectiveService.ensure_topic_objective(topic)
                 StudyIngestionService._ensure_topic_mastery(course, topic)
                 touched_topics.append(topic)
                 created_count += 1
@@ -881,6 +908,7 @@ class StudyIngestionService:
                     updated_count += 1
                 else:
                     noop_count += 1
+                ObjectiveService.ensure_topic_objective(topic)
                 StudyIngestionService._ensure_topic_mastery(course, topic)
                 touched_topics.append(topic)
                 continue
@@ -1606,6 +1634,7 @@ class StudyPlannerService:
             )
             topic.homework = assigned
             topic.save(update_fields=["homework", "updated_at"])
+            ObjectiveService.ensure_topic_objective(topic)
             if assigned:
                 topics_with_homework += 1
 
@@ -1624,6 +1653,16 @@ class StudyPlannerService:
         targets = plan.session_targets.select_related("course", "topic", "exam").order_by("target_date", "created_at")
         for target in targets:
             user_context = StudyPlannerService._build_study_user_context(plan.course, target)
+            topic_objective = None
+            topic_task_ids: list[str] = []
+            if target.topic_id and target.topic and getattr(target.topic, "objective_id", None):
+                topic_objective = ObjectiveService.ensure_topic_objective(target.topic)
+                topic_task_ids = [
+                    str(task.id)
+                    for task in topic_objective.tasks.exclude(
+                        status__in=[ObjectiveTask.STATUS_DONE, ObjectiveTask.STATUS_CANCELED]
+                    ).order_by("sort_order", "created_at")
+                ]
 
             title_bits = ["Study"]
             if plan.course.code:
@@ -1692,6 +1731,7 @@ class StudyPlannerService:
                     "study_plan_id": str(plan.id),
                     "study_session_target_id": str(target.id),
                     "study_course_id": str(plan.course_id),
+                    "objective_id": str(topic_objective.id) if topic_objective else None,
                     "study_topic_id": str(target.topic_id) if target.topic_id else None,
                     "study_topic_status": target.topic.status if target.topic else None,
                     "study_exam_id": str(target.exam_id) if target.exam_id else None,
@@ -1741,6 +1781,27 @@ class StudyPlannerService:
                 target.status = StudySessionTarget.STATUS_SCHEDULED
                 target.save(update_fields=["soft_event_ref", "status", "updated_at"])
                 created += 1
+            else:
+                soft_event = SoftEvent.objects.filter(id=target.soft_event_ref).first()
+
+            if soft_event and topic_objective:
+                SoftEventObjective.objects.update_or_create(
+                    soft_event=soft_event,
+                    objective=topic_objective,
+                    defaults={"role": SoftEventObjective.ROLE_PRIMARY},
+                )
+                existing_task_ids = set(
+                    SoftEventTask.objects.filter(soft_event=soft_event).values_list("task_id", flat=True)
+                )
+                desired_task_ids = {task_id for task_id in topic_task_ids}
+                stale_task_ids = existing_task_ids - desired_task_ids
+                if stale_task_ids:
+                    SoftEventTask.objects.filter(
+                        soft_event=soft_event,
+                        task_id__in=stale_task_ids,
+                    ).delete()
+                for task_id in desired_task_ids - existing_task_ids:
+                    SoftEventTask.objects.create(soft_event=soft_event, task_id=task_id)
 
         return {"created_soft_events": created, "updated_soft_events": updated}
 
@@ -1770,6 +1831,7 @@ class StudyPlannerService:
         *,
         source_material: Optional[StudyMaterial] = None,
     ) -> Dict[str, Any]:
+        ObjectiveService.ensure_course_objective(course)
         current_active = (
             StudyPlan.objects.filter(course=course, status=StudyPlan.STATUS_ACTIVE)
             .order_by("-created_at")
@@ -1794,7 +1856,7 @@ class StudyPlannerService:
             course,
             source_material=source_material,
         )
-        soft_event_stats = StudyPlannerService.sync_session_targets_to_soft_events(plan)
+        soft_event_stats = {"created_soft_events": 0, "updated_soft_events": 0}
         plan.summary = (
             f"Auto-recalculated from {course.topics.count()} topics"
             + (f" after processing {source_material.title}." if source_material else ".")
@@ -1835,10 +1897,26 @@ class StudyPlannerService:
             return []
         targets: List[StudySessionTarget] = []
         day_count = max((end_date - start_date).days + 1, 1)
-        topic_index = 0
-        for day_offset in range(day_count):
-            current_date = start_date + timedelta(days=day_offset)
-            topic = topics[topic_index % len(topics)]
+        topic_sequence: List[StudyTopic] = []
+        for topic in topics:
+            ObjectiveService.ensure_topic_objective(topic)
+            remaining_minutes = (
+                topic.objective.remaining_effort_minutes
+                or topic.objective.estimated_effort_minutes
+                or topic.estimated_effort_minutes
+                or preferred_minutes
+            )
+            topic_status = (topic.status or StudyTopic.STATUS_NOT_STARTED).strip()
+            if topic.passed or topic_status == StudyTopic.STATUS_MASTERED:
+                sessions_needed = 1
+            else:
+                sessions_needed = max(int(ceil(max(int(remaining_minutes), 1) / max(preferred_minutes, 1))), 1)
+            topic_sequence.extend([topic] * sessions_needed)
+        if not topic_sequence:
+            topic_sequence = topics
+
+        for index, topic in enumerate(topic_sequence):
+            current_date = start_date + timedelta(days=(index % day_count))
             topic_status = (topic.status or StudyTopic.STATUS_NOT_STARTED).strip()
             if topic_status == StudyTopic.STATUS_MASTERED:
                 focus = f"Light spaced review for {topic.name}."
@@ -1864,7 +1942,6 @@ class StudyPlannerService:
                 outcome=outcome,
             )
             targets.append(target)
-            topic_index += 1
         return targets
 
 
@@ -1946,6 +2023,471 @@ class StudyProcessingJobService:
             StudyProcessingJobService._update_job(
                 job,
                 summary=f"Failed processing {material.title}",
+                message=str(exc),
+            )
+            JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+            raise
+
+
+class AssignmentService:
+    """Service for study assignment management: PDF processing, planning, and soft event creation."""
+
+    logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def uploaded_file_path(assignment: StudyAssignment) -> str:
+        uploaded_file = getattr(assignment, "uploaded_file", None)
+        if uploaded_file:
+            try:
+                if getattr(uploaded_file, "path", ""):
+                    return str(uploaded_file.path).strip()
+            except Exception:
+                pass
+        return str((assignment.metadata or {}).get("uploaded_file_path") or "").strip()
+
+    @staticmethod
+    def uploaded_file_name(assignment: StudyAssignment) -> str:
+        uploaded_file = getattr(assignment, "uploaded_file", None)
+        if uploaded_file:
+            name = str(getattr(uploaded_file, "name", "") or "").strip()
+            if name:
+                return os.path.basename(name)
+        return str((assignment.metadata or {}).get("uploaded_file_name") or "").strip()
+
+    @staticmethod
+    def extract_material_text_from_file(
+        uploaded_file,
+        *,
+        course: Optional[StudyCourse] = None,
+        title: Optional[str] = None,
+        model: Optional[str] = None,
+        max_pages: int = 12,
+    ) -> str:
+        """Extract assignment material text from uploaded content with multimodal PDF support."""
+        if not uploaded_file:
+            return ""
+
+        file_name = str(getattr(uploaded_file, "name", "") or "").lower()
+        try:
+            raw = uploaded_file.read()
+        finally:
+            try:
+                uploaded_file.seek(0)
+            except Exception:
+                pass
+
+        if not raw:
+            return ""
+
+        if file_name.endswith(".pdf"):
+            # Prefer the same page-vision extraction flow used for study materials.
+            if course:
+                tmp_path = None
+                try:
+                    suffix = os.path.splitext(file_name)[1] or ".pdf"
+                    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                        tmp.write(raw)
+                        tmp_path = tmp.name
+
+                    pages = _render_material_to_pages(tmp_path, max_pages=max_pages)
+                    material_kind = getattr(StudyMaterial, "KIND_ASSIGNMENT", "assignment")
+                    fake_material = SimpleNamespace(
+                        course=course,
+                        title=title or "Assignment upload",
+                        kind=material_kind,
+                    )
+
+                    converted_blocks: List[str] = []
+                    for page in pages:
+                        extracted = StudyIngestionService._extract_page(
+                            fake_material,
+                            page,
+                            model=model or ModelConfigService.get_study_model(),
+                        )
+                        block = str(extracted.get("converted_markdown") or "").strip()
+                        if block:
+                            converted_blocks.append(block)
+
+                    merged = StudyIngestionService._merge_text_blocks(converted_blocks)
+                    if merged:
+                        return merged
+                except Exception:
+                    AssignmentService.logger.exception(
+                        "Assignment multimodal extraction failed; falling back to direct PDF text extraction"
+                    )
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+
+            # Fallback: direct text extraction via PDF text layer.
+            try:
+                doc = fitz.open(stream=raw, filetype="pdf")
+                try:
+                    parts: List[str] = []
+                    for page in doc:
+                        text = (page.get_text("text") or "").strip()
+                        if text:
+                            parts.append(text)
+                    return "\n\n".join(parts)
+                finally:
+                    doc.close()
+            except Exception:
+                AssignmentService.logger.exception("Failed to extract PDF text for assignment upload")
+                return ""
+
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return raw.decode(encoding).strip()
+            except Exception:
+                continue
+
+        return ""
+
+    @staticmethod
+    def extract_material_text_from_path(
+        file_path: str,
+        *,
+        course: Optional[StudyCourse] = None,
+        title: Optional[str] = None,
+        model: Optional[str] = None,
+        max_pages: int = 12,
+    ) -> str:
+        """Extract assignment material text from a saved file path."""
+        if not file_path or not os.path.exists(file_path):
+            return ""
+
+        file_name = str(file_path).lower()
+        if file_name.endswith(".pdf") and course:
+            try:
+                pages = _render_material_to_pages(file_path, max_pages=max_pages)
+                material_kind = getattr(StudyMaterial, "KIND_ASSIGNMENT", "assignment")
+                fake_material = SimpleNamespace(
+                    course=course,
+                    title=title or "Assignment upload",
+                    kind=material_kind,
+                )
+                converted_blocks: List[str] = []
+                for page in pages:
+                    extracted = StudyIngestionService._extract_page(
+                        fake_material,
+                        page,
+                        model=model or ModelConfigService.get_study_model(),
+                    )
+                    block = str(extracted.get("converted_markdown") or "").strip()
+                    if block:
+                        converted_blocks.append(block)
+                merged = StudyIngestionService._merge_text_blocks(converted_blocks)
+                if merged:
+                    return merged
+            except Exception:
+                AssignmentService.logger.exception(
+                    "Assignment multimodal extraction failed for %s; falling back", file_path
+                )
+
+        try:
+            with open(file_path, "rb") as fh:
+                raw = fh.read()
+        except Exception:
+            return ""
+
+        if file_name.endswith(".pdf"):
+            try:
+                doc = fitz.open(stream=raw, filetype="pdf")
+                try:
+                    parts: List[str] = []
+                    for page in doc:
+                        text = (page.get_text("text") or "").strip()
+                        if text:
+                            parts.append(text)
+                    return "\n\n".join(parts)
+                finally:
+                    doc.close()
+            except Exception:
+                AssignmentService.logger.exception("Failed fallback PDF text extraction for %s", file_path)
+                return ""
+
+        for encoding in ("utf-8", "utf-16", "latin-1"):
+            try:
+                return raw.decode(encoding).strip()
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def process_assignment_material(material_text: str, title: str, description: str, model: str = None) -> Tuple[str, List[dict], int]:
+        """
+        Process assignment material and generate plan, checklist, and session count.
+
+        Returns: (plan, checklist, session_count)
+        """
+        if not model:
+            model = ModelConfigService.get_study_model()
+
+        provider = resolve_provider(model)
+        client = get_client(provider)
+
+        # Generate plan and checklist
+        prompt = f"""You are analyzing a student assignment. Your task is to generate:
+1. A high-level approach/strategy (2-3 paragraphs)
+2. A detailed checklist of steps the student must complete
+3. An estimate of how many study sessions are needed
+
+Assignment: {title}
+Description: {description}
+
+Material:
+{material_text[:3000]}...
+
+Respond in JSON format:
+{{
+    "plan": "Here's how to approach this assignment...",
+    "checklist": [
+        {{"step_number": 1, "title": "Step title", "description": "Detailed description"}},
+        ...
+    ],
+    "estimated_sessions": <integer between 1 and 5>
+}}
+
+Be concise but thorough. For a fairly competent student working at a good pace:
+- 1-2 hours work = 1 session
+- 2-4 hours work = 2 sessions
+- 4+ hours work = 3+ sessions
+""" 
+
+        try:
+            if provider == "openai":
+                response = client.responses.create(
+                    model=model,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": prompt}],
+                        }
+                    ],
+                    text={"format": {"type": "json_object"}, "verbosity": "low"},
+                    reasoning={"effort": "low"},
+                    store=False,
+                    timeout=60,
+                )
+                usage_obj = getattr(response, "usage", None)
+                if usage_obj:
+                    UsageService.log_usage(
+                        source="study_assignment_processing",
+                        model=model,
+                        cache_mode=ModelConfigService.get_cache_mode(),
+                        usage=usage_obj,
+                        job=None,
+                    )
+                text = getattr(response, "output_text", "") or "{}"
+            else:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                    response_format={"type": "json_object"},
+                    timeout=60,
+                )
+                usage_obj = getattr(response, "usage", None)
+                if usage_obj:
+                    UsageService.log_usage(
+                        source="study_assignment_processing",
+                        model=model,
+                        cache_mode=ModelConfigService.get_cache_mode(),
+                        usage=usage_obj,
+                        job=None,
+                    )
+                text = "{}"
+                if getattr(response, "choices", None):
+                    text = response.choices[0].message.content or "{}"  # type: ignore[assignment]
+
+            # Extract JSON from response (may be wrapped in markdown code blocks)
+            json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+            if json_match:
+                text = json_match.group(1)
+
+            result = json.loads(text)
+            plan = str(result.get("plan", "") or "").strip()
+            checklist = result.get("checklist", [])
+            estimated_sessions = result.get("estimated_sessions", 1)
+
+            # Validate checklist format
+            if not isinstance(checklist, list):
+                checklist = []
+            for i, item in enumerate(checklist):
+                if not isinstance(item, dict):
+                    checklist[i] = {"step_number": i + 1, "title": "", "description": ""}
+                else:
+                    item.setdefault("step_number", i + 1)
+                    item.setdefault("title", "")
+                    item.setdefault("description", "")
+
+            estimated_sessions = max(1, min(int(estimated_sessions), 5))
+
+            return plan, checklist, estimated_sessions
+        except Exception as e:
+            AssignmentService.logger.exception(f"Failed to generate plan/checklist: {e}")
+            raise
+
+    @staticmethod
+    def create_soft_events_from_assignment(assignment) -> List[str]:
+        """
+        Backward-compatible wrapper around objective-based assignment planning.
+        """
+        return ObjectiveService.plan_assignment_objective(assignment)
+
+    @staticmethod
+    def cleanup_assignment_soft_events(assignment: StudyAssignment) -> Dict[str, int]:
+        """Delete soft events linked to this assignment, whether or not refs are complete."""
+        soft_event_ids = []
+        for raw in (assignment.soft_event_refs or []):
+            text = str(raw).strip()
+            if text:
+                soft_event_ids.append(text)
+        by_ref_qs = SoftEvent.objects.filter(id__in=soft_event_ids) if soft_event_ids else SoftEvent.objects.none()
+        by_meta_qs = SoftEvent.objects.filter(
+            metadata__source="study_assignment",
+            metadata__assignment_id=str(assignment.id),
+        )
+
+        ref_deleted, _ = by_ref_qs.delete()
+        meta_deleted, _ = by_meta_qs.delete()
+        return {
+            "deleted_by_ref": int(ref_deleted),
+            "deleted_by_metadata": int(meta_deleted),
+        }
+
+
+class AssignmentProcessingJobService:
+    @staticmethod
+    def _update_job(job: Job, *, progress: Optional[float] = None, summary: Optional[str] = None, message: str = "") -> None:
+        update_fields: List[str] = []
+        if progress is not None:
+            job.progress = progress
+            update_fields.append("progress")
+        if summary is not None:
+            job.user_visible_summary = summary
+            update_fields.append("user_visible_summary")
+        if update_fields:
+            job.save(update_fields=update_fields + ["updated_at"])
+        if message:
+            JobService.append_event(
+                job,
+                role="study",
+                event_type=JobEvent.EVENT_PROGRESS if progress is not None else JobEvent.EVENT_INFO,
+                visibility=JobEvent.VISIBILITY_USER,
+                message=message,
+            )
+
+    @staticmethod
+    def run_assignment_processing_job(
+        job_id: str,
+        assignment_id: str,
+        *,
+        uploaded_file_path: Optional[str] = None,
+        requested_session_count: Optional[int] = None,
+    ) -> StudyAssignment:
+        job = Job.objects.select_related("module", "active_function").get(id=job_id)
+        assignment = StudyAssignment.objects.select_related("course").get(id=assignment_id)
+        process_function = ToolFunction.objects.filter(manifest_id="study.process_material").first()
+
+        job.status = Job.STATUS_RUNNING
+        job.active_function = process_function
+        job.progress = 0.01
+        job.user_visible_summary = f"Processing assignment {assignment.title}"
+        job.save(update_fields=["status", "active_function", "progress", "user_visible_summary", "updated_at"])
+        JobService.append_event(
+            job,
+            role="study",
+            event_type=JobEvent.EVENT_STATE,
+            visibility=JobEvent.VISIBILITY_USER,
+            message=f"Started processing assignment {assignment.title}",
+        )
+
+        try:
+            AssignmentProcessingJobService._update_job(
+                job,
+                progress=0.2,
+                summary=f"Extracting assignment material for {assignment.title}",
+                message="Extracting content from uploaded material",
+            )
+
+            extracted_text = ""
+            if uploaded_file_path:
+                if not os.path.exists(uploaded_file_path):
+                    raise FileNotFoundError(f"Uploaded assignment file not found: {uploaded_file_path}")
+                extracted_text = AssignmentService.extract_material_text_from_path(
+                    uploaded_file_path,
+                    course=assignment.course,
+                    title=assignment.title,
+                )
+
+            combined_material = (assignment.material_text or "").strip()
+            if extracted_text:
+                combined_material = (
+                    f"{combined_material}\n\n{extracted_text}".strip() if combined_material else extracted_text
+                )
+            assignment.material_text = combined_material
+            assignment.save(update_fields=["material_text", "updated_at"])
+
+            if not assignment.material_text.strip():
+                raise ValueError(
+                    "No assignment material could be extracted. The uploaded file may be missing, unreadable, or empty."
+                )
+
+            AssignmentProcessingJobService._update_job(
+                job,
+                progress=0.6,
+                summary=f"Generating assignment plan for {assignment.title}",
+                message="Generating checklist and session estimate",
+            )
+
+            plan, checklist, auto_sessions = AssignmentService.process_assignment_material(
+                material_text=assignment.material_text,
+                title=assignment.title,
+                description=assignment.description,
+            )
+
+            if not plan.strip() and not checklist:
+                raise ValueError("Assignment processing returned no plan and no checklist.")
+
+            assignment.plan = plan
+            assignment.checklist = checklist
+            if not requested_session_count:
+                assignment.session_count = auto_sessions
+            assignment.status = StudyAssignment.STATUS_READY
+            assignment.save(update_fields=["plan", "checklist", "session_count", "status", "updated_at"])
+            ObjectiveService.ensure_assignment_objective(assignment)
+
+            AssignmentProcessingJobService._update_job(
+                job,
+                progress=1.0,
+                summary=f"Completed assignment processing for {assignment.title}",
+                message="Assignment plan ready",
+            )
+            JobService.mark_status(job, Job.STATUS_COMPLETED, progress=1.0)
+            return assignment
+        except Exception as exc:
+            if assignment.objective_id:
+                try:
+                    assignment.objective.delete()
+                except Exception:
+                    AssignmentService.logger.exception(
+                        "Failed to delete objective for assignment %s after processing failure",
+                        assignment.id,
+                    )
+                assignment.objective = None
+            assignment.status = StudyAssignment.STATUS_DRAFT
+            assignment.save(update_fields=["objective", "status", "updated_at"])
+            AssignmentProcessingJobService._update_job(
+                job,
+                summary=f"Failed assignment processing for {assignment.title}",
                 message=str(exc),
             )
             JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)

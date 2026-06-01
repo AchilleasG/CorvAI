@@ -323,6 +323,138 @@ class SoftEvent(models.Model):
         return f"{self.title}"
 
 
+class Objective(models.Model):
+    STATUS_ACTIVE = "active"
+    STATUS_COMPLETED = "completed"
+    STATUS_PAUSED = "paused"
+    STATUS_CANCELED = "canceled"
+
+    STATUS_CHOICES = [
+        (STATUS_ACTIVE, "Active"),
+        (STATUS_COMPLETED, "Completed"),
+        (STATUS_PAUSED, "Paused"),
+        (STATUS_CANCELED, "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    parent = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="children",
+    )
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    deadline_at = models.DateTimeField(null=True, blank=True)
+    estimated_effort_minutes = models.PositiveIntegerField(null=True, blank=True)
+    remaining_effort_minutes = models.PositiveIntegerField(null=True, blank=True)
+    priority = models.IntegerField(default=0)
+    notes = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    chat = models.ForeignKey(
+        Chat, null=True, blank=True, on_delete=models.SET_NULL, related_name="objectives"
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["deadline_at", "-priority", "created_at"]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["deadline_at"]),
+            models.Index(fields=["priority"]),
+            models.Index(fields=["parent"]),
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class ObjectiveTask(models.Model):
+    STATUS_TODO = "todo"
+    STATUS_IN_PROGRESS = "in_progress"
+    STATUS_DONE = "done"
+    STATUS_BLOCKED = "blocked"
+    STATUS_CANCELED = "canceled"
+
+    STATUS_CHOICES = [
+        (STATUS_TODO, "To Do"),
+        (STATUS_IN_PROGRESS, "In Progress"),
+        (STATUS_DONE, "Done"),
+        (STATUS_BLOCKED, "Blocked"),
+        (STATUS_CANCELED, "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    objective = models.ForeignKey(Objective, on_delete=models.CASCADE, related_name="tasks")
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_TODO)
+    estimated_effort_minutes = models.PositiveIntegerField(null=True, blank=True)
+    remaining_effort_minutes = models.PositiveIntegerField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["objective", "sort_order", "created_at"]
+        indexes = [
+            models.Index(fields=["objective", "status"]),
+            models.Index(fields=["due_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.objective.title} — {self.title}"
+
+
+class ObjectiveLog(models.Model):
+    KIND_WORK = "work"
+    KIND_NOTE = "note"
+    KIND_PROGRESS = "progress"
+    KIND_DECISION = "decision"
+    KIND_BLOCKER = "blocker"
+
+    KIND_CHOICES = [
+        (KIND_WORK, "Work"),
+        (KIND_NOTE, "Note"),
+        (KIND_PROGRESS, "Progress"),
+        (KIND_DECISION, "Decision"),
+        (KIND_BLOCKER, "Blocker"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    objective = models.ForeignKey(Objective, on_delete=models.CASCADE, related_name="logs")
+    task = models.ForeignKey(
+        ObjectiveTask,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="logs",
+    )
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES, default=KIND_NOTE)
+    text = models.TextField(blank=True, default="")
+    minutes_spent = models.PositiveIntegerField(null=True, blank=True)
+    logged_at = models.DateTimeField(auto_now_add=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-logged_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["objective", "logged_at"]),
+            models.Index(fields=["kind"]),
+        ]
+
+    def __str__(self):
+        return f"{self.objective.title} [{self.kind}]"
+
+
 class SoftEventSlot(models.Model):
     """
     Planned instance of a soft event in time (not necessarily written to calendar).
@@ -360,6 +492,7 @@ class SoftEventSlot(models.Model):
         default="",
         help_text="Correlation id from planner decisions.",
     )
+    call_made_at = models.DateTimeField(null=True, blank=True, help_text="When a call notification was made about this slot.")
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -370,10 +503,58 @@ class SoftEventSlot(models.Model):
             models.Index(fields=["start_at"]),
             models.Index(fields=["status"]),
             models.Index(fields=["notify_at"]),
+            models.Index(fields=["call_made_at"]),
         ]
 
     def __str__(self):
         return f"{self.soft_event.title} @ {self.start_at}"
+
+
+class SoftEventObjective(models.Model):
+    ROLE_PRIMARY = "primary"
+    ROLE_SECONDARY = "secondary"
+
+    ROLE_CHOICES = [
+        (ROLE_PRIMARY, "Primary"),
+        (ROLE_SECONDARY, "Secondary"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    soft_event = models.ForeignKey(SoftEvent, on_delete=models.CASCADE, related_name="objective_links")
+    objective = models.ForeignKey(Objective, on_delete=models.CASCADE, related_name="soft_event_links")
+    role = models.CharField(max_length=16, choices=ROLE_CHOICES, default=ROLE_PRIMARY)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["soft_event", "objective"],
+                name="unique_soft_event_objective_link",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["objective", "role"]),
+        ]
+
+
+class SoftEventTask(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    soft_event = models.ForeignKey(SoftEvent, on_delete=models.CASCADE, related_name="task_links")
+    task = models.ForeignKey(ObjectiveTask, on_delete=models.CASCADE, related_name="soft_event_links")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["soft_event", "task"],
+                name="unique_soft_event_task_link",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["task"]),
+        ]
 
 
 class ScheduledTask(models.Model):
@@ -384,11 +565,13 @@ class ScheduledTask(models.Model):
     STATUS_ACTIVE = "active"
     STATUS_PAUSED = "paused"
     STATUS_COMPLETED = "completed"
+    STATUS_CANCELED = "canceled"
 
     STATUS_CHOICES = [
         (STATUS_ACTIVE, "Active"),
         (STATUS_PAUSED, "Paused"),
         (STATUS_COMPLETED, "Completed"),
+        (STATUS_CANCELED, "Canceled"),
     ]
 
     RECURRENCE_ONCE = "once"

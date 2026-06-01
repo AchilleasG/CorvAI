@@ -6,6 +6,7 @@ from typing import Optional
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
 
+from orchestration.objectives import ObjectiveService
 from orchestration.registry import register_function
 from study.models import StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
 from study.services import StudyIngestionService, StudyPlannerService
@@ -102,6 +103,11 @@ def create_course(
         chat = Chat.objects.filter(id=chat_id).first()
 
     course = StudyCourse.objects.create(
+        objective=ObjectiveService.create_course_objective(
+            title=code or title,
+            description=description or "",
+            chat=chat,
+        ),
         title=title,
         code=code or "",
         description=description or "",
@@ -110,6 +116,7 @@ def create_course(
         status=status or StudyCourse.STATUS_ACTIVE,
         chat=chat,
     )
+    ObjectiveService.ensure_course_objective(course)
     return {"id": str(course.id), "title": course.title, "code": course.code, "status": course.status}
 
 
@@ -206,12 +213,23 @@ def create_topic(
     course = StudyCourse.objects.get(id=course_id)
     topic = StudyTopic.objects.create(
         course=course,
+        objective=ObjectiveService.create_child_objective(
+            parent=course.objective,
+            title=f"Study {name}",
+            description=description or "",
+            deadline_at=course.objective.deadline_at,
+            estimated_effort_minutes=max(estimated_effort_minutes or 1, 1),
+            remaining_effort_minutes=max(estimated_effort_minutes or 1, 1),
+            priority=int(round((weight or 1.0) * 10)),
+            metadata={"source": "study_topic"},
+        ),
         name=name,
         description=description or "",
         order_index=order_index or 0,
         estimated_effort_minutes=max(estimated_effort_minutes or 1, 1),
         weight=weight or 1.0,
     )
+    ObjectiveService.ensure_topic_objective(topic)
     return {"id": str(topic.id), "course_id": str(course.id), "name": topic.name}
 
 

@@ -7,7 +7,19 @@ from orchestration.registry import register_function
 from orchestration.services import ModelConfigService
 
 
-ALLOWED_KEYS = {"frontman_model", "caller_model", "user_info_embedding_model", "max_function_result_chars"}
+ALLOWED_KEYS = {
+    "frontman_model",
+    "caller_model",
+    "soft_planner_model",
+    "user_info_embedding_model",
+    "max_function_result_chars",
+}
+
+
+def _get_setting_value(key: str) -> str:
+    if key == "soft_planner_model":
+        return ModelConfigService.get_soft_planner_model()
+    return ModelConfigService.get_setting(key, "")
 
 
 def _validate_key(key: str):
@@ -36,20 +48,20 @@ def _validate_key(key: str):
 def list_settings():
     rows = []
     for key in sorted(ALLOWED_KEYS):
-        rows.append({"key": key, "value": ModelConfigService.get_setting(key, "")})
+        rows.append({"key": key, "value": _get_setting_value(key)})
     return {"settings": rows}
 
 
 @register_function(
     manifest_id="settings_admin.get_setting",
     module="settings_admin",
-    description="Get a single orchestration setting (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars).",
+    description="Get a single orchestration setting (frontman_model, caller_model, soft_planner_model, user_info_embedding_model, or max_function_result_chars).",
     params_schema={
         "type": "object",
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Setting key (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars)",
+                "description": "Setting key (frontman_model, caller_model, soft_planner_model, user_info_embedding_model, or max_function_result_chars)",
             }
         },
         "required": ["key"],
@@ -58,19 +70,19 @@ def list_settings():
 )
 def get_setting(key: str):
     _validate_key(key)
-    return {"key": key, "value": ModelConfigService.get_setting(key, "")}
+    return {"key": key, "value": _get_setting_value(key)}
 
 
 @register_function(
     manifest_id="settings_admin.set_setting",
     module="settings_admin",
-    description="Set a single orchestration setting (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars).",
+    description="Set a single orchestration setting (frontman_model, caller_model, soft_planner_model, user_info_embedding_model, or max_function_result_chars).",
     params_schema={
         "type": "object",
         "properties": {
             "key": {
                 "type": "string",
-                "description": "Setting key (frontman_model, caller_model, user_info_embedding_model, or max_function_result_chars)",
+                "description": "Setting key (frontman_model, caller_model, soft_planner_model, user_info_embedding_model, or max_function_result_chars)",
             },
             "value": {"type": "string", "description": "New value"},
         },

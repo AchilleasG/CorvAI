@@ -86,6 +86,7 @@ class FunctionCallOrchestrator:
             "Rules:\n"
             "- Only use function_ids from the catalog.\n"
             "- If you need output from a previous call, it is in prior_results.\n"
+            "- prior_results may contain context_summary when raw tool output was compressed; treat that summary as the trusted distilled memory of the call.\n"
             "- If you need user input, set ask_user and done=true.\n"
             "- Do NOT fabricate data; only summarize actual function results in prior_results.\n"
             "- If you lack the data, propose the function call to get it (do not mark done with a fabricated summary).\n"
@@ -219,41 +220,140 @@ class FunctionCallOrchestrator:
         return {"done": True, "summary": "Planner output could not be parsed."}
 
     @staticmethod
-    def _coerce_result_payload(result: FunctionResultPayload) -> Dict[str, Any]:
+    def _extract_ids_for_context(value: Any, *, limit: int = 12) -> List[str]:
+        found: List[str] = []
+
+        def walk(node: Any):
+            if len(found) >= limit:
+                return
+            if isinstance(node, dict):
+                for key, val in node.items():
+                    lowered = str(key).lower()
+                    if lowered.endswith("id") or lowered.endswith("_id") or lowered == "id":
+                        text = str(val).strip()
+                        if text and text not in found:
+                            found.append(text)
+                            if len(found) >= limit:
+                                return
+                    walk(val)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(value)
+        return found
+
+    @staticmethod
+    def _compact_result_context(
+        *,
+        function_id: str,
+        params: Dict[str, Any],
+        status: str,
+        data: Any,
+        error: Optional[str],
+    ) -> Dict[str, Any]:
+        payload = {
+            "function_id": function_id,
+            "status": status,
+            "params": params,
+            "error": error,
+            "data": data,
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+        use_ai_summary = len(serialized) > 900
+        summary_text = f"{function_id} returned status={status}."
+        key_facts: List[str] = []
+        warnings: List[str] = [str(error)] if error else []
+        important_ids = FunctionCallOrchestrator._extract_ids_for_context(data)
+
+        if isinstance(data, dict):
+            for key, value in list(data.items())[:10]:
+                if isinstance(value, list):
+                    key_facts.append(f"{key}: {len(value)} items")
+                elif isinstance(value, dict):
+                    key_facts.append(f"{key}: {len(value)} fields")
+                elif value is not None and value != "":
+                    key_facts.append(f"{key}: {str(value)[:120]}")
+        elif isinstance(data, list):
+            key_facts.append(f"Returned list with {len(data)} items")
+        elif data is not None:
+            key_facts.append(str(data)[:160])
+
+        if use_ai_summary:
+            try:
+                from openai_integration.services import ChatAIService
+
+                ai_summary = ChatAIService.summarize_tool_result_context(serialized)
+                summary_text = ai_summary.get("summary") or summary_text
+                key_facts = ai_summary.get("key_facts") or key_facts
+                important_ids = ai_summary.get("important_ids") or important_ids
+                warnings = ai_summary.get("warnings") or warnings
+            except Exception:
+                logger.exception("Failed to build AI context summary for %s", function_id)
+
+        return {
+            "summary": summary_text,
+            "key_facts": key_facts[:8],
+            "important_ids": important_ids[:12],
+            "warnings": warnings[:6],
+            "used_ai_summary": use_ai_summary,
+        }
+
+    @staticmethod
+    def _coerce_result_payload(
+        result: FunctionResultPayload,
+        *,
+        function_id: str,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
         """
         Ensure the stored result is bounded so the next prompt doesn't explode.
         """
         data = result.data
         coerced = {
-            "function_id": result.call_id,
+            "function_id": function_id,
+            "params": params,
             "status": result.status,
             "data": data,
             "error": result.error_summary,
         }
+        coerced["context_summary"] = FunctionCallOrchestrator._compact_result_context(
+            function_id=function_id,
+            params=params,
+            status=result.status,
+            data=data,
+            error=result.error_summary,
+        )
         if data is None:
             coerced["data"] = None
             coerced["truncated"] = False
             return coerced
 
         try:
-            import json
-
-            serialized = json.dumps(data, ensure_ascii=False)
+            serialized = json.dumps(data, ensure_ascii=False, default=str)
             max_chars = ModelConfigService.get_max_function_result_chars()
             if len(serialized) > max_chars:
-                coerced["data"] = None
+                coerced["data"] = {
+                    "summary": coerced["context_summary"].get("summary"),
+                    "key_facts": coerced["context_summary"].get("key_facts", []),
+                    "important_ids": coerced["context_summary"].get("important_ids", []),
+                    "warnings": coerced["context_summary"].get("warnings", []),
+                }
                 coerced["truncated"] = True
                 coerced["truncation_reason"] = (
-                    f"Result too large ({len(serialized)} chars > limit {max_chars}). Ask for narrower scope or filters."
+                    f"Result compressed for context ({len(serialized)} chars > limit {max_chars})."
                 )
+                return coerced
         except Exception:
-            coerced["truncated"] = False
+            pass
+        coerced["truncated"] = False
         return coerced
 
     @staticmethod
     def _summarize_result_for_log(
         result: FunctionResultPayload,
         *,
+        context_summary: Optional[Dict[str, Any]] = None,
         truncated: bool = False,
         truncation_reason: str = "",
         limit: int = 2000,
@@ -262,6 +362,17 @@ class FunctionCallOrchestrator:
         Text for tool-only log messages, truncated to avoid stuffing chat context.
         If truncated=True, emit only status + reason (no payload).
         """
+        if context_summary:
+            lines = [str(context_summary.get("summary") or result.status.upper()).strip()]
+            key_facts = [str(item).strip() for item in (context_summary.get("key_facts") or []) if str(item).strip()]
+            warnings = [str(item).strip() for item in (context_summary.get("warnings") or []) if str(item).strip()]
+            if key_facts:
+                lines.append("Key facts: " + "; ".join(key_facts[:5]))
+            if warnings:
+                lines.append("Warnings: " + "; ".join(warnings[:3]))
+            text = "\n".join(lines).strip()
+            if text:
+                return text[:limit]
         if truncated:
             reason = truncation_reason or "Result too large; data dropped."
             return f"{result.status.upper()}: {reason}"
@@ -364,9 +475,14 @@ class FunctionCallOrchestrator:
                         content=f"Calling {payload.function_id} with params: {payload.params}",
                         role="caller",
                         job=job,
+                        metadata={"include_in_context": False, "kind": "tool_call"},
                     )
                     result = FunctionRunnerService.run_function_call(payload, job=job)
-                    coerced = FunctionCallOrchestrator._coerce_result_payload(result)
+                    coerced = FunctionCallOrchestrator._coerce_result_payload(
+                        result,
+                        function_id=call["function_id"],
+                        params=call.get("params") or {},
+                    )
                     coerced["function_id"] = call["function_id"]
                     coerced["params"] = call.get("params") or {}
                     prior_results.append(coerced)
@@ -378,13 +494,15 @@ class FunctionCallOrchestrator:
                             ),
                             role="caller",
                             job=job,
+                            metadata={"include_in_context": False, "kind": "truncation_notice"},
                         )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
-                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
+                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, context_summary=coerced.get('context_summary'), truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
                         role="runner",
                         job=job,
                         call_id=result.call_id,
+                        metadata={"include_in_context": True, "kind": "function_result_summary"},
                     )
                     job.updated_at = (
                         job.updated_at
@@ -515,9 +633,14 @@ class FunctionCallOrchestrator:
                         content=f"Calling {payload.function_id} with params: {payload.params}",
                         role="caller",
                         job=job,
+                        metadata={"include_in_context": False, "kind": "tool_call"},
                     )
                     result = FunctionRunnerService.run_function_call(payload, job=job)
-                    coerced = FunctionCallOrchestrator._coerce_result_payload(result)
+                    coerced = FunctionCallOrchestrator._coerce_result_payload(
+                        result,
+                        function_id=call["function_id"],
+                        params=call.get("params") or {},
+                    )
                     coerced["function_id"] = call["function_id"]
                     coerced["params"] = call.get("params") or {}
                     prior_results.append(coerced)
@@ -529,13 +652,15 @@ class FunctionCallOrchestrator:
                             ),
                             role="caller",
                             job=job,
+                            metadata={"include_in_context": False, "kind": "truncation_notice"},
                         )
                     MessageRouter.tool_only_note(
                         chat_id=job.chat.id if job.chat else None,
-                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
+                        content=f"Function result: {FunctionCallOrchestrator._summarize_result_for_log(result, context_summary=coerced.get('context_summary'), truncated=coerced.get('truncated', False), truncation_reason=coerced.get('truncation_reason', ''))}",
                         role="runner",
                         job=job,
                         call_id=result.call_id,
+                        metadata={"include_in_context": True, "kind": "function_result_summary"},
                     )
                     JobService.heartbeat(job)
                     continue

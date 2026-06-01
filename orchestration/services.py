@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Dict, Optional, List, Iterable, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, List, Iterable, Tuple
 from datetime import datetime, timedelta
 
 from openai import OpenAI
@@ -27,6 +27,9 @@ from orchestration.schemas import (
     MessageEnvelope,
 )
 from Corv.config import settings
+
+if TYPE_CHECKING:
+    from orchestration.models import SoftEvent, SoftEventSlot
 
 logger = logging.getLogger(__name__)
 
@@ -557,6 +560,7 @@ class ModelConfigService:
 
     DEFAULT_FRONTMAN_MODEL = "gpt-5-mini"
     DEFAULT_CALLER_MODEL = "gpt-5-mini"
+    DEFAULT_SOFT_PLANNER_MODEL = ""
     DEFAULT_STUDY_MODEL = "gpt-5-mini"
     DEFAULT_CACHE_MODE = "off"
     DEFAULT_PRICING_JSON = "{}"
@@ -590,6 +594,12 @@ class ModelConfigService:
         )
 
     @staticmethod
+    def get_soft_planner_model() -> str:
+        return ModelConfigService.get_setting(
+            "soft_planner_model", ModelConfigService.get_caller_model()
+        )
+
+    @staticmethod
     def get_study_model() -> str:
         return ModelConfigService.get_setting(
             "study_model", ModelConfigService.DEFAULT_STUDY_MODEL
@@ -607,7 +617,10 @@ class ModelConfigService:
     @staticmethod
     def get_pricing() -> dict:
         """
-        Returns a dict of {model: {prompt_per_1k: float, completion_per_1k: float}} from setting 'model_pricing'.
+        Returns a dict of model pricing from setting 'model_pricing'.
+        Supported keys per model include:
+        - prompt_per_1k / cached_prompt_per_1k / completion_per_1k
+        - prompt_per_1m / cached_prompt_per_1m / completion_per_1m
         """
         import json
 
@@ -639,6 +652,16 @@ class ModelConfigService:
             return int(raw)
         except Exception:
             return ModelConfigService.DEFAULT_MAX_FUNCTION_RESULT_CHARS
+
+
+def _rate_per_token(pricing_row: dict, base_key: str) -> float:
+    per_1m = pricing_row.get(f"{base_key}_per_1m")
+    if per_1m is not None:
+        return float(per_1m) / 1_000_000
+    per_1k = pricing_row.get(f"{base_key}_per_1k")
+    if per_1k is not None:
+        return float(per_1k) / 1_000
+    return 0.0
 
 
 class SoftEventService:
@@ -777,26 +800,6 @@ class SoftEventService:
                 SoftEventService.logger.info(
                     "Created soft slot %s for %s", slot.id, se.id
                 )
-                if se.status == SoftEvent.STATUS_ACTIVE:
-                    try:
-                        ScheduledTask.objects.create(
-                            prompt=SoftEventService._build_soft_event_call_prompt(se, slot),
-                            recurrence=ScheduledTask.RECURRENCE_ONCE,
-                            start_at=start_at,
-                            next_run_at=start_at,
-                            status=ScheduledTask.STATUS_ACTIVE,
-                            metadata={
-                                "type": "soft_event_slot_call",
-                                "soft_event_id": str(se.id),
-                                "slot_id": str(slot.id),
-                                "slot_start_at": start_at.isoformat(),
-                                "slot_end_at": end_at.isoformat(),
-                            },
-                        )
-                    except Exception:
-                        SoftEventService.logger.exception(
-                            "Failed to schedule reminder for soft slot %s", slot.id
-                        )
             elif atype == "cancel_slot":
                 try:
                     slot = SoftEventSlot.objects.get(id=action["slot_id"])
@@ -961,15 +964,13 @@ class UsageService:
         prompt_cost = completion_cost = total_cost = 0
         if model in pricing:
             p = pricing[model]
-            pp = p.get("prompt_per_1k") or 0
-            cpp = p.get("cached_prompt_per_1k") or pp
-            cp = p.get("completion_per_1k") or 0
+            pp = _rate_per_token(p, "prompt")
+            cpp = _rate_per_token(p, "cached_prompt") or pp
+            cp = _rate_per_token(p, "completion")
             effective_cached = cached_prompt_tokens or 0
             effective_prompt = max((prompt_tokens or 0) - effective_cached, 0)
-            prompt_cost = (effective_prompt / 1000) * pp + (
-                effective_cached / 1000
-            ) * cpp
-            completion_cost = (completion_tokens / 1000) * cp
+            prompt_cost = (effective_prompt * pp) + (effective_cached * cpp)
+            completion_cost = completion_tokens * cp
             total_cost = prompt_cost + completion_cost
 
         UsageEvent.objects.create(

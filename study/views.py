@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from typing import Any, List, Optional
 from datetime import timedelta
 
@@ -12,13 +14,17 @@ from ninja.files import UploadedFile
 from django.http import FileResponse, QueryDict
 from django.http.multipartparser import MultiPartParser, MultiPartParserError
 
+from orchestration.objectives import ObjectiveService
 from orchestration.models import Job, ToolModule
 from orchestration.services import JobService
-from study.models import StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
-from study.services import StudyIngestionService, StudyPlannerService, _normalize_topic_summary
-from study.tasks import process_study_material_job
+from study.models import StudyAssignment, StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
+from study.services import AssignmentService, StudyIngestionService, StudyPlannerService, _normalize_topic_summary
+from study.tasks import process_study_material_job, process_study_assignment_job
+from study.api_schemas import StudyAssignmentOut, CreateStudyAssignmentIn
 
 router = Router(tags=["Study"])
+
+logger = logging.getLogger(__name__)
 
 
 def _request_json_dict(request) -> dict:
@@ -68,6 +74,7 @@ def _normalize_material_kind(kind: Optional[str]) -> str:
 def _course_payload(course: StudyCourse) -> dict:
     return {
         "id": str(course.id),
+        "objective_id": str(course.objective_id) if course.objective_id else None,
         "title": course.title,
         "code": course.code,
         "description": course.description,
@@ -130,6 +137,7 @@ def _topic_payload(topic: StudyTopic) -> dict:
     return {
         "id": str(topic.id),
         "course_id": str(topic.course_id),
+        "objective_id": str(topic.objective_id) if topic.objective_id else None,
         "name": topic.name,
         "description": topic.description,
         "summary": _normalize_topic_summary(topic.summary),
@@ -184,6 +192,41 @@ def _queue_material_processing_job(material: StudyMaterial, *, max_pages: Option
     return job
 
 
+def _queue_assignment_processing_job(
+    assignment: StudyAssignment,
+    *,
+    uploaded_file_path: Optional[str],
+    requested_session_count: Optional[int],
+) -> Job:
+    module = ToolModule.objects.filter(slug="study").first()
+    job = JobService.create_job(
+        chat=assignment.course.chat,
+        module=module,
+        user_visible_summary=f"Queued assignment processing for {assignment.title}",
+    )
+    job.metadata = {
+        "assignment_id": str(assignment.id),
+        "study_course_id": str(assignment.course_id),
+        "assignment_title": assignment.title,
+        "assignment_upload_path": uploaded_file_path,
+        "requested_session_count": requested_session_count,
+        "job_kind": "assignment_processing",
+    }
+    job.save(update_fields=["metadata", "updated_at"])
+    try:
+        process_study_assignment_job.delay(
+            str(job.id),
+            str(assignment.id),
+            uploaded_file_path=uploaded_file_path,
+            requested_session_count=requested_session_count,
+        )
+    except Exception as exc:
+        JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+        job.user_visible_summary = f"Failed to queue assignment processing for {assignment.title}"
+        job.save(update_fields=["user_visible_summary", "updated_at"])
+    return job
+
+
 @router.get("/courses")
 def list_courses(request, status: Optional[str] = None):
     qs = StudyCourse.objects.all().order_by("title")
@@ -202,7 +245,12 @@ def create_course(
     term_end_date: Optional[str] = Form(None),
     status: str = Form(StudyCourse.STATUS_ACTIVE),
 ):
+    objective = ObjectiveService.create_course_objective(
+        title=code or title,
+        description=description or "",
+    )
     course = StudyCourse.objects.create(
+        objective=objective,
         title=title,
         code=code or "",
         description=description or "",
@@ -210,6 +258,7 @@ def create_course(
         term_end_date=parse_date(term_end_date) if term_end_date else None,
         status=status or StudyCourse.STATUS_ACTIVE,
     )
+    ObjectiveService.ensure_course_objective(course)
     return _course_payload(course)
 
 
@@ -246,6 +295,7 @@ def update_course(
         fields.append("status")
     if fields:
         course.save(update_fields=fields + ["updated_at"])
+        ObjectiveService.ensure_course_objective(course)
     return _course_payload(course)
 
 
@@ -432,14 +482,26 @@ def create_topic(
     weight: float = Form(1.0),
 ):
     course = StudyCourse.objects.get(id=course_id)
+    objective = ObjectiveService.create_child_objective(
+        parent=course.objective,
+        title=f"Study {name}",
+        description=description or "",
+        deadline_at=course.objective.deadline_at,
+        estimated_effort_minutes=max(estimated_effort_minutes, 1),
+        remaining_effort_minutes=max(estimated_effort_minutes, 1),
+        priority=int(round((weight or 1.0) * 10)),
+        metadata={"source": "study_topic"},
+    )
     topic = StudyTopic.objects.create(
         course=course,
+        objective=objective,
         name=name,
         description=description or "",
         order_index=max(order_index, 0),
         estimated_effort_minutes=max(estimated_effort_minutes, 1),
         weight=weight or 1.0,
     )
+    ObjectiveService.ensure_topic_objective(topic)
     StudyPlannerService.assign_past_exam_homework_to_topics(course)
     return _topic_payload(topic)
 
@@ -665,6 +727,7 @@ def update_topic(
         topic.homework = normalized_homework
         fields.append("homework")
     topic.save(update_fields=fields + ["updated_at"] if fields else ["updated_at"])
+    ObjectiveService.ensure_topic_objective(topic)
     return _topic_payload(topic)
 
 
@@ -676,3 +739,134 @@ def delete_topic(request, topic_id: str):
     topic.delete()
     StudyPlannerService.assign_past_exam_homework_to_topics(course)
     return {"ok": True, "cleanup": cleanup_stats}
+
+
+# ===== ASSIGNMENTS =====
+
+
+@router.get("/assignments", response=List[StudyAssignmentOut])
+def list_assignments(request, course_id: Optional[str] = None, status: Optional[str] = None):
+    """List study assignments, optionally filtered by course and status."""
+    qs = StudyAssignment.objects.all()
+    if course_id:
+        qs = qs.filter(course_id=course_id)
+    if status:
+        qs = qs.filter(status=status)
+    return [StudyAssignmentOut.from_model(item) for item in qs.order_by("-created_at")]
+
+
+@router.get("/assignments/{assignment_id}", response=StudyAssignmentOut)
+def get_assignment(request, assignment_id: str):
+    """Get a study assignment by ID."""
+    return StudyAssignmentOut.from_model(StudyAssignment.objects.get(id=assignment_id))
+
+
+@router.get("/assignments/{assignment_id}/original")
+def get_assignment_original_file(request, assignment_id: str):
+    assignment = StudyAssignment.objects.get(id=assignment_id)
+    file_path = AssignmentService.uploaded_file_path(assignment)
+    if not file_path:
+        raise HttpError(404, "Assignment has no uploaded file")
+    if not os.path.exists(file_path):
+        raise HttpError(404, "Uploaded assignment file not found")
+    file_name = AssignmentService.uploaded_file_name(assignment) or os.path.basename(file_path)
+    return FileResponse(open(file_path, "rb"), filename=file_name)
+
+
+@router.post("/assignments", response=StudyAssignmentOut)
+def create_assignment(
+    request,
+    payload: Optional[CreateStudyAssignmentIn] = None,
+    course_id: Optional[str] = Form(None),
+    title: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    due_at: Optional[str] = Form(None),
+    material_text: Optional[str] = Form(None),
+    session_count: Optional[int] = Form(None),
+    file: Optional[UploadedFile] = File(None),
+):
+    """Create a new study assignment and process material -> plan + checklist."""
+    body_payload = _request_json_dict(request)
+
+    if payload is not None:
+        resolved_course_id = payload.course_id
+        resolved_title = payload.title
+        resolved_description = payload.description
+        resolved_due_at = payload.due_at
+        resolved_material_text = payload.material_text
+        resolved_session_count = payload.session_count
+    else:
+        resolved_course_id = course_id or body_payload.get("course_id")
+        resolved_title = title or body_payload.get("title")
+        resolved_description = description or body_payload.get("description")
+        resolved_due_at = due_at or body_payload.get("due_at")
+        resolved_material_text = material_text or body_payload.get("material_text")
+        resolved_session_count = session_count if session_count is not None else body_payload.get("session_count")
+
+    if not resolved_course_id:
+        raise HttpError(400, "course_id is required")
+    if not resolved_title:
+        raise HttpError(400, "title is required")
+    parsed_due_at = parse_datetime(str(resolved_due_at or ""))
+    if not parsed_due_at:
+        raise HttpError(400, "due_at must be a valid ISO datetime")
+    if timezone.is_naive(parsed_due_at):
+        parsed_due_at = timezone.make_aware(parsed_due_at)
+
+    course = StudyCourse.objects.get(id=resolved_course_id)
+    combined_material_text = str(resolved_material_text or "").strip()
+
+    try:
+        requested_session_count = max(1, int(resolved_session_count or 1))
+    except (TypeError, ValueError):
+        requested_session_count = 1
+
+    # Create assignment in processing status and queue async processing job.
+    assignment = StudyAssignment.objects.create(
+        course=course,
+        title=str(resolved_title).strip(),
+        description=str(resolved_description or ""),
+        due_at=parsed_due_at,
+        uploaded_file=file,
+        material_text=combined_material_text,
+        status=StudyAssignment.STATUS_PROCESSING,
+        session_count=requested_session_count,
+        metadata={
+            "uploaded_file_name": (file.name if file else "") or "",
+        },
+    )
+
+    _queue_assignment_processing_job(
+        assignment,
+        uploaded_file_path=AssignmentService.uploaded_file_path(assignment) if file else None,
+        requested_session_count=resolved_session_count,
+    )
+
+    return StudyAssignmentOut.from_model(assignment)
+
+
+@router.patch("/assignments/{assignment_id}", response=StudyAssignmentOut)
+def update_assignment_status(request, assignment_id: str, status: str):
+    """Update assignment status."""
+    assignment = StudyAssignment.objects.get(id=assignment_id)
+
+    if status == StudyAssignment.STATUS_IN_PROGRESS and assignment.status == StudyAssignment.STATUS_READY:
+        assignment.status = status
+        assignment.save(update_fields=["status", "updated_at"])
+        ObjectiveService.ensure_assignment_objective(assignment)
+
+    elif status in [StudyAssignment.STATUS_SUBMITTED, StudyAssignment.STATUS_GRADED]:
+        assignment.status = status
+        assignment.save(update_fields=["status", "updated_at"])
+        objective = ObjectiveService.ensure_assignment_objective(assignment) if assignment.objective_id else None
+        if objective:
+            ObjectiveService.archive_objective_soft_events(objective)
+
+    return StudyAssignmentOut.from_model(assignment)
+
+
+@router.delete("/assignments/{assignment_id}")
+def delete_assignment(request, assignment_id: str):
+    assignment = StudyAssignment.objects.get(id=assignment_id)
+    assignment.delete()
+    return {"ok": True}

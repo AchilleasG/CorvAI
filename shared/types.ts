@@ -83,6 +83,7 @@ export type UsageSummary = {
 export type SettingsPayload = {
   frontman_model?: string;
   caller_model?: string;
+  soft_planner_model?: string;
   study_model?: string;
   cache_mode?: string;
   max_function_result_chars?: number;
@@ -90,6 +91,7 @@ export type SettingsPayload = {
 
 export type StudyCourse = {
   id: string;
+  objective_id?: string | null;
   title: string;
   code: string;
   description: string;
@@ -151,6 +153,7 @@ export type StudyExam = {
 export type StudyTopic = {
   id: string;
   course_id: string;
+  objective_id?: string | null;
   name: string;
   description: string;
   summary: string;
@@ -216,11 +219,28 @@ export type SoftEventDetail = {
   metadata?: Record<string, unknown>;
 };
 
+export type SoftSlotOutcomeResult = {
+  slot_id: string;
+  soft_event_id: string;
+  status: string;
+  linked_task_ids: string[];
+  completed_task_ids: string[];
+};
+
 export type CalendarReplanResult = {
   actions: number;
   created: number;
   updated: number;
   trace_id: string;
+  objective_sync?: {
+    purged_soft_events?: number;
+    canceled_slots?: number;
+    scanned_objectives: number;
+    relevant_objectives: number;
+    planned_soft_events: number;
+    archived_soft_events: number;
+  };
+  coverage?: ObjectiveCoverageSnapshot;
 };
 
 export type CombinedCalendar = {
@@ -229,6 +249,78 @@ export type CombinedCalendar = {
   hard_events: HardCalendarEvent[];
   soft_slots: SoftSlot[];
   soft_events_unscheduled: SoftEventUnscheduled[];
+  objective_coverage?: ObjectiveCoverageSnapshot;
+};
+
+export type ObjectiveTask = {
+  id: string;
+  objective_id: string;
+  title: string;
+  description: string;
+  status: string;
+  estimated_effort_minutes?: number | null;
+  remaining_effort_minutes?: number | null;
+  due_at?: string | null;
+  sort_order: number;
+  metadata?: Record<string, unknown>;
+  completed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ObjectiveLog = {
+  id: string;
+  objective_id: string;
+  task_id?: string | null;
+  kind: string;
+  text: string;
+  minutes_spent?: number | null;
+  logged_at?: string | null;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+export type Objective = {
+  id: string;
+  parent_id?: string | null;
+  title: string;
+  description: string;
+  status: string;
+  deadline_at?: string | null;
+  estimated_effort_minutes?: number | null;
+  remaining_effort_minutes?: number | null;
+  priority: number;
+  notes: string;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+  completed_at?: string | null;
+  tasks: ObjectiveTask[];
+  logs: ObjectiveLog[];
+  children: Objective[];
+};
+
+export type ObjectiveCoverageItem = {
+  task_id: string;
+  objective_id: string;
+  objective_title: string;
+  task_title: string;
+  due_at?: string | null;
+  required_minutes?: number | null;
+  scheduled_minutes: number;
+  missing_minutes?: number | null;
+  coverage_state: "covered" | "partial" | "uncovered";
+  slot_ids: string[];
+};
+
+export type ObjectiveCoverageSnapshot = {
+  summary: {
+    total: number;
+    covered: number;
+    partial: number;
+    uncovered: number;
+  };
+  items: ObjectiveCoverageItem[];
 };
 
 export type ScheduledTask = {
@@ -238,7 +330,7 @@ export type ScheduledTask = {
   start_at?: string | null;
   next_run_at?: string | null;
   last_run_at?: string | null;
-  status: "active" | "paused" | "completed";
+  status: "active" | "paused" | "completed" | "canceled";
   is_running: boolean;
   created_at?: string | null;
   updated_at?: string | null;
@@ -288,6 +380,31 @@ export type CallSession = {
   started_at?: string | null;
   ended_at?: string | null;
   summary: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type StudyAssignmentChecklistItem = {
+  step_number: number;
+  title: string;
+  description: string;
+};
+
+export type StudyAssignment = {
+  id: string;
+  course_id: string;
+  objective_id: string;
+  title: string;
+  description: string;
+  due_at: string;
+  material_text?: string | null;
+  plan?: string | null;
+  checklist: StudyAssignmentChecklistItem[];
+  session_count: number;
+  soft_event_refs: string[];
+  has_uploaded_file?: boolean;
+  uploaded_file_name?: string | null;
+  status: "draft" | "processing" | "ready" | "in_progress" | "submitted" | "graded";
   created_at?: string | null;
   updated_at?: string | null;
 };

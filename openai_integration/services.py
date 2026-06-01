@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Dict, Any, List
 import hashlib
 import logging
+import json
 from django.db import transaction
 
 from chat.models import ChatMessage  # adjust if your app label differs
@@ -348,6 +349,86 @@ class ChatAIService:
         if getattr(resp, "choices", None):
             return (resp.choices[0].message.content or "").strip()  # type: ignore[assignment]
         return ""
+
+    @staticmethod
+    def summarize_tool_result_context(
+        context_text: str,
+        model: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Compress tool output into structured memory that preserves actionable facts.
+        """
+        instructions = (
+            "You are compressing tool output for future AI context. Preserve useful facts while removing noise. "
+            "Return JSON only with keys: summary, key_facts, important_ids, warnings. "
+            "summary must be 1-2 short sentences. key_facts must be a short list of concrete facts or counts. "
+            "important_ids should contain only identifiers that may matter in later steps. warnings should list blockers, risks, or ambiguities. "
+            "Do not invent facts. If data is missing, say so briefly."
+        )
+
+        model_name = model or ModelConfigService.get_caller_model()
+        provider = resolve_provider(model_name)
+
+        try:
+            if provider == "openai":
+                input_seq = [
+                    {
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": instructions}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": context_text}],
+                    },
+                ]
+                resp = get_client("openai").responses.create(
+                    model=model_name,
+                    input=input_seq,
+                    text={"format": {"type": "json_object"}},
+                    reasoning={"effort": "low"},
+                    tools=[],
+                    store=False,
+                    timeout=30,
+                )
+                raw = getattr(resp, "output_text", "{}") or "{}"
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return {
+                        "summary": str(data.get("summary") or "").strip(),
+                        "key_facts": [str(item).strip() for item in (data.get("key_facts") or []) if str(item).strip()],
+                        "important_ids": [str(item).strip() for item in (data.get("important_ids") or []) if str(item).strip()],
+                        "warnings": [str(item).strip() for item in (data.get("warnings") or []) if str(item).strip()],
+                    }
+            else:
+                messages = [
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": context_text},
+                ]
+                resp = get_client("xai").chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    timeout=30,
+                )
+                if getattr(resp, "choices", None):
+                    raw = resp.choices[0].message.content or "{}"  # type: ignore[assignment]
+                    data = json.loads(raw)
+                    if isinstance(data, dict):
+                        return {
+                            "summary": str(data.get("summary") or "").strip(),
+                            "key_facts": [str(item).strip() for item in (data.get("key_facts") or []) if str(item).strip()],
+                            "important_ids": [str(item).strip() for item in (data.get("important_ids") or []) if str(item).strip()],
+                            "warnings": [str(item).strip() for item in (data.get("warnings") or []) if str(item).strip()],
+                        }
+        except Exception:
+            logger.exception("Failed to summarize tool result context")
+
+        return {
+            "summary": "Tool call completed.",
+            "key_facts": [],
+            "important_ids": [],
+            "warnings": [],
+        }
 
     @staticmethod
     def should_end_call(context_text: str, model: str | None = None) -> bool:
