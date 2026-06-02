@@ -5,6 +5,7 @@ import logging
 from celery import shared_task
 
 from study.services import AssignmentProcessingJobService, StudyProcessingJobService
+from study.services import StudyTopicAudiobookService
 
 logger = logging.getLogger(__name__)
 
@@ -41,4 +42,31 @@ def process_study_assignment_job(
         return {"job_id": job_id, "assignment_id": assignment_id, "status": "completed"}
     except Exception as exc:
         logger.exception("Study assignment job failed for %s: %s", assignment_id, exc)
+        raise
+
+
+@shared_task(name="study.tasks.generate_study_topic_audiobook_job")
+def generate_study_topic_audiobook_job(
+    job_id: str,
+    topic_id: str,
+    version_id: str,
+    model: str | None = None,
+    voice: str = "alloy",
+):
+    try:
+        StudyTopicAudiobookService.run_audiobook_generation_job(
+            job_id,
+            topic_id,
+            version_id,
+            model=model,
+            voice=voice,
+        )
+        return {
+            "job_id": job_id,
+            "topic_id": topic_id,
+            "version_id": version_id,
+            "status": "completed",
+        }
+    except Exception as exc:
+        logger.exception("Study topic audiobook job failed for %s: %s", topic_id, exc)
         raise

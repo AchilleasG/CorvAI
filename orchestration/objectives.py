@@ -81,6 +81,56 @@ class ObjectiveService:
         return None
 
     @staticmethod
+    def _nearest_course_deadline(course) -> Optional[datetime]:
+        # Use the next upcoming exam so objectives stay relevant after past exams.
+        now = timezone.now()
+        exam_dt = (
+            course.exams.exclude(scheduled_at__isnull=True)
+            .filter(scheduled_at__gte=now)
+            .order_by("scheduled_at")
+            .values_list("scheduled_at", flat=True)
+            .first()
+        )
+        if exam_dt:
+            return exam_dt
+        # All exams have passed — fall back to the most recent one.
+        exam_dt = (
+            course.exams.exclude(scheduled_at__isnull=True)
+            .order_by("-scheduled_at")
+            .values_list("scheduled_at", flat=True)
+            .first()
+        )
+        if exam_dt:
+            return exam_dt
+        if course.term_end_date:
+            term_end = datetime.combine(course.term_end_date, datetime.min.time()).replace(hour=23, minute=59)
+            if timezone.is_naive(term_end):
+                return timezone.make_aware(term_end)
+            return term_end
+        return None
+
+    @staticmethod
+    def _upcoming_exams_for_objective(objective: Objective) -> list[dict[str, Any]]:
+        from study.models import StudyExam
+        study_course_id = (objective.metadata or {}).get("study_course_id")
+        if not study_course_id:
+            return []
+        now = timezone.now()
+        exams = (
+            StudyExam.objects
+            .filter(course_id=study_course_id, scheduled_at__isnull=False, scheduled_at__gte=now)
+            .order_by("scheduled_at")
+        )
+        return [
+            {
+                "title": exam.title,
+                "kind": exam.kind,
+                "scheduled_at": exam.scheduled_at.isoformat(),
+            }
+            for exam in exams
+        ]
+
+    @staticmethod
     def create_course_objective(*, title: str, description: str = "", chat=None) -> Objective:
         return Objective.objects.create(
             title=title[:255],
@@ -998,6 +1048,7 @@ class ObjectiveService:
                     ],
                     "slot_history": ObjectiveService._slot_history_for_objective(objective),
                     "recent_logs": ObjectiveService._recent_logs_for_objective(objective),
+                    "upcoming_exams": ObjectiveService._upcoming_exams_for_objective(objective),
                 }
             )
         return snapshot

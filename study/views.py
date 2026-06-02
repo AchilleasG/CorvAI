@@ -17,9 +17,28 @@ from django.http.multipartparser import MultiPartParser, MultiPartParserError
 from orchestration.objectives import ObjectiveService
 from orchestration.models import Job, ToolModule
 from orchestration.services import JobService
-from study.models import StudyAssignment, StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
-from study.services import AssignmentService, StudyIngestionService, StudyPlannerService, _normalize_topic_summary
-from study.tasks import process_study_material_job, process_study_assignment_job
+from study.models import (
+    StudyAssignment,
+    StudyCourse,
+    StudyExam,
+    StudyMaterial,
+    StudyPlan,
+    StudySessionTarget,
+    StudyTopic,
+    StudyTopicAudiobookVersion,
+)
+from study.services import (
+    AssignmentService,
+    StudyIngestionService,
+    StudyPlannerService,
+    StudyTopicAudiobookService,
+    _normalize_topic_summary,
+)
+from study.tasks import (
+    process_study_material_job,
+    process_study_assignment_job,
+    generate_study_topic_audiobook_job,
+)
 from study.api_schemas import StudyAssignmentOut, CreateStudyAssignmentIn
 
 router = Router(tags=["Study"])
@@ -155,6 +174,27 @@ def _topic_payload(topic: StudyTopic) -> dict:
     }
 
 
+def _topic_audiobook_payload(version: StudyTopicAudiobookVersion) -> dict:
+    return {
+        "id": str(version.id),
+        "topic_id": str(version.topic_id),
+        "version_number": version.version_number,
+        "status": version.status,
+        "job_id": str(version.job_id) if version.job_id else None,
+        "generation_notes": version.generation_notes,
+        "script_markdown": version.script_markdown,
+        "audio_url": version.audio_file.url if version.audio_file else None,
+        "audio_file_name": version.audio_file.name.split("/")[-1] if version.audio_file else None,
+        "audio_mime_type": version.audio_mime_type,
+        "tts_voice": version.tts_voice,
+        "tts_model": version.tts_model,
+        "processing_error": version.processing_error,
+        "metadata": version.metadata,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+        "updated_at": version.updated_at.isoformat() if version.updated_at else None,
+    }
+
+
 def _job_payload(job: Job) -> dict:
     return {
         "id": str(job.id),
@@ -225,6 +265,53 @@ def _queue_assignment_processing_job(
         job.user_visible_summary = f"Failed to queue assignment processing for {assignment.title}"
         job.save(update_fields=["user_visible_summary", "updated_at"])
     return job
+
+
+def _queue_topic_audiobook_job(
+    topic: StudyTopic,
+    *,
+    generation_notes: str = "",
+    model: Optional[str] = None,
+    voice: str = "alloy",
+) -> tuple[StudyTopicAudiobookVersion, Job]:
+    module = ToolModule.objects.filter(slug="study").first()
+    job = JobService.create_job(
+        chat=topic.course.chat,
+        module=module,
+        user_visible_summary=f"Queued audiobook generation for {topic.name}",
+    )
+    version = StudyTopicAudiobookService.create_topic_audiobook_version(
+        topic,
+        generation_notes=generation_notes,
+        job=job,
+    )
+    job.metadata = {
+        "study_topic_id": str(topic.id),
+        "study_course_id": str(topic.course_id),
+        "study_topic_name": topic.name,
+        "audiobook_version_id": str(version.id),
+        "job_kind": "topic_audiobook_generation",
+        "generation_notes": generation_notes,
+        "voice": voice,
+        "model": model,
+    }
+    job.save(update_fields=["metadata", "updated_at"])
+    try:
+        generate_study_topic_audiobook_job.delay(
+            str(job.id),
+            str(topic.id),
+            str(version.id),
+            model=model,
+            voice=voice,
+        )
+    except Exception as exc:
+        version.status = StudyTopicAudiobookVersion.STATUS_FAILED
+        version.processing_error = str(exc)
+        version.save(update_fields=["status", "processing_error", "updated_at"])
+        JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+        job.user_visible_summary = f"Failed to queue audiobook generation for {topic.name}"
+        job.save(update_fields=["user_visible_summary", "updated_at"])
+    return version, job
 
 
 @router.get("/courses")
@@ -739,6 +826,46 @@ def delete_topic(request, topic_id: str):
     topic.delete()
     StudyPlannerService.assign_past_exam_homework_to_topics(course)
     return {"ok": True, "cleanup": cleanup_stats}
+
+
+@router.get("/topics/{topic_id}/audiobooks")
+def list_topic_audiobooks(request, topic_id: str):
+    topic = StudyTopic.objects.get(id=topic_id)
+    versions = topic.audiobook_versions.all().order_by("-version_number", "-created_at")
+    return {"versions": [_topic_audiobook_payload(version) for version in versions]}
+
+
+@router.post("/topics/{topic_id}/audiobooks")
+def create_topic_audiobook(
+    request,
+    topic_id: str,
+    generation_notes: str = Form(""),
+    voice: str = Form("alloy"),
+    model: Optional[str] = Form(None),
+):
+    topic = StudyTopic.objects.select_related("course").get(id=topic_id)
+    version, job = _queue_topic_audiobook_job(
+        topic,
+        generation_notes=generation_notes,
+        model=model,
+        voice=voice,
+    )
+    return {
+        "version": _topic_audiobook_payload(version),
+        "job": _job_payload(job),
+    }
+
+
+@router.get("/topics/{topic_id}/audiobooks/{version_id}/download")
+def download_topic_audiobook(request, topic_id: str, version_id: str):
+    version = StudyTopicAudiobookVersion.objects.select_related("topic").get(id=version_id, topic_id=topic_id)
+    if not version.audio_file:
+        raise HttpError(404, "Audiobook file is not ready for this version")
+    file_name = version.audio_file.name.split("/")[-1] or f"topic-{topic_id}-v{version.version_number}.mp3"
+    try:
+        return FileResponse(version.audio_file.open("rb"), filename=file_name)
+    except FileNotFoundError:
+        raise HttpError(404, "Audiobook file not found")
 
 
 # ===== ASSIGNMENTS =====

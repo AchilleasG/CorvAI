@@ -170,6 +170,25 @@ export type StudyTopic = {
   updated_at?: string | null;
 };
 
+export type StudyTopicAudiobookVersion = {
+  id: string;
+  topic_id: string;
+  version_number: number;
+  status: "pending" | "processing" | "ready" | "failed";
+  job_id?: string | null;
+  generation_notes: string;
+  script_markdown: string;
+  audio_url?: string | null;
+  audio_file_name?: string | null;
+  audio_mime_type: string;
+  tts_voice: string;
+  tts_model: string;
+  processing_error: string;
+  metadata?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
 export type HardCalendarEvent = {
   id: string;
   title: string;

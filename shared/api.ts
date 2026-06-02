@@ -17,6 +17,7 @@ import {
   StudyMaterialProcessResponse,
   StudyExam,
   StudyTopic,
+  StudyTopicAudiobookVersion,
   StudyAssignment,
   SoftEventDetail,
   ScheduledTask,
@@ -383,6 +384,28 @@ export function createApi(config: ApiConfig) {
     },
     deleteStudyTopic(topic_id: string) {
       return request<{ ok: boolean }>(config, `/study/topics/${topic_id}`, { method: "DELETE" });
+    },
+    fetchTopicAudiobookVersions(topic_id: string) {
+      return request<{ versions: StudyTopicAudiobookVersion[] }>(config, `/study/topics/${topic_id}/audiobooks`);
+    },
+    createTopicAudiobookVersion(payload: {
+      topic_id: string;
+      generation_notes?: string;
+      voice?: string;
+      model?: string;
+    }) {
+      const formData = new FormData();
+      if (payload.generation_notes !== undefined) formData.append("generation_notes", payload.generation_notes);
+      if (payload.voice) formData.append("voice", payload.voice);
+      if (payload.model) formData.append("model", payload.model);
+      return request<{ version: StudyTopicAudiobookVersion; job: Job }>(
+        config,
+        `/study/topics/${payload.topic_id}/audiobooks`,
+        { method: "POST", body: formData },
+      );
+    },
+    getTopicAudiobookDownloadUrl(topic_id: string, version_id: string) {
+      return `${config.baseUrl}/study/topics/${topic_id}/audiobooks/${version_id}/download`;
     },
     uploadStudyMaterial(payload: {
       course_id: string;

@@ -40,6 +40,9 @@ import {
   deleteStudyExam,
   updateStudyTopic,
   deleteStudyTopic,
+  fetchTopicAudiobookVersions,
+  createTopicAudiobookVersion,
+  getTopicAudiobookDownloadUrl,
   fetchScheduledTasks,
   createScheduledTask,
   updateScheduledTask,
@@ -75,6 +78,7 @@ import {
   StudyExam,
   StudyMaterial,
   StudyTopic,
+  StudyTopicAudiobookVersion,
   StudyAssignment,
   UserMessage,
   CallSession,
@@ -574,6 +578,9 @@ export default function App() {
   const [studyFileDragOver, setStudyFileDragOver] = useState(false);
   const [studyMaterialText, setStudyMaterialText] = useState("");
   const [studyLessonDetailId, setStudyLessonDetailId] = useState<string | null>(null);
+  const [topicAudiobookVersions, setTopicAudiobookVersions] = useState<Record<string, StudyTopicAudiobookVersion[]>>({});
+  const [topicAudiobookLoadingByTopic, setTopicAudiobookLoadingByTopic] = useState<Record<string, boolean>>({});
+  const [topicAudiobookNotesByTopic, setTopicAudiobookNotesByTopic] = useState<Record<string, string>>({});
   const [studyOutputModalKind, setStudyOutputModalKind] = useState<StudyOutputModalKind | null>(null);
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
   const [showCreateLessonModal, setShowCreateLessonModal] = useState(false);
@@ -1170,6 +1177,23 @@ export default function App() {
       setStudyTopicStatusDrafts(
         Object.fromEntries(topics.map((topic) => [topic.id, topic.status || "not_started"])),
       );
+
+      if (topics.length) {
+        const versionResults = await Promise.all(
+          topics.map(async (topic) => {
+            try {
+              const response = await fetchTopicAudiobookVersions(topic.id);
+              return [topic.id, response.versions || []] as const;
+            } catch {
+              return [topic.id, [] as StudyTopicAudiobookVersion[]] as const;
+            }
+          }),
+        );
+        setTopicAudiobookVersions(Object.fromEntries(versionResults));
+      } else {
+        setTopicAudiobookVersions({});
+      }
+
       setStudyJobs((prev) => {
         const filtered = (jobsResp || []).filter((job) => job.module_slug === "study");
         return JSON.stringify(prev) !== JSON.stringify(filtered) ? filtered : prev;
@@ -1584,6 +1608,37 @@ export default function App() {
 
   function handleDeleteStudyExam(exam: StudyExam) {
     setStudyDeleteTarget({ kind: "exam", id: exam.id, label: exam.title });
+  }
+
+  async function loadTopicAudiobooks(topicId: string) {
+    try {
+      setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topicId]: true }));
+      const response = await fetchTopicAudiobookVersions(topicId);
+      setTopicAudiobookVersions((prev) => ({ ...prev, [topicId]: response.versions || [] }));
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to load lesson audiobooks");
+    } finally {
+      setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topicId]: false }));
+    }
+  }
+
+  async function handleGenerateTopicAudiobook(topic: StudyTopic) {
+    try {
+      setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topic.id]: true }));
+      setStudyError(null);
+      const notes = (topicAudiobookNotesByTopic[topic.id] || "").trim();
+      await createTopicAudiobookVersion({
+        topic_id: topic.id,
+        generation_notes: notes || undefined,
+      });
+      await Promise.all([loadTopicAudiobooks(topic.id), refreshJobs()]);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to queue lesson audiobook generation");
+    } finally {
+      setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topic.id]: false }));
+    }
   }
 
   async function handleUploadStudyMaterial(e: React.FormEvent<HTMLFormElement>) {

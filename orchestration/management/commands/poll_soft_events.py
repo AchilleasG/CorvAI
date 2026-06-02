@@ -14,6 +14,7 @@ from orchestration.soft_scheduler import (
 from orchestration.soft_planner import plan_soft_window
 from orchestration.services import SoftEventService
 from orchestration.models import OrchestrationSetting
+from orchestration.objectives import ObjectiveService
 from orchestration.tools.calendar import list_events
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class Command(BaseCommand):
 
         # Collect current soft state.
         soft_state = collect_window_state(window_start, window_end)
+        soft_state["objective_inputs"] = ObjectiveService.scheduler_snapshot(window_start, window_end)
 
         # Hash and compare to last snapshot.
         prev_hash = OrchestrationSetting.objects.filter(key="soft_window_hash").first()

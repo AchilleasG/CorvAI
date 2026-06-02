@@ -40,6 +40,7 @@ from orchestration.models import (
 from orchestration.services import JobService, ModelConfigService, UserInfoService, UsageService
 from study.models import (
     StudyAssignment,
+    StudyTopicAudiobookVersion,
     StudyCourse,
     StudyExam,
     StudyMaterial,
@@ -146,6 +147,287 @@ class RenderedPage:
 
 class StudyJobCanceled(Exception):
     pass
+
+
+AUDIOBOOK_SCRIPT_INSTRUCTIONS = (
+    "You are creating a complete, audio-first lesson audiobook script for a university student. "
+    "The script must be detailed, structured, and fully sufficient for solving lesson-related exercises. "
+    "Use all provided context: lesson description, summary, metadata, homework assignments, and matching past-exam material. "
+    "Explain concepts from fundamentals to advanced exam tactics. "
+    "Include worked examples, common traps, and step-by-step solving heuristics. "
+    "Do not omit difficult parts. Do not hand-wave. "
+    "Write clear spoken language suitable for text-to-speech. "
+    "Return markdown only, with sections:\n"
+    "1) Lesson overview\n"
+    "2) Core theory and formulas\n"
+    "3) How to solve exercise types\n"
+    "4) Worked walkthroughs\n"
+    "5) Typical mistakes and how to avoid them\n"
+    "6) Rapid revision checklist\n"
+    "7) Practice prompts for self-testing"
+)
+
+
+class StudyTopicAudiobookService:
+    """Generate and persist detailed lesson audiobook versions."""
+
+    @staticmethod
+    def _collect_topic_context(topic: StudyTopic) -> dict[str, Any]:
+        course = topic.course
+        homework = topic.homework if isinstance(topic.homework, list) else []
+        exams = list(course.exams.exclude(scheduled_at__isnull=True).order_by("scheduled_at"))
+        topic_materials = list(
+            StudyMaterial.objects.filter(course=course)
+            .filter(models.Q(topic=topic) | models.Q(kind__in=[StudyMaterial.KIND_PAST_EXAM, "exam", "assignment", "worksheet"]))
+            .order_by("-created_at")[:12]
+        )
+
+        material_blobs: list[dict[str, Any]] = []
+        for material in topic_materials:
+            excerpt = "\n\n".join(
+                part
+                for part in [
+                    (material.theory_markdown or "").strip(),
+                    (material.solved_markdown or "").strip(),
+                    (material.converted_markdown or "").strip(),
+                ]
+                if part
+            )
+            if len(excerpt) > 6000:
+                excerpt = excerpt[:6000] + "\n\n...[truncated]"
+            material_blobs.append(
+                {
+                    "id": str(material.id),
+                    "kind": material.kind,
+                    "title": material.title,
+                    "excerpt": excerpt,
+                    "notes": material.notes,
+                }
+            )
+
+        return {
+            "topic": {
+                "id": str(topic.id),
+                "name": topic.name,
+                "description": topic.description,
+                "summary": _normalize_topic_summary(topic.summary),
+                "status": topic.status,
+                "estimated_effort_minutes": topic.estimated_effort_minutes,
+                "weight": topic.weight,
+                "metadata": topic.metadata or {},
+            },
+            "course": {
+                "id": str(course.id),
+                "title": course.title,
+                "code": course.code,
+                "description": course.description,
+                "term_end_date": course.term_end_date.isoformat() if course.term_end_date else None,
+            },
+            "homework": homework,
+            "upcoming_exams": [
+                {
+                    "title": exam.title,
+                    "kind": exam.kind,
+                    "scheduled_at": exam.scheduled_at.isoformat() if exam.scheduled_at else None,
+                    "notes": exam.notes,
+                }
+                for exam in exams
+            ],
+            "materials": material_blobs,
+        }
+
+    @staticmethod
+    def _generate_script(topic: StudyTopic, *, model: Optional[str] = None) -> tuple[str, str]:
+        model_name = model or ModelConfigService.get_study_model()
+        provider = resolve_provider(model_name)
+        context = StudyTopicAudiobookService._collect_topic_context(topic)
+        prompt = (
+            f"{AUDIOBOOK_SCRIPT_INSTRUCTIONS}\n\n"
+            f"Topic audiobook request for lesson: {topic.name}\n"
+            f"Data:\n{json.dumps(context, ensure_ascii=True, default=str)}"
+        )
+
+        if provider == "openai":
+            response = get_client("openai").with_options(max_retries=0).responses.create(
+                model=model_name,
+                input=[{"role": "developer", "content": [{"type": "input_text", "text": prompt}]}],
+                text={"format": {"type": "text"}, "verbosity": "high"},
+                reasoning={"effort": "medium"},
+                store=False,
+                timeout=120,
+            )
+            usage_obj = getattr(response, "usage", None)
+            if usage_obj:
+                UsageService.log_usage(
+                    source="study_audiobook_script",
+                    model=model_name,
+                    cache_mode=ModelConfigService.get_cache_mode(),
+                    usage=usage_obj,
+                    job=None,
+                )
+            script = (getattr(response, "output_text", None) or "").strip()
+            return script, model_name
+
+        response = get_client("xai").chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": AUDIOBOOK_SCRIPT_INSTRUCTIONS},
+                {"role": "user", "content": f"Data:\n{json.dumps(context, ensure_ascii=True, default=str)}"},
+            ],
+            timeout=120,
+        )
+        usage_obj = getattr(response, "usage", None)
+        if usage_obj:
+            UsageService.log_usage(
+                source="study_audiobook_script",
+                model=model_name,
+                cache_mode=ModelConfigService.get_cache_mode(),
+                usage=usage_obj,
+                job=None,
+            )
+        script = ""
+        if getattr(response, "choices", None):
+            script = (response.choices[0].message.content or "").strip()  # type: ignore[assignment]
+        return script, model_name
+
+    @staticmethod
+    def _render_audio(script: str, *, voice: str = "alloy", model: str = "gpt-4o-mini-tts") -> tuple[bytes, str]:
+        if not script.strip():
+            raise ValueError("Cannot render empty audiobook script")
+        response = get_client("openai").audio.speech.create(
+            model=model,
+            voice=voice,
+            input=script,
+            format="mp3",
+        )
+        audio_bytes = response.read()
+        if not audio_bytes:
+            raise RuntimeError("TTS returned empty audio")
+        return audio_bytes, "audio/mpeg"
+
+    @staticmethod
+    def create_topic_audiobook_version(
+        topic: StudyTopic,
+        *,
+        generation_notes: str = "",
+        job: Optional[Job] = None,
+    ) -> StudyTopicAudiobookVersion:
+        last_version = (
+            StudyTopicAudiobookVersion.objects.filter(topic=topic)
+            .order_by("-version_number")
+            .first()
+        )
+        next_version = int(last_version.version_number) + 1 if last_version else 1
+        version = StudyTopicAudiobookVersion.objects.create(
+            topic=topic,
+            version_number=next_version,
+            status=StudyTopicAudiobookVersion.STATUS_PENDING,
+            generation_notes=(generation_notes or "").strip(),
+            job=job,
+            metadata={"source": "study_topic_audiobook"},
+        )
+        return version
+
+    @staticmethod
+    def _update_job(job: Job, *, progress: Optional[float] = None, summary: Optional[str] = None, message: str = "") -> None:
+        update_fields: List[str] = []
+        if progress is not None:
+            job.progress = progress
+            update_fields.append("progress")
+        if summary is not None:
+            job.user_visible_summary = summary
+            update_fields.append("user_visible_summary")
+        if update_fields:
+            job.save(update_fields=update_fields + ["updated_at"])
+        if message:
+            JobService.append_event(
+                job,
+                role="study",
+                event_type=JobEvent.EVENT_PROGRESS if progress is not None else JobEvent.EVENT_INFO,
+                visibility=JobEvent.VISIBILITY_USER,
+                message=message,
+            )
+
+    @staticmethod
+    def run_audiobook_generation_job(
+        job_id: str,
+        topic_id: str,
+        version_id: str,
+        *,
+        model: Optional[str] = None,
+        voice: str = "alloy",
+    ) -> StudyTopicAudiobookVersion:
+        job = Job.objects.select_related("module", "active_function").get(id=job_id)
+        topic = StudyTopic.objects.select_related("course").get(id=topic_id)
+        version = StudyTopicAudiobookVersion.objects.get(id=version_id)
+
+        process_function = ToolFunction.objects.filter(manifest_id="study.generate_topic_audiobook").first()
+        job.status = Job.STATUS_RUNNING
+        job.active_function = process_function
+        job.progress = 0.02
+        job.user_visible_summary = f"Generating audiobook for {topic.name}"
+        job.save(update_fields=["status", "active_function", "progress", "user_visible_summary", "updated_at"])
+
+        version.status = StudyTopicAudiobookVersion.STATUS_PROCESSING
+        version.processing_error = ""
+        version.save(update_fields=["status", "processing_error", "updated_at"])
+
+        try:
+            StudyTopicAudiobookService._update_job(
+                job,
+                progress=0.15,
+                summary=f"Drafting audiobook script for {topic.name}",
+                message=f"Drafting audiobook script for lesson {topic.name}",
+            )
+            script_markdown, script_model = StudyTopicAudiobookService._generate_script(topic, model=model)
+            if not script_markdown.strip():
+                raise RuntimeError("Model returned empty audiobook script")
+
+            version.script_markdown = script_markdown
+            version.tts_voice = voice
+            version.tts_model = "gpt-4o-mini-tts"
+            version.metadata = {
+                **(version.metadata or {}),
+                "script_model": script_model,
+                "topic_id": str(topic.id),
+                "course_id": str(topic.course_id),
+                "generated_at": timezone.now().isoformat(),
+            }
+            version.save(update_fields=["script_markdown", "tts_voice", "tts_model", "metadata", "updated_at"])
+
+            StudyTopicAudiobookService._update_job(
+                job,
+                progress=0.65,
+                summary=f"Rendering audiobook audio for {topic.name}",
+                message="Converting script to audio",
+            )
+            audio_bytes, mime_type = StudyTopicAudiobookService._render_audio(script_markdown, voice=voice)
+            filename = f"topic-{topic.id}-v{version.version_number}.mp3"
+            version.audio_file.save(filename, ContentFile(audio_bytes), save=False)
+            version.audio_mime_type = mime_type
+            version.status = StudyTopicAudiobookVersion.STATUS_READY
+            version.processing_error = ""
+            version.save(update_fields=["audio_file", "audio_mime_type", "status", "processing_error", "updated_at"])
+
+            StudyTopicAudiobookService._update_job(
+                job,
+                progress=1.0,
+                summary=f"Audiobook ready for {topic.name}",
+                message=f"Audiobook version v{version.version_number} is ready",
+            )
+            JobService.mark_status(job, Job.STATUS_COMPLETED, progress=1.0)
+            return version
+        except Exception as exc:
+            version.status = StudyTopicAudiobookVersion.STATUS_FAILED
+            version.processing_error = str(exc)
+            version.save(update_fields=["status", "processing_error", "updated_at"])
+            StudyTopicAudiobookService._update_job(
+                job,
+                summary=f"Audiobook generation failed for {topic.name}",
+                message=str(exc),
+            )
+            JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+            raise
 
 
 def _safe_json_load(text: str) -> Dict[str, Any]:
@@ -1811,15 +2093,20 @@ class StudyPlannerService:
         start_date = course.term_start_date or today
         if start_date < today:
             start_date = today
-        exam_date = (
+        # Use the last exam date so the window always covers all pre-exam revision days.
+        last_exam_date = (
             course.exams.exclude(scheduled_at__isnull=True)
-            .order_by("scheduled_at")
+            .order_by("-scheduled_at")
             .values_list("scheduled_at", flat=True)
             .first()
         )
-        end_candidates = [candidate for candidate in [course.term_end_date, exam_date.date() if exam_date else None] if candidate]
+        end_candidates = [
+            candidate
+            for candidate in [course.term_end_date, last_exam_date.date() if last_exam_date else None]
+            if candidate
+        ]
         if end_candidates:
-            end_date = max(start_date, min(end_candidates))
+            end_date = max(start_date, max(end_candidates))
         else:
             end_date = start_date + timedelta(days=max(14, course.topics.count() * 3))
         return start_date, end_date
@@ -1856,7 +2143,7 @@ class StudyPlannerService:
             course,
             source_material=source_material,
         )
-        soft_event_stats = {"created_soft_events": 0, "updated_soft_events": 0}
+        soft_event_stats = StudyPlannerService.sync_session_targets_to_soft_events(plan)
         plan.summary = (
             f"Auto-recalculated from {course.topics.count()} topics"
             + (f" after processing {source_material.title}." if source_material else ".")
@@ -1942,6 +2229,28 @@ class StudyPlannerService:
                 outcome=outcome,
             )
             targets.append(target)
+
+        # Add a pre-exam revision target for each upcoming exam (the day before).
+        exams_in_window = (
+            plan.course.exams.exclude(scheduled_at__isnull=True)
+            .order_by("scheduled_at")
+        )
+        for exam in exams_in_window:
+            revision_date = (exam.scheduled_at - timedelta(days=1)).date()
+            if revision_date < start_date or revision_date > end_date:
+                continue
+            revision_target = StudySessionTarget.objects.create(
+                plan=plan,
+                course=plan.course,
+                exam=exam,
+                target_date=revision_date,
+                target_preferred_minutes=90,
+                target_min_minutes=45,
+                focus=f"Pre-exam revision: consolidate all topics for {exam.title}.",
+                outcome=f"Walk into {exam.title} confident across all course topics.",
+            )
+            targets.append(revision_target)
+
         return targets
 
 

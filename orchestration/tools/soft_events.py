@@ -275,22 +275,12 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     soft_state = collect_window_state(window_start, window_end)
     soft_state["objective_inputs"] = ObjectiveService.scheduler_snapshot(window_start, window_end)
 
-    if note:
-        # Add a planner note as a pseudo event to steer scheduling.
-        hard_events = [
-            {
-                "id": "note",
-                "summary": f"User scheduling constraint (highest priority): {note}",
-                "start": window_start.isoformat(),
-                "end": window_start.isoformat(),
-            }
-        ] + hard_events
-
     actions, trace_id = plan_soft_window(
         hard_events=hard_events,
         soft_state=soft_state,
         window_start=window_start,
         window_end=window_end,
+        planner_note=note,
     )
     created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
     coverage = ObjectiveService.coverage_snapshot(window_start, window_end)

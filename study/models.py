@@ -4,6 +4,7 @@ import uuid
 from django.db import models
 from django.db.models import Q
 from chat.models import Chat
+from orchestration.models import Job
 from orchestration.models import Objective
 
 
@@ -350,6 +351,49 @@ class StudySessionLog(models.Model):
 
     def __str__(self):
         return f"{self.course} — {self.result}"
+
+
+class StudyTopicAudiobookVersion(models.Model):
+    STATUS_PENDING = "pending"
+    STATUS_PROCESSING = "processing"
+    STATUS_READY = "ready"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_PROCESSING, "Processing"),
+        (STATUS_READY, "Ready"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    topic = models.ForeignKey(StudyTopic, on_delete=models.CASCADE, related_name="audiobook_versions")
+    version_number = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    job = models.ForeignKey(Job, null=True, blank=True, on_delete=models.SET_NULL, related_name="study_topic_audiobooks")
+    generation_notes = models.TextField(blank=True, default="")
+    script_markdown = models.TextField(blank=True, default="")
+    audio_file = models.FileField(upload_to="study/audiobooks/", blank=True, null=True)
+    audio_mime_type = models.CharField(max_length=64, blank=True, default="audio/mpeg")
+    tts_voice = models.CharField(max_length=64, blank=True, default="alloy")
+    tts_model = models.CharField(max_length=128, blank=True, default="gpt-4o-mini-tts")
+    processing_error = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["topic", "version_number"], name="unique_topic_audiobook_version"),
+        ]
+        indexes = [
+            models.Index(fields=["topic", "created_at"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.topic} — Audio v{self.version_number}"
 
 
 class StudyAssignment(models.Model):
