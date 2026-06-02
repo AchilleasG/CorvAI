@@ -6,10 +6,20 @@ from typing import Optional
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
 
+from orchestration.models import Job, ToolModule
 from orchestration.objectives import ObjectiveService
 from orchestration.registry import register_function
-from study.models import StudyCourse, StudyExam, StudyMaterial, StudyPlan, StudySessionTarget, StudyTopic
-from study.services import StudyIngestionService, StudyPlannerService
+from orchestration.services import JobService
+from study.models import (
+    StudyCourse,
+    StudyExam,
+    StudyMaterial,
+    StudyPlan,
+    StudySessionTarget,
+    StudyTopic,
+    StudyTopicAudiobookVersion,
+)
+from study.services import StudyIngestionService, StudyPlannerService, StudyTopicAudiobookService
 
 
 def _material_payload(material: StudyMaterial) -> dict:
@@ -541,3 +551,77 @@ def build_session_targets(plan_id: str, start_date: str, end_date: str, preferre
         min_minutes=min_minutes,
     )
     return {"plan_id": str(plan.id), "created": len(targets)}
+
+
+@register_function(
+    manifest_id="study.generate_topic_audiobook",
+    module="study",
+    name="study.generate_topic_audiobook",
+    description="Queue full audiobook generation for a study topic.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "topic_id": {"type": "string"},
+            "generation_notes": {"type": "string"},
+            "voice": {"type": "string", "default": "alloy"},
+            "model": {"type": "string", "default": "gpt-4o-mini-tts"},
+        },
+        "required": ["topic_id"],
+    },
+)
+def generate_topic_audiobook(
+    topic_id: str,
+    generation_notes: str = "",
+    voice: str = "alloy",
+    model: str = "gpt-4o-mini-tts",
+):
+    from study.tasks import generate_study_topic_audiobook_job
+
+    topic = StudyTopic.objects.get(id=topic_id)
+    module = ToolModule.objects.filter(slug="study").first()
+    job = JobService.create_job(
+        chat=topic.course.chat,
+        module=module,
+        user_visible_summary=f"Queued audiobook generation for {topic.name}",
+    )
+    version = StudyTopicAudiobookService.create_topic_audiobook_version(
+        topic,
+        generation_notes=generation_notes,
+        job=job,
+    )
+    job.metadata = {
+        "study_topic_id": str(topic.id),
+        "study_course_id": str(topic.course_id),
+        "study_topic_name": topic.name,
+        "audiobook_version_id": str(version.id),
+        "job_kind": "topic_audiobook_generation",
+        "generation_notes": generation_notes,
+        "voice": voice,
+        "model": model,
+    }
+    job.save(update_fields=["metadata", "updated_at"])
+    try:
+        generate_study_topic_audiobook_job.delay(
+            str(job.id),
+            str(topic.id),
+            str(version.id),
+            model=model,
+            voice=voice,
+        )
+    except Exception as exc:
+        version.status = StudyTopicAudiobookVersion.STATUS_FAILED
+        version.processing_error = str(exc)
+        version.save(update_fields=["status", "processing_error", "updated_at"])
+        JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+        job.user_visible_summary = f"Failed to queue audiobook generation for {topic.name}"
+        job.save(update_fields=["user_visible_summary", "updated_at"])
+
+    return {
+        "topic_id": str(topic.id),
+        "version_id": str(version.id),
+        "version_number": version.version_number,
+        "status": version.status,
+        "job_id": str(job.id),
+        "voice": voice,
+        "model": model,
+    }

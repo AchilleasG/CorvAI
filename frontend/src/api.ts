@@ -78,4 +78,8 @@ export const {
   updateCallSession,
   addCallTranscriptEntry,
   createRealtimeToken,
+  fetchTopicAudiobookVersions,
+  createTopicAudiobookVersion,
+  previewTopicAudiobookVoice,
+  getTopicAudiobookDownloadUrl,
 } = api;

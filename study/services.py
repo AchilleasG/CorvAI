@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import ast
 import concurrent.futures
 import json
@@ -9,6 +10,8 @@ from math import ceil
 import mimetypes
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time as time_module
 from datetime import date, datetime, time, timedelta
@@ -20,7 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import fitz  # PyMuPDF
 from PIL import Image, ImageOps
 from django.core.files.base import ContentFile
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from Corv.config import settings
@@ -294,16 +297,174 @@ class StudyTopicAudiobookService:
     def _render_audio(script: str, *, voice: str = "alloy", model: str = "gpt-4o-mini-tts") -> tuple[bytes, str]:
         if not script.strip():
             raise ValueError("Cannot render empty audiobook script")
+        provider = str(os.getenv("AUDIOBOOK_TTS_PROVIDER", "edge")).strip().lower()
+
+        if provider in {"edge", "edge-tts", "ms", "microsoft"}:
+            return StudyTopicAudiobookService._render_audio_edge(script, voice=voice)
+
+        if provider in {"open_source", "local", "espeak", "espeak-ng"}:
+            return StudyTopicAudiobookService._render_audio_open_source(script, voice=voice)
+
         response = get_client("openai").audio.speech.create(
             model=model,
             voice=voice,
             input=script,
-            format="mp3",
+            response_format="mp3",
         )
-        audio_bytes = response.read()
+        if hasattr(response, "read"):
+            audio_bytes = response.read()
+        elif isinstance(response, (bytes, bytearray)):
+            audio_bytes = bytes(response)
+        elif hasattr(response, "content"):
+            audio_bytes = bytes(response.content)
+        else:
+            raise RuntimeError("TTS returned unexpected response payload")
         if not audio_bytes:
             raise RuntimeError("TTS returned empty audio")
         return audio_bytes, "audio/mpeg"
+
+    @staticmethod
+    def _split_text_for_tts(text: str, *, max_chars: int = 2400) -> List[str]:
+        source = re.sub(r"\s+", " ", text).strip()
+        if not source:
+            return []
+        if len(source) <= max_chars:
+            return [source]
+
+        sentences = re.split(r"(?<=[.!?])\s+", source)
+        chunks: List[str] = []
+        current = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) > max_chars:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for i in range(0, len(sentence), max_chars):
+                    chunks.append(sentence[i : i + max_chars])
+                continue
+
+            candidate = f"{current} {sentence}".strip() if current else sentence
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current)
+                current = sentence
+
+        if current:
+            chunks.append(current)
+        return chunks
+
+    @staticmethod
+    def _render_audio_edge(script: str, *, voice: str = "alloy") -> tuple[bytes, str]:
+        try:
+            import edge_tts  # type: ignore
+        except Exception as exc:
+            # Fallback to local open-source engine if edge-tts is unavailable.
+            return StudyTopicAudiobookService._render_audio_open_source(script, voice=voice)
+
+        default_voice = os.getenv("AUDIOBOOK_EDGE_VOICE", "en-US-EmmaMultilingualNeural")
+        candidate_voice = (voice or "").strip()
+        edge_voice = (
+            candidate_voice
+            if candidate_voice.endswith("Neural") or "-" in candidate_voice
+            else default_voice
+        )
+
+        rate = os.getenv("AUDIOBOOK_EDGE_RATE", "+0%")
+        pitch = os.getenv("AUDIOBOOK_EDGE_PITCH", "+0Hz")
+        volume = os.getenv("AUDIOBOOK_EDGE_VOLUME", "+0%")
+        max_chars = int(os.getenv("AUDIOBOOK_EDGE_MAX_CHARS", "2400"))
+
+        chunks = StudyTopicAudiobookService._split_text_for_tts(script, max_chars=max_chars)
+        if not chunks:
+            raise RuntimeError("No text to synthesize")
+
+        async def synth_once(text_chunk: str) -> bytes:
+            comm = edge_tts.Communicate(text_chunk, edge_voice, rate=rate, pitch=pitch, volume=volume)
+            data: List[bytes] = []
+            async for part in comm.stream():
+                if part.get("type") == "audio":
+                    chunk_data = part.get("data")
+                    if isinstance(chunk_data, (bytes, bytearray)):
+                        data.append(bytes(chunk_data))
+            return b"".join(data)
+
+        async def synth_all() -> bytes:
+            merged: List[bytes] = []
+            for item in chunks:
+                segment = await synth_once(item)
+                if segment:
+                    merged.append(segment)
+            return b"".join(merged)
+
+        try:
+            audio_bytes = asyncio.run(synth_all())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                audio_bytes = loop.run_until_complete(synth_all())
+            finally:
+                loop.close()
+
+        if not audio_bytes:
+            raise RuntimeError("edge-tts returned empty audio")
+        return audio_bytes, "audio/mpeg"
+
+    @staticmethod
+    def _render_audio_open_source(script: str, *, voice: str = "alloy") -> tuple[bytes, str]:
+        exe = shutil.which("espeak-ng") or shutil.which("espeak")
+        if not exe:
+            raise RuntimeError("Open-source TTS engine not found (missing espeak-ng/espeak)")
+
+        rate = int(os.getenv("AUDIOBOOK_TTS_RATE", "165"))
+        pitch = int(os.getenv("AUDIOBOOK_TTS_PITCH", "50"))
+        volume = int(os.getenv("AUDIOBOOK_TTS_VOLUME", "100"))
+        # espeak voices differ from cloud voice names; map unknown names to english default.
+        espeak_voice = voice if voice and voice not in {"alloy", "nova", "shimmer", "echo", "fable", "onyx"} else "en-us"
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            out_path = tmp.name
+
+        try:
+            proc = subprocess.run(
+                [
+                    exe,
+                    "-v",
+                    espeak_voice,
+                    "-s",
+                    str(rate),
+                    "-p",
+                    str(pitch),
+                    "-a",
+                    str(volume),
+                    "--stdin",
+                    "-w",
+                    out_path,
+                ],
+                input=script.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            _ = proc
+            with open(out_path, "rb") as fh:
+                audio_bytes = fh.read()
+        except subprocess.CalledProcessError as exc:
+            stderr_text = (exc.stderr or b"").decode("utf-8", errors="ignore").strip()
+            raise RuntimeError(f"Open-source TTS failed: {stderr_text or exc}") from exc
+        finally:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+
+        if not audio_bytes:
+            raise RuntimeError("Open-source TTS returned empty audio")
+        return audio_bytes, "audio/wav"
 
     @staticmethod
     def create_topic_audiobook_version(
@@ -385,7 +546,13 @@ class StudyTopicAudiobookService:
 
             version.script_markdown = script_markdown
             version.tts_voice = voice
-            version.tts_model = "gpt-4o-mini-tts"
+            tts_provider = str(os.getenv("AUDIOBOOK_TTS_PROVIDER", "edge")).strip().lower()
+            if tts_provider in {"edge", "edge-tts", "ms", "microsoft"}:
+                version.tts_model = "edge-tts"
+            elif tts_provider in {"open_source", "local", "espeak", "espeak-ng"}:
+                version.tts_model = "espeak-ng"
+            else:
+                version.tts_model = "gpt-4o-mini-tts"
             version.metadata = {
                 **(version.metadata or {}),
                 "script_model": script_model,
@@ -402,7 +569,8 @@ class StudyTopicAudiobookService:
                 message="Converting script to audio",
             )
             audio_bytes, mime_type = StudyTopicAudiobookService._render_audio(script_markdown, voice=voice)
-            filename = f"topic-{topic.id}-v{version.version_number}.mp3"
+            extension = "wav" if mime_type == "audio/wav" else "mp3"
+            filename = f"topic-{topic.id}-v{version.version_number}.{extension}"
             version.audio_file.save(filename, ContentFile(audio_bytes), save=False)
             version.audio_mime_type = mime_type
             version.status = StudyTopicAudiobookVersion.STATUS_READY

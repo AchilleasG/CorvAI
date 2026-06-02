@@ -11,7 +11,7 @@ from django.utils import timezone
 from ninja import File, Form, Router
 from ninja.errors import HttpError
 from ninja.files import UploadedFile
-from django.http import FileResponse, QueryDict
+from django.http import FileResponse, HttpResponse, QueryDict
 from django.http.multipartparser import MultiPartParser, MultiPartParserError
 
 from orchestration.objectives import ObjectiveService
@@ -854,6 +854,29 @@ def create_topic_audiobook(
         "version": _topic_audiobook_payload(version),
         "job": _job_payload(job),
     }
+
+
+@router.post("/topics/{topic_id}/audiobooks/preview")
+def preview_topic_audiobook_voice(
+    request,
+    topic_id: str,
+    voice: str = Form("en-US-EmmaMultilingualNeural"),
+    text: str = Form(""),
+):
+    topic = StudyTopic.objects.get(id=topic_id)
+    preview_text = (text or "").strip()
+    if not preview_text:
+        preview_text = (
+            f"Hello, this is a preview for {topic.name}. "
+            "If this voice sounds good to you, use it for the full lesson audiobook."
+        )
+    preview_text = preview_text[:500]
+
+    audio_bytes, mime_type = StudyTopicAudiobookService._render_audio(preview_text, voice=voice)
+    extension = "wav" if mime_type == "audio/wav" else "mp3"
+    response = HttpResponse(audio_bytes, content_type=mime_type)
+    response["Content-Disposition"] = f'inline; filename="voice-preview-{topic.id}.{extension}"'
+    return response
 
 
 @router.get("/topics/{topic_id}/audiobooks/{version_id}/download")

@@ -404,6 +404,29 @@ export function createApi(config: ApiConfig) {
         { method: "POST", body: formData },
       );
     },
+    async previewTopicAudiobookVoice(payload: {
+      topic_id: string;
+      voice?: string;
+      text?: string;
+    }) {
+      const formData = new FormData();
+      if (payload.voice) formData.append("voice", payload.voice);
+      if (payload.text) formData.append("text", payload.text);
+
+      const token = await resolveToken(config.getToken);
+      const res = await fetch(`${config.baseUrl}/study/topics/${payload.topic_id}/audiobooks/preview`, {
+        method: "POST",
+        body: formData,
+        headers: token ? { "X-App-Token": token } : undefined,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err: any = new Error(text || `Request failed with ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return await res.blob();
+    },
     getTopicAudiobookDownloadUrl(topic_id: string, version_id: string) {
       return `${config.baseUrl}/study/topics/${topic_id}/audiobooks/${version_id}/download`;
     },

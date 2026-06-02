@@ -42,6 +42,7 @@ import {
   deleteStudyTopic,
   fetchTopicAudiobookVersions,
   createTopicAudiobookVersion,
+  previewTopicAudiobookVoice,
   getTopicAudiobookDownloadUrl,
   fetchScheduledTasks,
   createScheduledTask,
@@ -114,6 +115,7 @@ type SoftEventDraft = {
 type SoftEventMode = "create" | "edit";
 type SoftEventModalTab = "details" | "metadata";
 type StudyOutputModalKind = "converted" | "solved" | "theory";
+type StudyLessonDetailTab = "overview" | "audiobooks";
 
 type StudyMaterialKind = "lecture" | "worksheet" | "assignment" | "past_exam" | "other";
 type StudyMaterialInputMode = "file" | "text";
@@ -133,6 +135,14 @@ type LessonHomeworkItem = {
 };
 const STUDY_PREVIEW_COUNT = 3;
 const STUDY_TOPIC_STATUS_OPTIONS = ["not_started", "in_progress", "review", "mastered"] as const;
+const STUDY_AUDIOBOOK_VOICE_OPTIONS = [
+  { value: "en-US-EmmaMultilingualNeural", label: "Emma (US, multilingual)" },
+  { value: "en-US-AriaNeural", label: "Aria (US, natural)" },
+  { value: "en-US-GuyNeural", label: "Guy (US, deep)" },
+  { value: "en-GB-SoniaNeural", label: "Sonia (UK)" },
+  { value: "en-GB-RyanNeural", label: "Ryan (UK)" },
+  { value: "en-AU-NatashaNeural", label: "Natasha (AU)" },
+] as const;
 
 function formatTopicStatus(status: string) {
   return status
@@ -578,9 +588,13 @@ export default function App() {
   const [studyFileDragOver, setStudyFileDragOver] = useState(false);
   const [studyMaterialText, setStudyMaterialText] = useState("");
   const [studyLessonDetailId, setStudyLessonDetailId] = useState<string | null>(null);
+  const [studyLessonDetailTab, setStudyLessonDetailTab] = useState<StudyLessonDetailTab>("overview");
   const [topicAudiobookVersions, setTopicAudiobookVersions] = useState<Record<string, StudyTopicAudiobookVersion[]>>({});
   const [topicAudiobookLoadingByTopic, setTopicAudiobookLoadingByTopic] = useState<Record<string, boolean>>({});
   const [topicAudiobookNotesByTopic, setTopicAudiobookNotesByTopic] = useState<Record<string, string>>({});
+  const [topicAudiobookVoiceByTopic, setTopicAudiobookVoiceByTopic] = useState<Record<string, string>>({});
+  const [topicAudiobookPreviewLoadingByTopic, setTopicAudiobookPreviewLoadingByTopic] = useState<Record<string, boolean>>({});
+  const [topicAudiobookPreviewUrlByTopic, setTopicAudiobookPreviewUrlByTopic] = useState<Record<string, string>>({});
   const [studyOutputModalKind, setStudyOutputModalKind] = useState<StudyOutputModalKind | null>(null);
   const [showCreateCourseModal, setShowCreateCourseModal] = useState(false);
   const [showCreateLessonModal, setShowCreateLessonModal] = useState(false);
@@ -786,6 +800,12 @@ export default function App() {
     () => studyTopics.find((topic) => topic.id === studyLessonDetailId) || null,
     [studyTopics, studyLessonDetailId],
   );
+
+  useEffect(() => {
+    if (studyLessonDetailId) {
+      setStudyLessonDetailTab("overview");
+    }
+  }, [studyLessonDetailId]);
   const selectedCourseTopics = useMemo(
     () => studyTopics.filter((topic) => topic.course_id === studySelectedCourseId),
     [studyTopics, studySelectedCourseId],
@@ -1628,16 +1648,45 @@ export default function App() {
       setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topic.id]: true }));
       setStudyError(null);
       const notes = (topicAudiobookNotesByTopic[topic.id] || "").trim();
+      const voice = (topicAudiobookVoiceByTopic[topic.id] || "").trim();
       await createTopicAudiobookVersion({
         topic_id: topic.id,
         generation_notes: notes || undefined,
+        voice: voice || undefined,
       });
-      await Promise.all([loadTopicAudiobooks(topic.id), refreshJobs()]);
+      const [_, jobsData] = await Promise.all([
+        loadTopicAudiobooks(topic.id),
+        fetchJobs(activeChatId || undefined),
+      ]);
+      setJobs(jobsData);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setStudyError(err.message || "Failed to queue lesson audiobook generation");
     } finally {
       setTopicAudiobookLoadingByTopic((prev) => ({ ...prev, [topic.id]: false }));
+    }
+  }
+
+  async function handlePreviewTopicAudiobookVoice(topic: StudyTopic) {
+    try {
+      setStudyError(null);
+      setTopicAudiobookPreviewLoadingByTopic((prev) => ({ ...prev, [topic.id]: true }));
+      const voice = (topicAudiobookVoiceByTopic[topic.id] || STUDY_AUDIOBOOK_VOICE_OPTIONS[0].value).trim();
+      const existingUrl = topicAudiobookPreviewUrlByTopic[topic.id];
+      if (existingUrl) {
+        URL.revokeObjectURL(existingUrl);
+      }
+      const blob = await previewTopicAudiobookVoice({
+        topic_id: topic.id,
+        voice,
+      });
+      const nextUrl = URL.createObjectURL(blob);
+      setTopicAudiobookPreviewUrlByTopic((prev) => ({ ...prev, [topic.id]: nextUrl }));
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setStudyError(err.message || "Failed to preview lesson voice");
+    } finally {
+      setTopicAudiobookPreviewLoadingByTopic((prev) => ({ ...prev, [topic.id]: false }));
     }
   }
 
@@ -5249,76 +5298,92 @@ export default function App() {
                 {(() => {
                   const lessonHomework = normalizeLessonHomework(selectedStudyLesson.homework);
                   const lessonHomeworkStats = homeworkProgress(lessonHomework);
+                  const versions = topicAudiobookVersions[selectedStudyLesson.id] || [];
+                  const isLoading = topicAudiobookLoadingByTopic[selectedStudyLesson.id] || false;
+                  const isPreviewLoading = topicAudiobookPreviewLoadingByTopic[selectedStudyLesson.id] || false;
+                  const notes = topicAudiobookNotesByTopic[selectedStudyLesson.id] || "";
+                  const voice = topicAudiobookVoiceByTopic[selectedStudyLesson.id] || STUDY_AUDIOBOOK_VOICE_OPTIONS[0].value;
+                  const previewUrl = topicAudiobookPreviewUrlByTopic[selectedStudyLesson.id] || "";
+                  const why = String((selectedStudyLesson.metadata as Record<string, unknown> | undefined)?.why_it_matters || "").trim();
+                  const prereqs = asStringList((selectedStudyLesson.metadata as Record<string, unknown> | undefined)?.prerequisite_assumptions);
+                  const toKnow = asStringList((selectedStudyLesson.metadata as Record<string, unknown> | undefined)?.what_to_know);
+                  const checks = asStringList((selectedStudyLesson.metadata as Record<string, unknown> | undefined)?.mastery_checks);
+                  const pitfalls = asStringList((selectedStudyLesson.metadata as Record<string, unknown> | undefined)?.common_pitfalls);
+
                   return (
-                    <section className="study-lesson-section">
-                      <h4>Homework checklist</h4>
-                      <div className="study-progress-block">
-                        <div className="study-progress-label muted small">
-                          Completed {lessonHomeworkStats.done}/{lessonHomeworkStats.total}
-                        </div>
-                        <div className="study-progress-track" aria-label="Lesson homework progress">
-                          <div
-                            className="study-progress-fill"
-                            style={{ width: `${lessonHomeworkStats.percent}%` }}
-                          />
-                        </div>
+                    <>
+                      <div className="study-lesson-tabs" role="tablist" aria-label="Lesson detail sections">
+                        <button
+                          className={`study-lesson-tab ${studyLessonDetailTab === "overview" ? "active" : ""}`}
+                          onClick={() => setStudyLessonDetailTab("overview")}
+                          role="tab"
+                          aria-selected={studyLessonDetailTab === "overview"}
+                        >
+                          Overview
+                        </button>
+                        <button
+                          className={`study-lesson-tab ${studyLessonDetailTab === "audiobooks" ? "active" : ""}`}
+                          onClick={() => setStudyLessonDetailTab("audiobooks")}
+                          role="tab"
+                          aria-selected={studyLessonDetailTab === "audiobooks"}
+                        >
+                          Audiobooks
+                        </button>
                       </div>
-                      {lessonHomework.length ? (
-                        <div className="study-homework-list">
-                          {lessonHomework.map((item) => (
-                            <label key={item.assignment_id} className="study-homework-item">
-                              <input
-                                type="checkbox"
-                                checked={item.done}
-                                onChange={(e) =>
-                                  handleToggleLessonHomework(
-                                    selectedStudyLesson,
-                                    item.assignment_id,
-                                    e.target.checked,
-                                  )
-                                }
-                                disabled={studySaving}
-                              />
-                              <span>
-                                {item.text}
-                                <span className="study-homework-source muted small">
-                                  {formatHomeworkReference(item)}
-                                </span>
-                              </span>
-                            </label>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="muted small">No homework assigned to this lesson yet.</p>
-                      )}
-                    </section>
-                  );
-                })()}
 
-                <div className="study-lesson-meta-grid">
-                  <div className="study-lesson-chip">Status: {formatTopicStatus(selectedStudyLesson.status)}</div>
-                  <div className="study-lesson-chip">Effort: {selectedStudyLesson.estimated_effort_minutes} min</div>
-                  <div className="study-lesson-chip">Weight: {selectedStudyLesson.weight}</div>
-                </div>
-
-                <section className="study-lesson-section">
-                  <h4>Description</h4>
-                  <div className="study-output-body">
-                    {selectedStudyLesson.description || "No detailed description saved yet."}
-                  </div>
-                </section>
-
-                {selectedStudyLesson.metadata && (
-                  <>
-                    {(() => {
-                      const why = String((selectedStudyLesson.metadata as Record<string, unknown>).why_it_matters || "").trim();
-                      const prereqs = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).prerequisite_assumptions);
-                      const toKnow = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).what_to_know);
-                      const checks = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).mastery_checks);
-                      const pitfalls = asStringList((selectedStudyLesson.metadata as Record<string, unknown>).common_pitfalls);
-
-                      return (
+                      {studyLessonDetailTab === "overview" && (
                         <>
+                          <section className="study-lesson-section">
+                            <h4>Homework checklist</h4>
+                            <div className="study-progress-block">
+                              <div className="study-progress-label muted small">
+                                Completed {lessonHomeworkStats.done}/{lessonHomeworkStats.total}
+                              </div>
+                              <div className="study-progress-track" aria-label="Lesson homework progress">
+                                <div className="study-progress-fill" style={{ width: `${lessonHomeworkStats.percent}%` }} />
+                              </div>
+                            </div>
+                            {lessonHomework.length ? (
+                              <div className="study-homework-list">
+                                {lessonHomework.map((item) => (
+                                  <label key={item.assignment_id} className="study-homework-item">
+                                    <input
+                                      type="checkbox"
+                                      checked={item.done}
+                                      onChange={(e) =>
+                                        handleToggleLessonHomework(
+                                          selectedStudyLesson,
+                                          item.assignment_id,
+                                          e.target.checked,
+                                        )
+                                      }
+                                      disabled={studySaving}
+                                    />
+                                    <span>
+                                      {item.text}
+                                      <span className="study-homework-source muted small">{formatHomeworkReference(item)}</span>
+                                    </span>
+                                  </label>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="muted small">No homework assigned to this lesson yet.</p>
+                            )}
+                          </section>
+
+                          <div className="study-lesson-meta-grid">
+                            <div className="study-lesson-chip">Status: {formatTopicStatus(selectedStudyLesson.status)}</div>
+                            <div className="study-lesson-chip">Effort: {selectedStudyLesson.estimated_effort_minutes} min</div>
+                            <div className="study-lesson-chip">Weight: {selectedStudyLesson.weight}</div>
+                          </div>
+
+                          <section className="study-lesson-section">
+                            <h4>Description</h4>
+                            <div className="study-output-body">
+                              {selectedStudyLesson.description || "No detailed description saved yet."}
+                            </div>
+                          </section>
+
                           {why && (
                             <section className="study-lesson-section">
                               <h4>Why this matters</h4>
@@ -5369,18 +5434,127 @@ export default function App() {
                               </ul>
                             </section>
                           )}
-                        </>
-                      );
-                    })()}
-                  </>
-                )}
 
-                <section className="study-lesson-section">
-                  <h4>Raw metadata</h4>
-                  <pre className="study-log-dump">
-                    {JSON.stringify(selectedStudyLesson.metadata || {}, null, 2)}
-                  </pre>
-                </section>
+                          <section className="study-lesson-section">
+                            <h4>Raw metadata</h4>
+                            <pre className="study-log-dump">{JSON.stringify(selectedStudyLesson.metadata || {}, null, 2)}</pre>
+                          </section>
+                        </>
+                      )}
+
+                      {studyLessonDetailTab === "audiobooks" && (
+                        <>
+                          <section className="study-lesson-section">
+                            <h4>Generate new version</h4>
+                            <div className="study-audiobook-generate">
+                              <select
+                                className="study-audiobook-voice"
+                                value={voice}
+                                onChange={(e) =>
+                                  setTopicAudiobookVoiceByTopic((prev) => ({
+                                    ...prev,
+                                    [selectedStudyLesson.id]: e.target.value,
+                                  }))
+                                }
+                                disabled={isLoading || isPreviewLoading}
+                              >
+                                {STUDY_AUDIOBOOK_VOICE_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              <textarea
+                                className="study-audiobook-notes"
+                                placeholder="Optional notes for generation (focus level, tone, examples, pacing)..."
+                                value={notes}
+                                rows={3}
+                                onChange={(e) =>
+                                  setTopicAudiobookNotesByTopic((prev) => ({
+                                    ...prev,
+                                    [selectedStudyLesson.id]: e.target.value,
+                                  }))
+                                }
+                                disabled={isLoading || isPreviewLoading}
+                              />
+                              <div className="study-audiobook-actions">
+                                <button
+                                  className="ghost"
+                                  onClick={() => handlePreviewTopicAudiobookVoice(selectedStudyLesson)}
+                                  disabled={isLoading || isPreviewLoading}
+                                >
+                                  {isPreviewLoading ? "Previewing..." : "Preview voice"}
+                                </button>
+                                <button
+                                  className="primary"
+                                  onClick={() => handleGenerateTopicAudiobook(selectedStudyLesson)}
+                                  disabled={isLoading || isPreviewLoading}
+                                >
+                                  {isLoading ? "Queuing..." : "Generate audiobook"}
+                                </button>
+                              </div>
+                              {previewUrl && (
+                                <audio controls src={previewUrl} className="study-audiobook-player study-audiobook-preview" />
+                              )}
+                            </div>
+                          </section>
+
+                          <section className="study-lesson-section">
+                            <h4>Versions</h4>
+                            {versions.length === 0 && <p className="muted small">No audiobook versions yet.</p>}
+                            {versions.length > 0 && (
+                              <div className="study-audiobook-list">
+                                {versions.map((v) => (
+                                  <div key={v.id} className="study-audiobook-item">
+                                    <div className="study-audiobook-item-header">
+                                      <span className="study-audiobook-version">Version {v.version_number}</span>
+                                      <span className={`study-audiobook-status status-${v.status}`}>{v.status}</span>
+                                      <span className="muted small">{v.created_at ? new Date(v.created_at).toLocaleString() : ""}</span>
+                                    </div>
+                                    <div className="study-audiobook-meta-grid">
+                                      <span className="muted small">Voice: {v.tts_voice || "n/a"}</span>
+                                      <span className="muted small">Engine: {v.tts_model || "n/a"}</span>
+                                      <span className="muted small">Format: {v.audio_mime_type || "n/a"}</span>
+                                    </div>
+                                    {v.generation_notes && <p className="muted small">Prompt notes: {v.generation_notes}</p>}
+                                    {v.status === "ready" && (
+                                      <>
+                                        <audio
+                                          controls
+                                          src={getTopicAudiobookDownloadUrl(selectedStudyLesson.id, v.id)}
+                                          className="study-audiobook-player"
+                                        />
+                                        <a
+                                          className="small"
+                                          href={getTopicAudiobookDownloadUrl(selectedStudyLesson.id, v.id)}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          Open or download audio
+                                        </a>
+                                      </>
+                                    )}
+                                    {v.status === "failed" && v.processing_error && (
+                                      <p className="muted small study-audiobook-error">{v.processing_error}</p>
+                                    )}
+                                    {v.script_markdown && (
+                                      <details className="study-audiobook-script">
+                                        <summary>Show generated script</summary>
+                                        <div className="study-output-body study-output-markdown">
+                                          <ReactMarkdown>{v.script_markdown}</ReactMarkdown>
+                                        </div>
+                                      </details>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </section>
+                        </>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>

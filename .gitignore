@@ -12,3 +12,4 @@ celerybeat-schedule
 media/study/materials/*
 core
 core.*
+media/study/audiobooks/
