@@ -154,25 +154,59 @@ class StudyJobCanceled(Exception):
 
 AUDIOBOOK_SCRIPT_INSTRUCTIONS = (
     "You are creating a complete, audio-first lesson audiobook script for a university student. "
-    "The script must be detailed, structured, and fully sufficient for solving lesson-related exercises. "
+    "The script must be extensive, detailed, and fully sufficient for solving lesson-related exercises. "
+    "It should cover the subject thoroughly enough that a student who listens carefully has the knowledge needed to solve the corresponding exercises with confidence. "
     "Use all provided context: lesson description, summary, metadata, homework assignments, and matching past-exam material. "
+    "If audience or user profile context is provided, adapt the depth, pacing, wording, and examples to that target student while still covering the lesson completely. "
     "Explain concepts from fundamentals to advanced exam tactics. "
+    "Teach all prerequisite ideas, the core theory, the meaning of the formulas, when each method applies, and how to recognize which approach to use. "
     "Include worked examples, common traps, and step-by-step solving heuristics. "
-    "Do not omit difficult parts. Do not hand-wave. "
+    "Make sure the final script contains all of the practical knowledge, reasoning patterns, and problem-solving methods needed for the exercise types implied by the lesson material. "
+    "Do not omit difficult parts. Do not hand-wave. Do not give a short summary when a full explanation is required. "
     "Write clear spoken language suitable for text-to-speech. "
-    "Return markdown only, with sections:\n"
-    "1) Lesson overview\n"
-    "2) Core theory and formulas\n"
-    "3) How to solve exercise types\n"
-    "4) Worked walkthroughs\n"
-    "5) Typical mistakes and how to avoid them\n"
-    "6) Rapid revision checklist\n"
-    "7) Practice prompts for self-testing"
+    "Use a conversational, direct, and slightly friendly tone, like a strong one-on-one tutor speaking to the student. "
+    "Sound natural and human, not formal, robotic, academic, or overly scripted. "
+    "Address the listener directly when helpful using plain spoken phrasing, but stay focused on teaching. "
+    "The final result must flow naturally as an audio-only lesson, as if a skilled tutor is teaching aloud. "
+    "Prioritize listening clarity over visual organization. "
+    "Do not rely on diagrams, tables, written layout, symbols on a page, or phrases like 'as you can see above' or 'look at the figure'. "
+    "Avoid long strings of numbers, excessive variable lists, dense notation dumps, or formatting that is hard to follow by ear. "
+    "When formulas or steps are necessary, introduce them slowly in spoken form and immediately explain what they mean and how they are used. "
+    "This script will be fed directly into a TTS engine, so it must be plain text only. "
+    "Do not use markdown, headings, bullet points, numbered lists, tables, code blocks, emojis, symbols, decorative separators, or formatting markup of any kind. "
+    "Do not include special characters unless they are standard sentence punctuation needed for natural speech. "
+    "Do not wrap words in quotes for emphasis and do not use shorthand notation that sounds unnatural when read aloud. "
+    "Organize the lesson naturally in plain paragraphs using simple transitions instead of formatting. "
+    "Cover, in order, the lesson overview, the core theory and formulas, how to solve the main exercise types, worked walkthroughs, typical mistakes and how to avoid them, a rapid revision recap, and self-test practice prompts."
 )
 
 
 class StudyTopicAudiobookService:
     """Generate and persist detailed lesson audiobook versions."""
+
+    @staticmethod
+    def _normalize_script_for_tts(script: str) -> str:
+        text = (script or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"^\s{0,3}(?:[-*•]+|\d+[.)])\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"[*_`#>\[\]\{\}|~]+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    @staticmethod
+    def _get_audience_context(topic: StudyTopic) -> dict[str, Any]:
+        course = topic.course
+        user_scope = str(course.chat_id) if course.chat_id else None
+        profile = UserInfoService.get_core_profile(user_scope)
+        profile_text = (profile.core_text or "").strip() if profile else ""
+
+        if not profile_text and user_scope:
+            fallback_profile = UserInfoService.get_core_profile()
+            profile_text = (fallback_profile.core_text or "").strip() if fallback_profile else ""
+
+        return {
+            "chat_id": str(course.chat_id) if course.chat_id else None,
+            "user_profile": profile_text or None,
+        }
 
     @staticmethod
     def _collect_topic_context(topic: StudyTopic) -> dict[str, Any]:
@@ -237,6 +271,7 @@ class StudyTopicAudiobookService:
                 for exam in exams
             ],
             "materials": material_blobs,
+            "audience_context": StudyTopicAudiobookService._get_audience_context(topic),
         }
 
     @staticmethod
@@ -268,7 +303,9 @@ class StudyTopicAudiobookService:
                     usage=usage_obj,
                     job=None,
                 )
-            script = (getattr(response, "output_text", None) or "").strip()
+            script = StudyTopicAudiobookService._normalize_script_for_tts(
+                (getattr(response, "output_text", None) or "").strip()
+            )
             return script, model_name
 
         response = get_client("xai").chat.completions.create(
@@ -290,7 +327,9 @@ class StudyTopicAudiobookService:
             )
         script = ""
         if getattr(response, "choices", None):
-            script = (response.choices[0].message.content or "").strip()  # type: ignore[assignment]
+            script = StudyTopicAudiobookService._normalize_script_for_tts(
+                (response.choices[0].message.content or "").strip()  # type: ignore[assignment]
+            )
         return script, model_name
 
     @staticmethod
