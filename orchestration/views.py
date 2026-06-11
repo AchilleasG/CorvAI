@@ -12,10 +12,12 @@ from django.utils import timezone
 from datetime import datetime
 
 from orchestration.api_schemas import (
+    HardEventTaskLinkOut,
     JobOut,
     ObjectiveLogOut,
     ObjectiveOut,
     ObjectiveTaskOut,
+    ObjectiveTaskPickerOut,
     ScheduledTaskOut,
     UpdateScheduledTaskIn,
     ScheduledTaskRunOut,
@@ -31,9 +33,12 @@ from orchestration.models import (
     Objective,
     ObjectiveLog,
     ObjectiveTask,
+    HardEventTaskLink,
     UsageEvent,
     SoftEvent,
     SoftEventSlot,
+    SoftEventTask,
+    ToolModule,
     ScheduledTask,
     ScheduledTaskRun,
     ScheduledTaskLogEntry,
@@ -58,6 +63,7 @@ from chat.models import ChatMessage
 from chat.schemas import MessageOut
 from orchestration.tools.calendar import list_events
 from orchestration.tools import calendar_manager, soft_events
+from orchestration.tasks import run_calendar_replan_job
 
 router = Router(tags=["orchestration"])
 logger = logging.getLogger(__name__)
@@ -647,15 +653,23 @@ def calendar_combined(
             )
 
     mapped_hard = []
+    hard_links_by_event, _hard_links_by_task = ObjectiveService._matched_hard_event_links(start, end, hard_events=hard_events)
     for ev in hard_events:
+        event_key = ObjectiveService._hard_event_match_key(ev.get("id"), ev.get("start"), ev.get("end"))
         mapped_hard.append(
             {
                 "id": ev.get("id"),
                 "title": ev.get("summary") or "(no title)",
+                "description": ev.get("description") or "",
                 "start": ev.get("start"),
                 "end": ev.get("end"),
                 "all_day": ev.get("all_day", False),
+                "location": ev.get("location") or "",
                 "source": "hard",
+                "task_links": [
+                    HardEventTaskLinkOut.from_model(link).dict()
+                    for link in hard_links_by_event.get(event_key, [])
+                ],
             }
         )
 
@@ -665,14 +679,34 @@ def calendar_combined(
         "hard_events": mapped_hard,
         "soft_slots": soft_slots,
         "soft_events_unscheduled": unscheduled,
-        "objective_coverage": ObjectiveService.coverage_snapshot(start, end),
+        "objective_coverage": ObjectiveService.coverage_snapshot(start, end, hard_events=hard_events),
     }
 
 
-@router.post("/calendar/replan")
+@router.post("/calendar/replan", response=JobOut)
 def calendar_replan(request, days: int = 14, note: Optional[str] = None):
-    result = soft_events.replan_window(days=days, note=note)
-    return result
+    body_payload = _request_json_dict(request)
+    days = int(body_payload.get("days", days) or 14)
+    note = body_payload.get("note", note)
+    module = ToolModule.objects.filter(slug="soft_events").first()
+    job = JobService.create_job(
+        module=module,
+        user_visible_summary="Queued calendar replan",
+    )
+    job.metadata = {
+        **(job.metadata or {}),
+        "replan_days": days,
+        "replan_note": note,
+        "job_kind": "calendar_replan",
+    }
+    job.save(update_fields=["metadata", "updated_at"])
+    try:
+        run_calendar_replan_job.delay(str(job.id), days=days, note=note)
+    except Exception as exc:
+        JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+        job.user_visible_summary = "Failed to queue calendar replan"
+        job.save(update_fields=["user_visible_summary", "updated_at"])
+    return JobOut.from_model(job)
 
 
 @router.get("/objectives/roots", response=List[ObjectiveOut])
@@ -683,6 +717,21 @@ def list_objective_roots(request):
         .order_by("deadline_at", "-priority", "created_at")
     )
     return [ObjectiveOut.from_model(objective, include_children=False) for objective in roots]
+
+
+@router.get("/objective_tasks", response=List[ObjectiveTaskPickerOut])
+def list_objective_tasks(
+    request,
+    include_completed: bool = False,
+    due_within_days: Optional[int] = None,
+):
+    qs = ObjectiveTask.objects.select_related("objective").filter(objective__status=Objective.STATUS_ACTIVE)
+    if not include_completed:
+        qs = qs.exclude(status__in=[ObjectiveTask.STATUS_DONE, ObjectiveTask.STATUS_CANCELED, ObjectiveTask.STATUS_BLOCKED])
+    if due_within_days and due_within_days > 0:
+        qs = qs.filter(due_at__isnull=False, due_at__lte=timezone.now() + timedelta(days=due_within_days))
+    qs = qs.order_by("due_at", "objective__title", "sort_order", "created_at")
+    return [ObjectiveTaskPickerOut.from_model(task) for task in qs[:300]]
 
 
 @router.get("/objectives/tree/{objective_id}", response=ObjectiveOut)
@@ -848,6 +897,53 @@ def delete_objective_task(request, task_id: UUID):
     return {"ok": True}
 
 
+@router.post("/calendar/hard_event_task_links", response=HardEventTaskLinkOut)
+def create_hard_event_task_link(request):
+    payload = _request_json_dict(request)
+    task_id = str(payload.get("task_id") or "").strip()
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    if not task_id:
+        raise HttpError(400, "task_id is required")
+    event_id = str(event.get("id") or "").strip()
+    event_start_raw = str(event.get("start") or "").strip()
+    event_end_raw = str(event.get("end") or "").strip()
+    if not event_id or not event_start_raw or not event_end_raw:
+        raise HttpError(400, "event id/start/end are required")
+    try:
+        task = ObjectiveTask.objects.select_related("objective").get(id=task_id)
+    except ObjectiveTask.DoesNotExist:
+        raise HttpError(404, "Objective task not found")
+    event_start_at = _parse_dt(event_start_raw)
+    event_end_at = _parse_dt(event_end_raw)
+    if not event_start_at or not event_end_at or event_end_at <= event_start_at:
+        raise HttpError(400, "Invalid event timing")
+    link, _created = HardEventTaskLink.objects.update_or_create(
+        task=task,
+        event_id=event_id,
+        event_start_raw=event_start_raw,
+        event_end_raw=event_end_raw,
+        defaults={
+            "event_title": str(event.get("title") or event.get("summary") or "")[:255],
+            "event_start_at": event_start_at,
+            "event_end_at": event_end_at,
+            "all_day": bool(event.get("all_day")),
+            "description": str(event.get("description") or ""),
+            "location": str(event.get("location") or "")[:255],
+            "source": str(event.get("source") or "google_calendar")[:64],
+            "metadata": payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        },
+    )
+    return HardEventTaskLinkOut.from_model(link)
+
+
+@router.delete("/calendar/hard_event_task_links/{link_id}")
+def delete_hard_event_task_link(request, link_id: UUID):
+    deleted, _ = HardEventTaskLink.objects.filter(id=link_id).delete()
+    if not deleted:
+        raise HttpError(404, "Hard-event task link not found")
+    return {"ok": True}
+
+
 @router.get("/objectives/{objective_id}/logs", response=List[ObjectiveLogOut])
 def list_objective_logs(request, objective_id: UUID):
     logs = ObjectiveLog.objects.filter(objective_id=objective_id).order_by("-logged_at", "-created_at")
@@ -915,6 +1011,19 @@ def get_soft_event_detail(request, soft_event_id: UUID):
         se = SoftEvent.objects.get(id=soft_event_id)
     except SoftEvent.DoesNotExist:
         raise HttpError(404, "Soft event not found")
+    linked_tasks = [
+        {
+            "task_id": str(link.task_id),
+            "task_title": link.task.title,
+            "objective_id": str(link.task.objective_id),
+            "objective_title": link.task.objective.title,
+            "due_at": link.task.due_at.isoformat() if link.task.due_at else None,
+            "status": link.task.status,
+        }
+        for link in SoftEventTask.objects.filter(soft_event=se).select_related("task__objective").order_by(
+            "task__objective__title", "task__sort_order", "task__created_at"
+        )
+    ]
     return {
         "id": str(se.id),
         "title": se.title,
@@ -929,6 +1038,7 @@ def get_soft_event_detail(request, soft_event_id: UUID):
         "priority": se.priority,
         "status": se.status,
         "metadata": se.metadata or {},
+        "linked_tasks": linked_tasks,
     }
 
 

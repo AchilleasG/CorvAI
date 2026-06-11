@@ -557,6 +557,38 @@ class SoftEventTask(models.Model):
         ]
 
 
+class HardEventTaskLink(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(ObjectiveTask, on_delete=models.CASCADE, related_name="hard_event_links")
+    event_id = models.CharField(max_length=255)
+    event_title = models.CharField(max_length=255, blank=True, default="")
+    event_start_raw = models.CharField(max_length=64, blank=True, default="")
+    event_end_raw = models.CharField(max_length=64, blank=True, default="")
+    event_start_at = models.DateTimeField()
+    event_end_at = models.DateTimeField()
+    all_day = models.BooleanField(default=False)
+    description = models.TextField(blank=True, default="")
+    location = models.CharField(max_length=255, blank=True, default="")
+    source = models.CharField(max_length=64, blank=True, default="google_calendar")
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["event_start_at", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["task", "event_id", "event_start_raw", "event_end_raw"],
+                name="unique_hard_event_task_link",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["task"]),
+            models.Index(fields=["event_id", "event_start_at"]),
+            models.Index(fields=["event_start_at"]),
+        ]
+
+
 class ScheduledTask(models.Model):
     """
     Prompt-driven tasks executed by the Function Caller at a future time.

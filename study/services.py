@@ -2350,7 +2350,10 @@ class StudyPlannerService:
             course,
             source_material=source_material,
         )
-        soft_event_stats = StudyPlannerService.sync_session_targets_to_soft_events(plan)
+        soft_event_stats = ObjectiveService.rebuild_objective_soft_events_for_window(
+            plan.window_start,
+            plan.window_end,
+        )
         plan.summary = (
             f"Auto-recalculated from {course.topics.count()} topics"
             + (f" after processing {source_material.title}." if source_material else ".")
@@ -2372,8 +2375,8 @@ class StudyPlannerService:
             "window_end": plan.window_end.isoformat() if plan.window_end else None,
             "archived_soft_events": cleanup_stats["archived_soft_events"],
             "canceled_slots": cleanup_stats["canceled_slots"],
-            "created_soft_events": soft_event_stats["created_soft_events"],
-            "updated_soft_events": soft_event_stats["updated_soft_events"],
+            "created_soft_events": soft_event_stats.get("planned_soft_events", 0),
+            "updated_soft_events": 0,
         }
 
     @staticmethod

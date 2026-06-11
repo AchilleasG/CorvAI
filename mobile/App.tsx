@@ -237,6 +237,7 @@ function InnerApp() {
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<any>(null);
   const localStreamRef = useRef<any>(null);
+  const remoteStreamRef = useRef<any>(null);
   const endCallRef = useRef(false);
   const endSignalReceivedRef = useRef(false);
   const endSignalPromptedRef = useRef(false);
@@ -1243,6 +1244,7 @@ function InnerApp() {
       localStreamRef.current.getTracks?.().forEach((track: any) => track.stop());
       localStreamRef.current = null;
     }
+    remoteStreamRef.current = null;
   }
 
   function endCallNow(sessionId: string) {
@@ -1394,6 +1396,11 @@ function InnerApp() {
   async function startRealtimeCall(session: CallSession) {
     const callSeq = ++callSeqRef.current;
     try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+      });
       setCallConnecting(true);
       endSignalReceivedRef.current = false;
       endSignalPromptedRef.current = false;
@@ -1415,6 +1422,12 @@ function InnerApp() {
 
       const pc = new RTCPeerConnection();
       peerConnectionRef.current = pc;
+
+      pc.ontrack = (event: any) => {
+        if (event.streams && event.streams[0]) {
+          remoteStreamRef.current = event.streams[0];
+        }
+      };
 
       pc.ondatachannel = (event: any) => {
         dataChannelRef.current = event.channel;

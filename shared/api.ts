@@ -6,11 +6,12 @@ import {
   JobEvent,
   UsageEvent,
   UsageSummary,
-  CalendarReplanResult,
   CombinedCalendar,
   Objective,
   ObjectiveLog,
   ObjectiveTask,
+  ObjectiveTaskPicker,
+  HardEventTaskLink,
   SoftSlotOutcomeResult,
   StudyCourse,
   StudyMaterial,
@@ -150,6 +151,9 @@ export function createApi(config: ApiConfig) {
       const qs = chat_id ? `?chat_id=${encodeURIComponent(chat_id)}` : "";
       return request<Job[]>(config, `/orchestration/jobs${qs}`);
     },
+    fetchJob(job_id: string) {
+      return request<Job>(config, `/orchestration/jobs/${job_id}`);
+    },
     cancelJob(job_id: string) {
       return request<Job>(config, `/orchestration/jobs/${job_id}/cancel`, {
         method: "POST",
@@ -217,6 +221,13 @@ export function createApi(config: ApiConfig) {
     },
     fetchObjective(objective_id: string) {
       return request<Objective>(config, `/orchestration/objectives/${objective_id}`);
+    },
+    fetchObjectiveTasks(params: { include_completed?: boolean; due_within_days?: number } = {}) {
+      const query = new URLSearchParams();
+      if (params.include_completed) query.set("include_completed", "true");
+      if (params.due_within_days) query.set("due_within_days", String(params.due_within_days));
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      return request<ObjectiveTaskPicker[]>(config, `/orchestration/objective_tasks${suffix}`);
     },
     createObjective(payload: Record<string, unknown>) {
       return request<Objective>(config, `/orchestration/objectives`, {
@@ -487,8 +498,23 @@ export function createApi(config: ApiConfig) {
         params.set("note", payload.note);
       }
       const suffix = params.toString() ? `?${params.toString()}` : "";
-      return request<CalendarReplanResult>(config, `/orchestration/calendar/replan${suffix}`, {
+      return request<Job>(config, `/orchestration/calendar/replan${suffix}`, {
         method: "POST",
+      });
+    },
+    createHardEventTaskLink(payload: {
+      task_id: string;
+      event: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+    }) {
+      return request<HardEventTaskLink>(config, `/orchestration/calendar/hard_event_task_links`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteHardEventTaskLink(link_id: string) {
+      return request<{ ok: boolean }>(config, `/orchestration/calendar/hard_event_task_links/${link_id}`, {
+        method: "DELETE",
       });
     },
     fetchSoftEvent(soft_event_id: string) {

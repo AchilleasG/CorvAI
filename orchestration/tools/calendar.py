@@ -152,7 +152,6 @@ def list_events(
                 "start": start_dt or start_date,
                 "end": end_dt or end_date,
                 "all_day": all_day,
-                "htmlLink": item.get("htmlLink"),
                 "location": item.get("location"),
             }
         )

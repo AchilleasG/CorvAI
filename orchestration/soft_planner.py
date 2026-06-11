@@ -399,111 +399,6 @@ def _spread_study_create_actions(
 	return rebalanced
 
 
-def _backfill_urgent_unslotted_events(
-	*,
-	actions: List[dict],
-	hard_events: List[Dict[str, Any]],
-	soft_state: Dict[str, Any],
-	window_start: datetime,
-	window_end: datetime,
-) -> List[dict]:
-	"""
-	Deterministic fallback: if urgent soft events are still unslotted, place one valid
-	slot each into genuinely free time, including weekends.
-	"""
-	if timezone.is_naive(window_start):
-		window_start = window_start.replace(tzinfo=dt_timezone.utc)
-	else:
-		window_start = window_start.astimezone(dt_timezone.utc)
-	if timezone.is_naive(window_end):
-		window_end = window_end.replace(tzinfo=dt_timezone.utc)
-	else:
-		window_end = window_end.astimezone(dt_timezone.utc)
-
-	occupied = _collect_occupied_intervals(hard_events, soft_state, actions)
-	new_actions: List[dict] = []
-
-	candidates: List[Tuple[datetime, int, Dict[str, Any]]] = []
-	for event in soft_state.get("soft_events", []):
-		if not isinstance(event, dict):
-			continue
-		event_id = str(event.get("id") or "")
-		if not event_id:
-			continue
-		if _is_event_already_slotted(event_id, soft_state, actions + new_actions):
-			continue
-
-		hard_deadline = _parse_iso_datetime(event.get("hard_deadline"))
-		soft_deadline = _parse_iso_datetime(event.get("soft_deadline"))
-		deadline = hard_deadline or soft_deadline or window_end
-		if deadline < window_start:
-			continue
-		if deadline > window_end:
-			continue
-
-		priority = int(event.get("priority") or 0)
-		candidates.append((deadline, -priority, event))
-
-	candidates.sort(key=lambda row: (row[0], row[1]))
-
-	for deadline, _, event in candidates:
-		event_id = str(event.get("id") or "")
-		preferred = max(int(event.get("preferred_duration_minutes") or 60), 1)
-		minimum = max(int(event.get("min_duration_minutes") or 30), 1)
-		if minimum > preferred:
-			minimum = preferred
-		remaining_effort = int(event.get("remaining_effort_minutes") or 0)
-		slots_needed = 1
-		if remaining_effort > preferred:
-			slots_needed = max(int((remaining_effort + preferred - 1) // preferred), 1)
-		slots_needed = min(slots_needed, 6)
-
-		slots_created = 0
-		while slots_created < slots_needed:
-			day = window_start.date()
-			last_day = min(window_end, deadline).date()
-			placed: Tuple[datetime, datetime] | None = None
-			while day <= last_day and placed is None:
-				day_start = datetime.combine(day, time(hour=8, minute=0), tzinfo=dt_timezone.utc)
-				day_end = datetime.combine(day, time(hour=23, minute=59), tzinfo=dt_timezone.utc)
-				search_start = max(window_start, day_start)
-				search_end = min(window_end, deadline, day_end)
-				if search_end > search_start:
-					placed = _find_first_free_interval(
-						search_start=search_start,
-						search_end=search_end,
-						duration_minutes=preferred,
-						occupied=occupied,
-					)
-					if placed is None and minimum < preferred:
-						placed = _find_first_free_interval(
-							search_start=search_start,
-							search_end=search_end,
-							duration_minutes=minimum,
-							occupied=occupied,
-						)
-				day += timedelta(days=1)
-
-			if not placed:
-				break
-
-			start_at, end_at = placed
-			occupied.append((start_at, end_at))
-			new_actions.append(
-				{
-					"type": "create_slot",
-					"soft_event_id": event_id,
-					"start_at": start_at.isoformat(),
-					"end_at": end_at.isoformat(),
-					"rationale": "Deterministic backfill for urgent unslotted soft event.",
-					"metadata": {"fallback": "urgent_unslotted_backfill"},
-				}
-			)
-			slots_created += 1
-
-	return actions + new_actions
-
-
 def plan_soft_window(
 	*,
 	hard_events: List[Dict[str, Any]],
@@ -558,6 +453,8 @@ def plan_soft_window(
 		"- When there are multiple valid placement days before a deadline, spread study sessions across as many distinct days as practical instead of clustering several into one day. Prefer around one study session per day unless deadline pressure makes clustering necessary.\n"
 		"- Treat completed prior sessions as evidence of progress. Treat skipped or missed prior sessions and blocker logs as signals that the original timing may have been poor; avoid repeating obviously bad placements when practical.\n"
 		"- Use objective task status, recent logs, and prior slot outcome history to decide whether work should be scheduled earlier, later, in longer blocks, or in shorter/lighter blocks.\n"
+		"- For objective-backed work, every task with a due date inside the window must be represented by at least one slot before its deadline. If an objective itself has a deadline inside the window, make sure its urgent tasks are scheduled before that deadline too.\n"
+		"- If coverage is tight, compress durations toward the minimum and use denser placement when necessary. Rare late-night placement is allowed only when deadline pressure genuinely requires it.\n"
 		"- If a soft event is at risk, prefer better slot placement or leave it unslotted; do not propose promote_slot unless the user explicitly requested promotion.\n"
 		"- Keep output concise; avoid redundant updates."
 	)
@@ -624,13 +521,6 @@ def plan_soft_window(
 
 	actions = _filter_conflicting_actions(actions, hard_events, soft_state)
 	actions = _spread_study_create_actions(
-		actions=actions,
-		hard_events=hard_events,
-		soft_state=soft_state,
-		window_start=window_start,
-		window_end=window_end,
-	)
-	actions = _backfill_urgent_unslotted_events(
 		actions=actions,
 		hard_events=hard_events,
 		soft_state=soft_state,

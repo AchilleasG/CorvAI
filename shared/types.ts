@@ -196,7 +196,9 @@ export type HardCalendarEvent = {
   start: string;
   end: string;
   all_day?: boolean;
+  location?: string;
   source: "hard";
+  task_links?: HardEventTaskLink[];
 };
 
 export type SoftSlot = {
@@ -287,6 +289,30 @@ export type ObjectiveTask = {
   updated_at?: string | null;
 };
 
+export type ObjectiveTaskPicker = {
+  id: string;
+  objective_id: string;
+  objective_title: string;
+  title: string;
+  status: string;
+  due_at?: string | null;
+  remaining_effort_minutes?: number | null;
+  estimated_effort_minutes?: number | null;
+};
+
+export type HardEventTaskLink = {
+  id: string;
+  task_id: string;
+  objective_id: string;
+  objective_title: string;
+  task_title: string;
+  due_at?: string | null;
+  event_id: string;
+  event_title: string;
+  event_start_raw: string;
+  event_end_raw: string;
+};
+
 export type ObjectiveLog = {
   id: string;
   objective_id: string;
@@ -330,6 +356,12 @@ export type ObjectiveCoverageItem = {
   missing_minutes?: number | null;
   coverage_state: "covered" | "partial" | "uncovered";
   slot_ids: string[];
+  hard_event_refs?: Array<{
+    event_id: string;
+    title: string;
+    start?: string | null;
+    end?: string | null;
+  }>;
 };
 
 export type ObjectiveCoverageSnapshot = {

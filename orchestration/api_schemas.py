@@ -161,6 +161,58 @@ class ObjectiveTaskOut(Schema):
         )
 
 
+class ObjectiveTaskPickerOut(Schema):
+    id: UUID
+    objective_id: UUID
+    objective_title: str
+    title: str
+    status: str
+    due_at: Optional[str] = None
+    remaining_effort_minutes: Optional[int] = None
+    estimated_effort_minutes: Optional[int] = None
+
+    @staticmethod
+    def from_model(task) -> "ObjectiveTaskPickerOut":
+        return ObjectiveTaskPickerOut(
+            id=task.id,
+            objective_id=task.objective_id,
+            objective_title=task.objective.title,
+            title=task.title,
+            status=task.status,
+            due_at=task.due_at.isoformat() if task.due_at else None,
+            remaining_effort_minutes=task.remaining_effort_minutes,
+            estimated_effort_minutes=task.estimated_effort_minutes,
+        )
+
+
+class HardEventTaskLinkOut(Schema):
+    id: UUID
+    task_id: UUID
+    objective_id: UUID
+    objective_title: str
+    task_title: str
+    due_at: Optional[str] = None
+    event_id: str
+    event_title: str
+    event_start_raw: str
+    event_end_raw: str
+
+    @staticmethod
+    def from_model(link) -> "HardEventTaskLinkOut":
+        return HardEventTaskLinkOut(
+            id=link.id,
+            task_id=link.task_id,
+            objective_id=link.task.objective_id,
+            objective_title=link.task.objective.title,
+            task_title=link.task.title,
+            due_at=link.task.due_at.isoformat() if link.task.due_at else None,
+            event_id=link.event_id,
+            event_title=link.event_title or "",
+            event_start_raw=link.event_start_raw or "",
+            event_end_raw=link.event_end_raw or "",
+        )
+
+
 class ObjectiveLogOut(Schema):
     id: UUID
     objective_id: UUID

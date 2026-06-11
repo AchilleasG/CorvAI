@@ -12,7 +12,7 @@ from orchestration.soft_scheduler import collect_window_state
 from orchestration.soft_planner import plan_soft_window
 from orchestration.services import SoftEventService
 
-from orchestration.models import SoftEvent, SoftEventSlot, OrchestrationSetting
+from orchestration.models import OrchestrationSetting, SoftEvent, SoftEventSlot, SoftEventTask
 
 HABITS_KEY = "calendar_habits_text"
 
@@ -174,6 +174,20 @@ def get_soft_event(
     if not se:
         return {"found": False}
 
+    linked_tasks = [
+        {
+            "task_id": str(link.task_id),
+            "task_title": link.task.title,
+            "objective_id": str(link.task.objective_id),
+            "objective_title": link.task.objective.title,
+            "due_at": link.task.due_at.isoformat() if link.task.due_at else None,
+            "status": link.task.status,
+        }
+        for link in SoftEventTask.objects.filter(soft_event=se).select_related("task__objective").order_by(
+            "task__objective__title", "task__sort_order", "task__created_at"
+        )
+    ]
+
     slots_qs = SoftEventSlot.objects.filter(soft_event=se).order_by("start_at")
     if slot_status:
         slots_qs = slots_qs.filter(status=slot_status)
@@ -212,6 +226,8 @@ def get_soft_event(
             "min_duration_minutes": se.min_duration_minutes,
             "soft_deadline": se.soft_deadline.isoformat() if se.soft_deadline else None,
             "hard_deadline": se.hard_deadline.isoformat() if se.hard_deadline else None,
+            "metadata": se.metadata or {},
+            "linked_tasks": linked_tasks,
         },
         "slots": slots,
     }

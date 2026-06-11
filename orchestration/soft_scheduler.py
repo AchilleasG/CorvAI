@@ -77,6 +77,7 @@ def collect_window_state(
                 "deferral_limit": se.deferral_limit,
                 "frequency": se.frequency,
                 "status": se.status,
+                "metadata": se.metadata or {},
             }
             for se in soft_events
         ],

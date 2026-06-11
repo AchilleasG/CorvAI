@@ -47,7 +47,12 @@ class Command(BaseCommand):
 
         # Collect current soft state.
         soft_state = collect_window_state(window_start, window_end)
-        soft_state["objective_inputs"] = ObjectiveService.scheduler_snapshot(window_start, window_end)
+        soft_state["soft_events"] = [
+            event
+            for event in soft_state.get("soft_events", [])
+            if str((event.get("metadata") or {}).get("source") or "") != ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE
+        ]
+        soft_state["objective_inputs"] = []
 
         # Hash and compare to last snapshot.
         prev_hash = OrchestrationSetting.objects.filter(key="soft_window_hash").first()

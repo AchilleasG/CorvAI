@@ -8,6 +8,7 @@ from django.core.management import call_command
 
 from orchestration.scheduler import poll_due_tasks
 from orchestration.call_processing import poll_call_sessions
+from orchestration.tools.soft_events import SoftPlannerJobService
 
 logger = logging.getLogger(__name__)
 
@@ -57,4 +58,14 @@ def poll_soft_event_slots_task():
         call_command("poll_soft_event_slots")
     except Exception as exc:
         logger.exception("poll_soft_event_slots failed: %s", exc)
+        raise
+
+
+@shared_task(name="orchestration.tasks.run_calendar_replan_job")
+def run_calendar_replan_job(job_id: str, days: int = 14, note: str | None = None):
+    try:
+        result = SoftPlannerJobService.run_replan_job(job_id, days=days, note=note)
+        return {"job_id": job_id, "status": "completed", "result": result}
+    except Exception as exc:
+        logger.exception("Calendar replan job failed for %s: %s", job_id, exc)
         raise

@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import concurrent.futures
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import ceil
-from typing import Any, Iterable, Optional, Sequence
+import time as time_module
+from typing import Any, Callable, Iterable, Optional, Sequence
 
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 
+from orchestration.model_providers import get_client, resolve_provider
 from orchestration.models import (
+    HardEventTaskLink,
     Objective,
+    OrchestrationSetting,
     ObjectiveLog,
     ObjectiveTask,
     SoftEvent,
@@ -17,7 +23,7 @@ from orchestration.models import (
     SoftEventSlot,
     SoftEventTask,
 )
-from orchestration.services import SoftEventService
+from orchestration.services import ModelConfigService, SoftEventService, UsageService, UserInfoService
 from orchestration.soft_planner import plan_soft_window
 from orchestration.soft_scheduler import collect_window_state
 from orchestration.tools.calendar import list_events
@@ -41,14 +47,64 @@ class SessionPlan:
     priority: int
     task_ids: list[str]
     metadata: dict
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    notify_at: Optional[datetime] = None
+    rationale: str = ""
 
 
 class ObjectiveService:
     OBJECTIVE_SOFT_EVENT_SOURCE = "objective_scheduler"
+    SLOT_UNASSIGN_STATUSES = [
+        SoftEventSlot.STATUS_PLANNED,
+        SoftEventSlot.STATUS_DEFERRED,
+        SoftEventSlot.STATUS_PROMOTED,
+    ]
 
     @staticmethod
     def _clean_text(value: object) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _emit_scheduler_progress(
+        progress_callback: Optional[Callable[[float, str], None]],
+        progress: float,
+        message: str,
+    ) -> None:
+        if progress_callback:
+            progress_callback(progress, message)
+
+    @staticmethod
+    def _ensure_not_canceled(cancel_check: Optional[Callable[[], None]]) -> None:
+        if cancel_check:
+            cancel_check()
+
+    @staticmethod
+    def _call_with_heartbeat(
+        func: Callable[[], Any],
+        *,
+        heartbeat_message: str,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        progress: float = 0.0,
+        heartbeat_seconds: float = 12.0,
+    ) -> Any:
+        start = time_module.monotonic()
+        heartbeat_count = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func)
+            while True:
+                ObjectiveService._ensure_not_canceled(cancel_check)
+                try:
+                    return future.result(timeout=heartbeat_seconds)
+                except concurrent.futures.TimeoutError:
+                    heartbeat_count += 1
+                    elapsed = int(time_module.monotonic() - start)
+                    ObjectiveService._emit_scheduler_progress(
+                        progress_callback,
+                        progress,
+                        f"{heartbeat_message} ({elapsed}s elapsed, heartbeat {heartbeat_count})",
+                    )
 
     @staticmethod
     def _objective_source(objective: Objective) -> str:
@@ -521,6 +577,17 @@ class ObjectiveService:
         return tasks
 
     @staticmethod
+    def _relevant_tasks_for_window(
+        objective: Objective,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[ObjectiveTask]:
+        tasks = ObjectiveService._select_actionable_tasks(objective)
+        if objective.deadline_at and objective.deadline_at <= window_end:
+            return tasks
+        return [task for task in tasks if task.due_at and task.due_at <= window_end]
+
+    @staticmethod
     def _preferred_minutes_for_objective(objective: Objective) -> int:
         source = ObjectiveService._objective_source(objective)
         if source == "study_assignment":
@@ -578,7 +645,7 @@ class ObjectiveService:
         if objective.status != Objective.STATUS_ACTIVE:
             return False
         source = ObjectiveService._objective_source(objective)
-        tasks = ObjectiveService._select_actionable_tasks(objective)
+        tasks = ObjectiveService._relevant_tasks_for_window(objective, window_start, window_end)
         has_direct_work = bool(tasks) or bool(objective.remaining_effort_minutes or objective.estimated_effort_minutes)
         if source == "study_course" and not tasks:
             return False
@@ -648,6 +715,850 @@ class ObjectiveService:
                 )
             )
         return sessions
+
+    @staticmethod
+    def _normalize_session_task_ids(
+        objective: Objective,
+        session_task_ids: Sequence[str],
+        valid_task_ids: set[str],
+    ) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for task_id in session_task_ids:
+            text = str(task_id or "").strip()
+            if text and text in valid_task_ids and text not in seen:
+                seen.add(text)
+                normalized.append(text)
+        if normalized:
+            return normalized
+        fallback_tasks = ObjectiveService._select_actionable_tasks(objective)
+        return [str(task.id) for task in fallback_tasks[:1]]
+
+    @staticmethod
+    def _session_notes_for_objective(
+        objective: Objective,
+        task_ids: Sequence[str],
+        *,
+        extra_notes: str = "",
+    ) -> str:
+        task_map = {
+            str(task.id): task
+            for task in ObjectiveService._select_actionable_tasks(objective)
+        }
+        notes = [f"Objective: {objective.title}"]
+        task_lines: list[str] = []
+        for task_id in task_ids:
+            task = task_map.get(str(task_id))
+            if not task:
+                continue
+            due_text = task.due_at.isoformat() if task.due_at else (
+                objective.deadline_at.isoformat() if objective.deadline_at else "No explicit deadline"
+            )
+            task_lines.append(f"- {task.title} (due: {due_text})")
+        if task_lines:
+            notes.append("Tasks:\n" + "\n".join(task_lines))
+        source = ObjectiveService._objective_source(objective)
+        if source:
+            notes.append(f"Objective source: {source}")
+        if extra_notes.strip():
+            notes.append(extra_notes.strip())
+        return "\n\n".join(bit for bit in notes if bit).strip()
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, str):
+            try:
+                dt = datetime.fromisoformat(value)
+            except Exception:
+                return None
+        else:
+            return None
+        if timezone.is_naive(dt):
+            dt = timezone.make_aware(dt, timezone=timezone.get_current_timezone())
+        return dt
+
+    @staticmethod
+    def _hard_event_match_key(event_id: Any, start_raw: Any, end_raw: Any) -> tuple[str, str, str]:
+        return (
+            str(event_id or "").strip(),
+            str(start_raw or "").strip(),
+            str(end_raw or "").strip(),
+        )
+
+    @staticmethod
+    def _matched_hard_event_links(
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        hard_events: Optional[Sequence[dict[str, Any]]] = None,
+    ) -> tuple[dict[tuple[str, str, str], list[HardEventTaskLink]], dict[str, list[dict[str, Any]]]]:
+        if hard_events is None:
+            hard_events = list_events(
+                time_min=window_start.isoformat(),
+                time_max=window_end.isoformat(),
+                max_results=2500,
+            ).get("events", [])
+        event_index: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for event in hard_events:
+            if not isinstance(event, dict):
+                continue
+            key = ObjectiveService._hard_event_match_key(event.get("id"), event.get("start"), event.get("end"))
+            if not key[0]:
+                continue
+            event_index[key] = event
+        matched_by_event: dict[tuple[str, str, str], list[HardEventTaskLink]] = {}
+        matched_by_task: dict[str, list[dict[str, Any]]] = {}
+        link_qs = (
+            HardEventTaskLink.objects.select_related("task__objective")
+            .filter(event_start_at__lt=window_end, event_end_at__gt=window_start)
+            .exclude(task__status__in=[ObjectiveTask.STATUS_DONE, ObjectiveTask.STATUS_CANCELED, ObjectiveTask.STATUS_BLOCKED])
+        )
+        for link in link_qs:
+            key = ObjectiveService._hard_event_match_key(link.event_id, link.event_start_raw, link.event_end_raw)
+            event = event_index.get(key)
+            if not event:
+                continue
+            matched_by_event.setdefault(key, []).append(link)
+            matched_by_task.setdefault(str(link.task_id), []).append(event)
+        return matched_by_event, matched_by_task
+
+    @staticmethod
+    def _task_ids_covered_by_hard_events(
+        tasks: Sequence[ObjectiveTask],
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        hard_events: Optional[Sequence[dict[str, Any]]] = None,
+        matched_by_task: Optional[dict[str, list[dict[str, Any]]]] = None,
+    ) -> set[str]:
+        if matched_by_task is None:
+            _, matched_by_task = ObjectiveService._matched_hard_event_links(
+                window_start,
+                window_end,
+                hard_events=hard_events,
+            )
+        covered: set[str] = set()
+        for task in tasks:
+            deadline = task.due_at or window_end
+            for event in matched_by_task.get(str(task.id), []):
+                start, _end = ObjectiveService._event_bounds(event)
+                if start and start <= deadline:
+                    covered.add(str(task.id))
+                    break
+        return covered
+
+    @staticmethod
+    def _event_bounds(event: dict[str, Any]) -> tuple[Optional[datetime], Optional[datetime]]:
+        start = ObjectiveService._parse_iso_datetime(event.get("start"))
+        end = ObjectiveService._parse_iso_datetime(event.get("end"))
+        return start, end
+
+    @staticmethod
+    def _intervals_overlap(
+        a_start: datetime,
+        a_end: datetime,
+        b_start: datetime,
+        b_end: datetime,
+    ) -> bool:
+        return a_start < b_end and a_end > b_start
+
+    @staticmethod
+    def _is_nonblocking_reminder(event: dict[str, Any]) -> bool:
+        description = str(event.get("description") or "")
+        return "reminder" in description.lower()
+
+    @staticmethod
+    def _blocked_intervals_from_hard_events(hard_events: Sequence[dict[str, Any]]) -> list[tuple[datetime, datetime]]:
+        blocked: list[tuple[datetime, datetime]] = []
+        for event in hard_events:
+            if not isinstance(event, dict):
+                continue
+            if event.get("all_day"):
+                continue
+            if ObjectiveService._is_nonblocking_reminder(event):
+                continue
+            start, end = ObjectiveService._event_bounds(event)
+            if start and end and end > start:
+                blocked.append((start, end))
+        blocked.sort(key=lambda item: item[0])
+        return blocked
+
+    @staticmethod
+    def _task_deadline(task: ObjectiveTask, objective: Objective, window_end: datetime) -> datetime:
+        if task.due_at:
+            return task.due_at
+        if objective.deadline_at:
+            return objective.deadline_at
+        return window_end
+
+    @staticmethod
+    def _validate_exact_session_plans(
+        plans: Sequence[SessionPlan],
+        *,
+        objectives: Sequence[Objective],
+        hard_events: Sequence[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> tuple[list[SessionPlan], list[str], set[str]]:
+        objective_map = {str(objective.id): objective for objective in objectives}
+        blocked = ObjectiveService._blocked_intervals_from_hard_events(hard_events)
+        valid: list[SessionPlan] = []
+        issues: list[str] = []
+        covered_task_ids: set[str] = set()
+        occupied: list[tuple[datetime, datetime, str]] = []
+
+        for index, plan in enumerate(plans, start=1):
+            metadata = plan.metadata or {}
+            objective_id = str(metadata.get("objective_id") or "").strip()
+            objective = objective_map.get(objective_id)
+            if objective is None:
+                issues.append(f"Session {index} references unknown objective {objective_id}.")
+                continue
+            if not plan.start_at or not plan.end_at or plan.end_at <= plan.start_at:
+                issues.append(f"Session {index} for {objective.title} has invalid timing.")
+                continue
+            if plan.start_at < window_start or plan.end_at > window_end:
+                issues.append(f"Session {index} for {objective.title} falls outside the planning window.")
+                continue
+            if any(
+                ObjectiveService._intervals_overlap(plan.start_at, plan.end_at, busy_start, busy_end)
+                for busy_start, busy_end in blocked
+            ):
+                issues.append(f"Session {index} for {objective.title} overlaps a hard event.")
+                continue
+            if any(
+                ObjectiveService._intervals_overlap(plan.start_at, plan.end_at, busy_start, busy_end)
+                for busy_start, busy_end, _title in occupied
+            ):
+                issues.append(f"Session {index} for {objective.title} overlaps another planned session.")
+                continue
+
+            duration_minutes = max(int((plan.end_at - plan.start_at).total_seconds() // 60), 0)
+            if duration_minutes <= 0:
+                issues.append(f"Session {index} for {objective.title} has non-positive duration.")
+                continue
+            plan.preferred_minutes = max(int(plan.preferred_minutes or duration_minutes), duration_minutes)
+            plan.min_minutes = max(min(int(plan.min_minutes or duration_minutes), plan.preferred_minutes), 1)
+            if duration_minutes < plan.min_minutes or duration_minutes > plan.preferred_minutes:
+                plan.preferred_minutes = duration_minutes
+                plan.min_minutes = duration_minutes
+
+            task_map = {
+                str(task.id): task
+                for task in ObjectiveService._select_actionable_tasks(objective)
+            }
+            valid_task_ids = [task_id for task_id in plan.task_ids if task_id in task_map]
+            if not valid_task_ids:
+                issues.append(f"Session {index} for {objective.title} does not cover any valid task.")
+                continue
+            deadline_missed = False
+            for task_id in valid_task_ids:
+                task = task_map[task_id]
+                deadline = ObjectiveService._task_deadline(task, objective, window_end)
+                if plan.start_at > deadline:
+                    issues.append(f"Session {index} for {objective.title} starts after task deadline for {task.title}.")
+                    deadline_missed = True
+                    break
+            if deadline_missed:
+                continue
+
+            plan.task_ids = valid_task_ids
+            valid.append(plan)
+            occupied.append((plan.start_at, plan.end_at, plan.title))
+            covered_task_ids.update(valid_task_ids)
+
+        return valid, issues, covered_task_ids
+
+    @staticmethod
+    def _exact_schedule_prompt(
+        *,
+        planner_note: Optional[str] = None,
+    ) -> str:
+        planner_note_block = f"Planner note (hard constraint): {planner_note}\n" if planner_note else ""
+        habits = (
+            OrchestrationSetting.objects.filter(key="calendar_habits_text")
+            .values_list("value", flat=True)
+            .first()
+            or ""
+        )
+        habits_block = f"\nScheduling habits:\n{habits}" if habits else ""
+        core_profile_block = UserInfoService.format_core_profile_block()
+        core_notes = f"\nCore user context:\n{core_profile_block}" if core_profile_block else ""
+        return (
+            "You are planning urgent objective sessions for the next 14 days.\n"
+            "You must decide BOTH how many sessions are needed AND the exact time each session will happen.\n"
+            "Do not first invent sessions abstractly and leave timing for later. Timing and session-count are one joint decision.\n"
+            "Only include objectives or tasks whose deadline falls within the planning window. Skip everything else.\n"
+            "Return JSON only with keys: sessions, summary.\n"
+            "Each session must include: objective_id, title, description, notes, priority, task_ids, start_at, end_at, notify_at, rationale.\n"
+            "Rules:\n"
+            "- Every urgent task in the window MUST appear in at least one session before its deadline.\n"
+            "- A session may cover multiple tasks.\n"
+            "- A difficult task may appear in multiple sessions.\n"
+            "- You must choose the number of sessions based on the actual free time available in the calendar.\n"
+            "- If time is tight, compress work into fewer or shorter sessions rather than leaving tasks unscheduled.\n"
+            "- If the situation is genuinely dire, late-night work is allowed, but use it sparingly and place it on the least harmful day.\n"
+            "- Use hard-event titles, descriptions, locations, and exact timed blocks as authoritative context.\n"
+            "- Timed hard events are immovable. All-day events are context only, not blocked time. Reminder-style events are non-blocking.\n"
+            "- Do not overlap hard events.\n"
+            "- Do not overlap other planned sessions in your own output.\n"
+            "- Prefer realistic buffers when the schedule allows, but urgent coverage takes precedence.\n"
+            "- Do not leave urgent work unscheduled merely because the placement is imperfect.\n"
+            f"{planner_note_block}"
+            f"{core_notes}"
+            f"{habits_block}"
+        )
+
+    @staticmethod
+    def _exact_schedule_payload(
+        *,
+        objectives: Sequence[Objective],
+        hard_events: Sequence[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> tuple[list[dict[str, Any]], set[str]]:
+        objective_payload: list[dict[str, Any]] = []
+        urgent_task_ids: set[str] = set()
+        _matched_by_event, matched_by_task = ObjectiveService._matched_hard_event_links(
+            window_start,
+            window_end,
+            hard_events=hard_events,
+        )
+        for objective in objectives:
+            relevant_tasks = ObjectiveService._relevant_tasks_for_window(objective, window_start, window_end)
+            hard_covered_task_ids = ObjectiveService._task_ids_covered_by_hard_events(
+                relevant_tasks,
+                window_start=window_start,
+                window_end=window_end,
+                hard_events=hard_events,
+                matched_by_task=matched_by_task,
+            )
+            uncovered_relevant_tasks = [task for task in relevant_tasks if str(task.id) not in hard_covered_task_ids]
+            include_deadline_only_objective = (
+                objective.deadline_at
+                and objective.deadline_at <= window_end
+                and not relevant_tasks
+            )
+            if not uncovered_relevant_tasks and not include_deadline_only_objective:
+                continue
+            for task in uncovered_relevant_tasks:
+                urgent_task_ids.add(str(task.id))
+            objective_payload.append(
+                {
+                    "id": str(objective.id),
+                    "title": objective.title,
+                    "description": objective.description,
+                    "deadline_at": objective.deadline_at.isoformat() if objective.deadline_at else None,
+                    "priority": objective.priority,
+                    "remaining_effort_minutes": objective.remaining_effort_minutes,
+                    "estimated_effort_minutes": objective.estimated_effort_minutes,
+                    "source": ObjectiveService._objective_source(objective),
+                    "notes": objective.notes,
+                    "tasks": [
+                        {
+                            "id": str(task.id),
+                            "title": task.title,
+                            "description": task.description,
+                            "status": task.status,
+                            "due_at": task.due_at.isoformat() if task.due_at else None,
+                            "estimated_effort_minutes": task.estimated_effort_minutes,
+                            "remaining_effort_minutes": task.remaining_effort_minutes,
+                        }
+                        for task in uncovered_relevant_tasks
+                    ],
+                    "hard_scheduled_task_ids": sorted(hard_covered_task_ids),
+                    "recent_logs": ObjectiveService._recent_logs_for_objective(objective),
+                }
+            )
+        payload = {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "hard_events": list(hard_events),
+            "objectives": objective_payload,
+        }
+        return [payload], urgent_task_ids
+
+    @staticmethod
+    def _request_exact_schedule_sessions(
+        *,
+        objectives: Sequence[Objective],
+        hard_events: Sequence[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+        planner_note: Optional[str] = None,
+        model: str | None = None,
+        retry_feedback: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        progress: float = 0.0,
+        attempt_label: str = "attempt 1",
+    ) -> list[SessionPlan]:
+        payloads, urgent_task_ids = ObjectiveService._exact_schedule_payload(
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        if not payloads or not payloads[0]["objectives"]:
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                progress,
+                f"Skipping exact objective scheduling {attempt_label}: no urgent objectives in window",
+            )
+            return []
+        payload = payloads[0]
+        payload_json = json.dumps(payload, default=str)
+        model_name = model or ModelConfigService.get_soft_planner_model()
+        provider = resolve_provider(model_name)
+        prompt = ObjectiveService._exact_schedule_prompt(planner_note=planner_note)
+        if retry_feedback:
+            prompt += f"\nPrevious attempt failed validation:\n{retry_feedback}\nFix those issues completely.\n"
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            progress,
+            (
+                f"Sending exact objective scheduling request {attempt_label} "
+                f"({len(payload['objectives'])} objectives, {len(urgent_task_ids)} urgent tasks, "
+                f"{len(hard_events)} hard events, {len(payload_json)} payload chars, model {model_name})"
+            ),
+        )
+
+        def _make_request() -> list[dict[str, Any]]:
+            if provider == "openai":
+                resp = get_client("openai").responses.create(
+                    model=model_name,
+                    input=[
+                        {"role": "developer", "content": [{"type": "input_text", "text": prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": payload_json}]},
+                    ],
+                    text={"format": {"type": "json_object"}, "verbosity": "low"},
+                    reasoning={"effort": "medium"},
+                    store=False,
+                    timeout=120,
+                )
+                usage_obj = getattr(resp, "usage", None)
+                if usage_obj:
+                    UsageService.log_usage(
+                        source="objective_exact_schedule",
+                        model=model_name,
+                        cache_mode=ModelConfigService.get_cache_mode(),
+                        usage=usage_obj,
+                        job=None,
+                    )
+                raw = getattr(resp, "output_text", "") or "{}"
+                data = json.loads(raw)
+            else:
+                resp = get_client("xai").chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": payload_json},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                raw = "{}"
+                if getattr(resp, "choices", None):
+                    raw = resp.choices[0].message.content or "{}"  # type: ignore[assignment]
+                data = json.loads(raw)
+            return data.get("sessions") if isinstance(data.get("sessions"), list) else []
+
+        request_started = time_module.monotonic()
+        try:
+            sessions_raw = ObjectiveService._call_with_heartbeat(
+                _make_request,
+                heartbeat_message="Waiting for exact objective scheduling model",
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                progress=progress,
+            )
+            elapsed = int(time_module.monotonic() - request_started)
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                progress,
+                f"Exact objective scheduling request {attempt_label} returned {len(sessions_raw)} raw sessions after {elapsed}s",
+            )
+        except Exception as exc:
+            sessions_raw = []
+            elapsed = int(time_module.monotonic() - request_started)
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                progress,
+                f"Exact objective scheduling request {attempt_label} failed after {elapsed}s: {type(exc).__name__}: {exc}",
+            )
+
+        objective_map = {str(objective.id): objective for objective in objectives}
+        plans: list[SessionPlan] = []
+        for item in sessions_raw:
+            if not isinstance(item, dict):
+                continue
+            objective_id = str(item.get("objective_id") or "").strip()
+            objective = objective_map.get(objective_id)
+            if objective is None:
+                continue
+            valid_task_ids = {str(task.id) for task in ObjectiveService._select_actionable_tasks(objective)}
+            task_ids = ObjectiveService._normalize_session_task_ids(
+                objective,
+                item.get("task_ids") if isinstance(item.get("task_ids"), list) else [],
+                valid_task_ids,
+            )
+            start_at = ObjectiveService._parse_iso_datetime(item.get("start_at"))
+            end_at = ObjectiveService._parse_iso_datetime(item.get("end_at"))
+            notify_at = ObjectiveService._parse_iso_datetime(item.get("notify_at"))
+            duration_minutes = max(int(((end_at - start_at).total_seconds() // 60) if start_at and end_at else 0), 0)
+            preferred_minutes = duration_minutes or ObjectiveService._preferred_minutes_for_objective(objective)
+            notes = ObjectiveService._session_notes_for_objective(
+                objective,
+                task_ids,
+                extra_notes=str(item.get("notes") or ""),
+            )
+            plans.append(
+                SessionPlan(
+                    title=ObjectiveService._first_nonempty(item.get("title"), objective.title)[:255],
+                    description=ObjectiveService._first_nonempty(item.get("description"), objective.description, f"Work on {objective.title}"),
+                    notes=notes,
+                    preferred_minutes=max(preferred_minutes, MIN_SESSION_MINUTES),
+                    min_minutes=max(min(duration_minutes or MIN_SESSION_MINUTES, max((duration_minutes or MIN_SESSION_MINUTES) // 2, MIN_SESSION_MINUTES)), 1),
+                    soft_deadline=objective.deadline_at,
+                    hard_deadline=objective.deadline_at,
+                    priority=max(int(item.get("priority") or objective.priority or 0), 0),
+                    task_ids=task_ids,
+                    metadata={
+                        "source": ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+                        "objective_id": str(objective.id),
+                        "objective_source": ObjectiveService._objective_source(objective),
+                        "task_ids": task_ids,
+                        "planner_mode": "single_pass_exact",
+                    },
+                    start_at=start_at,
+                    end_at=end_at,
+                    notify_at=notify_at,
+                    rationale=str(item.get("rationale") or "").strip(),
+                )
+            )
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            progress,
+            f"Parsed exact objective scheduling request {attempt_label} into {len(plans)} session plans",
+        )
+        return plans
+
+    @staticmethod
+    def _scheduled_session_plans_for_window(
+        objectives: Sequence[Objective],
+        *,
+        hard_events: Sequence[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+        planner_note: Optional[str] = None,
+        model: str | None = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> list[SessionPlan]:
+        payloads, urgent_task_ids = ObjectiveService._exact_schedule_payload(
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        if not payloads or not payloads[0]["objectives"]:
+            return []
+
+        first_pass = ObjectiveService._request_exact_schedule_sessions(
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+            planner_note=planner_note,
+            model=model,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress=0.22,
+            attempt_label="attempt 1",
+        )
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.26,
+            f"Validating exact objective scheduling attempt 1 ({len(first_pass)} planned sessions)",
+        )
+        valid, issues, covered = ObjectiveService._validate_exact_session_plans(
+            first_pass,
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        missing = sorted(urgent_task_ids - covered)
+        if not issues and not missing:
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                0.28,
+                f"Exact objective scheduling attempt 1 passed validation with {len(valid)} sessions covering all {len(covered)} urgent tasks",
+            )
+            return valid
+
+        retry_feedback = "\n".join(
+            [*issues[:20], *(f"Urgent task not covered: {task_id}" for task_id in missing[:20])]
+        )
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.3,
+            (
+                "Retrying exact objective scheduling after validation found problems: "
+                f"{len(issues)} invalid-session issues, {len(missing)} uncovered urgent tasks"
+            ),
+        )
+        second_pass = ObjectiveService._request_exact_schedule_sessions(
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+            planner_note=planner_note,
+            model=model,
+            retry_feedback=retry_feedback,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress=0.32,
+            attempt_label="attempt 2",
+        )
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.36,
+            f"Validating exact objective scheduling attempt 2 ({len(second_pass)} planned sessions)",
+        )
+        valid_retry, issues_retry, covered_retry = ObjectiveService._validate_exact_session_plans(
+            second_pass,
+            objectives=objectives,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        missing_retry = sorted(urgent_task_ids - covered_retry)
+        if issues_retry or missing_retry:
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                0.38,
+                (
+                    "Exact objective scheduling attempt 2 still has problems: "
+                    f"{len(issues_retry)} invalid-session issues, {len(missing_retry)} uncovered urgent tasks"
+                ),
+            )
+        else:
+            ObjectiveService._emit_scheduler_progress(
+                progress_callback,
+                0.38,
+                f"Exact objective scheduling attempt 2 passed validation with {len(valid_retry)} sessions covering all {len(covered_retry)} urgent tasks",
+            )
+        return valid_retry
+
+    @staticmethod
+    def _session_blueprints_for_window(
+        objectives: Sequence[Objective],
+        *,
+        hard_events: Sequence[dict[str, Any]],
+        window_start: datetime,
+        window_end: datetime,
+        model: str | None = None,
+    ) -> list[SessionPlan]:
+        objective_index = {str(objective.id): objective for objective in objectives}
+        objective_payload: list[dict[str, Any]] = []
+        urgent_task_ids: set[str] = set()
+        for objective in objectives:
+            relevant_tasks = ObjectiveService._relevant_tasks_for_window(objective, window_start, window_end)
+            if not relevant_tasks and not (objective.deadline_at and objective.deadline_at <= window_end):
+                continue
+            for task in relevant_tasks:
+                urgent_task_ids.add(str(task.id))
+            objective_payload.append(
+                {
+                    "id": str(objective.id),
+                    "title": objective.title,
+                    "description": objective.description,
+                    "deadline_at": objective.deadline_at.isoformat() if objective.deadline_at else None,
+                    "priority": objective.priority,
+                    "remaining_effort_minutes": objective.remaining_effort_minutes,
+                    "estimated_effort_minutes": objective.estimated_effort_minutes,
+                    "source": ObjectiveService._objective_source(objective),
+                    "notes": objective.notes,
+                    "tasks": [
+                        {
+                            "id": str(task.id),
+                            "title": task.title,
+                            "description": task.description,
+                            "status": task.status,
+                            "due_at": task.due_at.isoformat() if task.due_at else None,
+                            "estimated_effort_minutes": task.estimated_effort_minutes,
+                            "remaining_effort_minutes": task.remaining_effort_minutes,
+                        }
+                        for task in relevant_tasks
+                    ],
+                    "recent_logs": ObjectiveService._recent_logs_for_objective(objective),
+                }
+            )
+
+        if not objective_payload:
+            return []
+
+        model_name = model or ModelConfigService.get_soft_planner_model()
+        provider = resolve_provider(model_name)
+        prompt = (
+            "You are planning study/work soft-event sessions for the next 14 days.\n"
+            "You receive timed hard calendar events and active objectives with actionable tasks.\n"
+            "Only plan objectives whose objective deadline or task deadline falls within the scheduling window.\n"
+            "Skip everything else completely.\n"
+            "Return JSON only with keys: sessions, summary.\n"
+            "Each session must include: objective_id, title, description, notes, preferred_minutes, min_minutes, priority, task_ids.\n"
+            "Rules:\n"
+            "- A session may correspond to multiple tasks.\n"
+            "- A difficult task may appear in multiple sessions.\n"
+            "- Every task due within the window MUST appear in at least one session.\n"
+            "- If time is tight, assume tasks can be compressed somewhat.\n"
+            "- In genuinely dire cases you may rely on late-night work or an all-nighter, but keep that rare and place it on the least harmful day.\n"
+            "- Use the hard-event load to decide which objectives deserve more or fewer sessions.\n"
+            "- Prefer concise, concrete session titles and notes.\n"
+            "- preferred_minutes must be >= min_minutes and both must be positive integers.\n"
+            "- Keep descriptions and notes plain text.\n"
+        )
+        payload = {
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "hard_events": list(hard_events),
+            "objectives": objective_payload,
+        }
+
+        sessions_raw: list[dict[str, Any]] = []
+        try:
+            if provider == "openai":
+                resp = get_client("openai").responses.create(
+                    model=model_name,
+                    input=[
+                        {"role": "developer", "content": [{"type": "input_text", "text": prompt}]},
+                        {"role": "user", "content": [{"type": "input_text", "text": json.dumps(payload, default=str)}]},
+                    ],
+                    text={"format": {"type": "json_object"}, "verbosity": "low"},
+                    reasoning={"effort": "medium"},
+                    store=False,
+                    timeout=120,
+                )
+                usage_obj = getattr(resp, "usage", None)
+                if usage_obj:
+                    UsageService.log_usage(
+                        source="objective_session_blueprints",
+                        model=model_name,
+                        cache_mode=ModelConfigService.get_cache_mode(),
+                        usage=usage_obj,
+                        job=None,
+                    )
+                raw = getattr(resp, "output_text", "") or "{}"
+                data = json.loads(raw)
+            else:
+                resp = get_client("xai").chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": json.dumps(payload, default=str)},
+                    ],
+                    response_format={"type": "json_object"},
+                )
+                raw = "{}"
+                if getattr(resp, "choices", None):
+                    raw = resp.choices[0].message.content or "{}"  # type: ignore[assignment]
+                data = json.loads(raw)
+            sessions_raw = data.get("sessions") if isinstance(data.get("sessions"), list) else []
+        except Exception:
+            sessions_raw = []
+
+        plans: list[SessionPlan] = []
+        covered_urgent_tasks: set[str] = set()
+        for item in sessions_raw:
+            if not isinstance(item, dict):
+                continue
+            objective_id = str(item.get("objective_id") or "").strip()
+            objective = objective_index.get(objective_id)
+            if objective is None:
+                continue
+            valid_task_ids = {str(task.id) for task in ObjectiveService._select_actionable_tasks(objective)}
+            task_ids = ObjectiveService._normalize_session_task_ids(
+                objective,
+                item.get("task_ids") if isinstance(item.get("task_ids"), list) else [],
+                valid_task_ids,
+            )
+            covered_urgent_tasks.update(task_id for task_id in task_ids if task_id in urgent_task_ids)
+            preferred = max(int(item.get("preferred_minutes") or ObjectiveService._preferred_minutes_for_objective(objective)), MIN_SESSION_MINUTES)
+            minimum = max(int(item.get("min_minutes") or min(preferred, max(preferred // 2, MIN_SESSION_MINUTES))), 1)
+            minimum = min(minimum, preferred)
+            notes = ObjectiveService._session_notes_for_objective(
+                objective,
+                task_ids,
+                extra_notes=str(item.get("notes") or ""),
+            )
+            plans.append(
+                SessionPlan(
+                    title=ObjectiveService._first_nonempty(item.get("title"), objective.title)[:255],
+                    description=ObjectiveService._first_nonempty(item.get("description"), objective.description, f"Work on {objective.title}"),
+                    notes=notes,
+                    preferred_minutes=preferred,
+                    min_minutes=minimum,
+                    soft_deadline=objective.deadline_at,
+                    hard_deadline=objective.deadline_at,
+                    priority=max(int(item.get("priority") or objective.priority or 0), 0),
+                    task_ids=task_ids,
+                    metadata={
+                        "source": ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+                        "objective_id": str(objective.id),
+                        "objective_source": ObjectiveService._objective_source(objective),
+                        "task_ids": task_ids,
+                        "planner_mode": "model_window_blueprint",
+                    },
+                )
+            )
+
+        if urgent_task_ids - covered_urgent_tasks:
+            for objective in objectives:
+                relevant_tasks = ObjectiveService._relevant_tasks_for_window(objective, window_start, window_end)
+                remaining_task_ids = [
+                    str(task.id)
+                    for task in relevant_tasks
+                    if str(task.id) in urgent_task_ids - covered_urgent_tasks
+                ]
+                if not remaining_task_ids:
+                    continue
+                notes = ObjectiveService._session_notes_for_objective(
+                    objective,
+                    remaining_task_ids,
+                    extra_notes="Fallback session added because these urgent tasks still required explicit coverage.",
+                )
+                plans.append(
+                    SessionPlan(
+                        title=f"{objective.title} — Urgent Coverage"[:255],
+                        description=objective.description or f"Cover urgent work for {objective.title}",
+                        notes=notes,
+                        preferred_minutes=max(ObjectiveService._preferred_minutes_for_objective(objective), MIN_SESSION_MINUTES),
+                        min_minutes=MIN_SESSION_MINUTES,
+                        soft_deadline=objective.deadline_at,
+                        hard_deadline=objective.deadline_at,
+                        priority=max(int(objective.priority or 0), 0) + 10,
+                        task_ids=remaining_task_ids,
+                        metadata={
+                            "source": ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+                            "objective_id": str(objective.id),
+                            "objective_source": ObjectiveService._objective_source(objective),
+                            "task_ids": remaining_task_ids,
+                            "planner_mode": "urgent_fallback_coverage",
+                        },
+                    )
+                )
+                covered_urgent_tasks.update(remaining_task_ids)
+
+        if plans:
+            return plans
+
+        fallback: list[SessionPlan] = []
+        for objective in objectives:
+            if ObjectiveService._should_schedule_objective(objective, window_start, window_end):
+                fallback.extend(ObjectiveService._build_sessions_for_objective(objective))
+        return fallback
 
     @staticmethod
     def _build_assignment_sessions(assignment) -> list[SessionPlan]:
@@ -804,6 +1715,63 @@ class ObjectiveService:
 
     @staticmethod
     @transaction.atomic
+    def create_soft_events_from_session_plans(session_plans: Sequence[SessionPlan]) -> dict[str, Any]:
+        objective_ids: set[str] = set()
+        for plan in session_plans:
+            objective_id = str((plan.metadata or {}).get("objective_id") or "").strip()
+            if objective_id:
+                objective_ids.add(objective_id)
+        objective_map = {
+            str(objective.id): objective
+            for objective in Objective.objects.filter(id__in=list(objective_ids)).select_related("chat")
+        }
+        created_ids: list[str] = []
+        created_slot_ids: list[str] = []
+        for index, plan in enumerate(session_plans, start=1):
+            metadata = dict(plan.metadata or {})
+            objective_id = str(metadata.get("objective_id") or "").strip()
+            objective = objective_map.get(objective_id)
+            if objective is None:
+                continue
+            metadata["session_number"] = index
+            soft_event = SoftEvent.objects.create(
+                title=plan.title,
+                description=plan.description,
+                notes=plan.notes,
+                preferred_duration_minutes=max(int(plan.preferred_minutes or MIN_SESSION_MINUTES), 1),
+                min_duration_minutes=max(int(plan.min_minutes or MIN_SESSION_MINUTES), 1),
+                soft_deadline=plan.soft_deadline,
+                hard_deadline=plan.hard_deadline,
+                priority=max(int(plan.priority or 0), 0),
+                status=SoftEvent.STATUS_ACTIVE,
+                metadata=metadata,
+                chat=objective.chat,
+            )
+            ObjectiveService._link_soft_event(soft_event, objective, plan.task_ids)
+            created_ids.append(str(soft_event.id))
+            if plan.start_at and plan.end_at:
+                slot = SoftEventSlot.objects.create(
+                    soft_event=soft_event,
+                    start_at=plan.start_at,
+                    end_at=plan.end_at,
+                    notify_at=plan.notify_at,
+                    rationale=plan.rationale or soft_event.title,
+                    metadata={
+                        "source": ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+                        "objective_id": str(objective.id),
+                        "task_ids": list(plan.task_ids),
+                    },
+                )
+                created_slot_ids.append(str(slot.id))
+        return {
+            "soft_event_ids": created_ids,
+            "slot_ids": created_slot_ids,
+            "created_soft_events": len(created_ids),
+            "created_slots": len(created_slot_ids),
+        }
+
+    @staticmethod
+    @transaction.atomic
     def archive_objective_soft_events(objective: Objective, *, metadata_source: str = "objective_planner") -> int:
         soft_events = SoftEvent.objects.filter(
             objective_links__objective=objective,
@@ -836,47 +1804,129 @@ class ObjectiveService:
             assignment.save(update_fields=["soft_event_refs", "updated_at"])
 
     @staticmethod
-    def sync_objective_soft_events_for_window(window_start: datetime, window_end: datetime) -> dict[str, int]:
-        created = 0
-        archived = 0
-        scanned = 0
-        linked_objective_ids = set(
-            str(objective_id)
-            for objective_id in SoftEventObjective.objects.filter(
-                soft_event__metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE
-            ).values_list("objective_id", flat=True)
+    def sync_objective_soft_events_for_window(
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        planner_note: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> dict[str, int]:
+        objectives, relevant, session_plans = ObjectiveService._prepare_objective_window_plan(
+            window_start,
+            window_end,
+            planner_note=planner_note,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+        return ObjectiveService._apply_objective_window_plan(
+            objectives=objectives,
+            relevant=relevant,
+            session_plans=session_plans,
+            window_start=window_start,
+            window_end=window_end,
+            progress_callback=progress_callback,
+        )
+
+    @staticmethod
+    def _prepare_objective_window_plan(
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        planner_note: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> tuple[list[Objective], list[Objective], list[SessionPlan]]:
+        ObjectiveService._ensure_not_canceled(cancel_check)
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.08,
+            "Fetching hard calendar events for objective replanning",
+        )
+        hard_events = list_events(
+            time_min=window_start.isoformat(),
+            time_max=window_end.isoformat(),
+            max_results=2500,
+        ).get("events", [])
+        ObjectiveService._ensure_not_canceled(cancel_check)
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.14,
+            "Loading active objectives and urgent tasks in the planning window",
         )
         objectives = list(
             Objective.objects.all().select_related("parent", "chat").prefetch_related("tasks")
         )
-        relevant_ids: set[str] = set()
+        relevant = [
+            objective
+            for objective in objectives
+            if ObjectiveService._should_schedule_objective(objective, window_start, window_end)
+        ]
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.18,
+            f"Preparing exact schedule for {len(relevant)} relevant objective(s)",
+        )
+        session_plans = ObjectiveService._scheduled_session_plans_for_window(
+            relevant,
+            hard_events=hard_events,
+            window_start=window_start,
+            window_end=window_end,
+            planner_note=planner_note,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+        return objectives, relevant, session_plans
+
+    @staticmethod
+    @transaction.atomic
+    def _apply_objective_window_plan(
+        *,
+        objectives: Sequence[Objective],
+        relevant: Sequence[Objective],
+        session_plans: Sequence[SessionPlan],
+        window_start: datetime,
+        window_end: datetime,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+    ) -> dict[str, int]:
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.42,
+            "Purging previous objective-generated soft events",
+        )
+        purge_stats = ObjectiveService.purge_objective_soft_events_for_window(window_start, window_end)
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.5,
+            "Clearing assigned slots from non-objective soft events",
+        )
+        unassign_stats = ObjectiveService.unassign_nonobjective_soft_event_slots(window_start)
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.58,
+            f"Creating {len(session_plans)} objective session soft event(s) with exact slots",
+        )
+        create_stats = ObjectiveService.create_soft_events_from_session_plans(session_plans)
+        soft_event_ids = create_stats["soft_event_ids"]
+        refs_by_objective: dict[str, list[str]] = {}
+        for session_plan, soft_event_id in zip(session_plans, soft_event_ids):
+            objective_id = str((session_plan.metadata or {}).get("objective_id") or "").strip()
+            if objective_id:
+                refs_by_objective.setdefault(objective_id, []).append(soft_event_id)
         for objective in objectives:
-            scanned += 1
-            if ObjectiveService._should_schedule_objective(objective, window_start, window_end):
-                session_plans = ObjectiveService._build_sessions_for_objective(objective)
-                soft_event_ids = ObjectiveService.replace_soft_events_for_objective(objective, session_plans)
-                created += len(soft_event_ids)
-                ObjectiveService._sync_assignment_refs(objective, soft_event_ids)
-                relevant_ids.add(str(objective.id))
-            else:
-                ObjectiveService._sync_assignment_refs(objective, [])
-
-        stale_ids = linked_objective_ids - relevant_ids
-        for objective_id in stale_ids:
-            objective = Objective.objects.filter(id=objective_id).first()
-            if objective is None:
-                continue
-            archived += ObjectiveService.archive_objective_soft_events(
-                objective,
-                metadata_source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
-            )
-            ObjectiveService._sync_assignment_refs(objective, [])
-
+            ObjectiveService._sync_assignment_refs(objective, refs_by_objective.get(str(objective.id), []))
+        ObjectiveService._emit_scheduler_progress(
+            progress_callback,
+            0.66,
+            f"Applied {create_stats['created_soft_events']} objective soft event(s) and {create_stats['created_slots']} slot(s)",
+        )
         return {
-            "scanned_objectives": scanned,
-            "relevant_objectives": len(relevant_ids),
-            "planned_soft_events": created,
-            "archived_soft_events": archived,
+            **purge_stats,
+            **unassign_stats,
+            "scanned_objectives": len(objectives),
+            "relevant_objectives": len(relevant),
+            "planned_soft_events": len(soft_event_ids),
+            "planned_slots": create_stats["created_slots"],
         }
 
     @staticmethod
@@ -884,7 +1934,7 @@ class ObjectiveService:
     def purge_objective_soft_events_for_window(window_start: datetime, window_end: datetime) -> dict[str, int]:
         soft_events = list(
             SoftEvent.objects.filter(
-                metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+                objective_links__isnull=False,
                 status=SoftEvent.STATUS_ACTIVE,
             ).distinct()
         )
@@ -894,9 +1944,8 @@ class ObjectiveService:
         soft_event_ids = [event.id for event in soft_events]
         canceled_slots = SoftEventSlot.objects.filter(
             soft_event_id__in=soft_event_ids,
-            start_at__lt=window_end,
-            end_at__gt=window_start,
-            status__in=[SoftEventSlot.STATUS_PLANNED, SoftEventSlot.STATUS_DEFERRED],
+            end_at__gte=window_start,
+            status__in=ObjectiveService.SLOT_UNASSIGN_STATUSES,
         ).update(
             status=SoftEventSlot.STATUS_CANCELED,
             rationale="Canceled because the objective scheduler regenerated the 2-week plan.",
@@ -912,13 +1961,45 @@ class ObjectiveService:
         }
 
     @staticmethod
-    def rebuild_objective_soft_events_for_window(window_start: datetime, window_end: datetime) -> dict[str, int]:
-        purge_stats = ObjectiveService.purge_objective_soft_events_for_window(window_start, window_end)
-        sync_stats = ObjectiveService.sync_objective_soft_events_for_window(window_start, window_end)
-        return {
-            **purge_stats,
-            **sync_stats,
-        }
+    @transaction.atomic
+    def unassign_nonobjective_soft_event_slots(window_start: datetime) -> dict[str, int]:
+        slots_qs = SoftEventSlot.objects.filter(
+            end_at__gte=window_start,
+            status__in=ObjectiveService.SLOT_UNASSIGN_STATUSES,
+        ).exclude(
+            soft_event__objective_links__isnull=False,
+        )
+        unassigned_slots = slots_qs.update(
+            status=SoftEventSlot.STATUS_CANCELED,
+            rationale="Canceled so the planner can reassign this soft event from scratch.",
+            updated_at=timezone.now(),
+        )
+        return {"unassigned_slots": unassigned_slots}
+
+    @staticmethod
+    def rebuild_objective_soft_events_for_window(
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        planner_note: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+    ) -> dict[str, int]:
+        objectives, relevant, session_plans = ObjectiveService._prepare_objective_window_plan(
+            window_start,
+            window_end,
+            planner_note=planner_note,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+        return ObjectiveService._apply_objective_window_plan(
+            objectives=objectives,
+            relevant=relevant,
+            session_plans=session_plans,
+            window_start=window_start,
+            window_end=window_end,
+            progress_callback=progress_callback,
+        )
 
     @staticmethod
     @transaction.atomic
@@ -1020,10 +2101,18 @@ class ObjectiveService:
     @staticmethod
     def scheduler_snapshot(window_start: datetime, window_end: datetime) -> list[dict[str, Any]]:
         snapshot: list[dict[str, Any]] = []
+        _matched_by_event, matched_by_task = ObjectiveService._matched_hard_event_links(window_start, window_end)
         for objective in Objective.objects.all().order_by("deadline_at", "-priority", "created_at"):
             if not ObjectiveService._should_schedule_objective(objective, window_start, window_end):
                 continue
             tasks = ObjectiveService._select_actionable_tasks(objective)
+            hard_covered_task_ids = ObjectiveService._task_ids_covered_by_hard_events(
+                tasks,
+                window_start=window_start,
+                window_end=window_end,
+                matched_by_task=matched_by_task,
+            )
+            tasks = [task for task in tasks if str(task.id) not in hard_covered_task_ids]
             snapshot.append(
                 {
                     "id": str(objective.id),
@@ -1046,15 +2135,20 @@ class ObjectiveService:
                         }
                         for task in tasks
                     ],
-                    "slot_history": ObjectiveService._slot_history_for_objective(objective),
                     "recent_logs": ObjectiveService._recent_logs_for_objective(objective),
                     "upcoming_exams": ObjectiveService._upcoming_exams_for_objective(objective),
+                    "hard_scheduled_task_ids": sorted(hard_covered_task_ids),
                 }
             )
         return snapshot
 
     @staticmethod
-    def coverage_snapshot(window_start: datetime, window_end: datetime) -> dict[str, Any]:
+    def coverage_snapshot(
+        window_start: datetime,
+        window_end: datetime,
+        *,
+        hard_events: Optional[Sequence[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
         tasks = list(
             ObjectiveTask.objects.select_related("objective")
             .exclude(status__in=[ObjectiveTask.STATUS_DONE, ObjectiveTask.STATUS_CANCELED, ObjectiveTask.STATUS_BLOCKED])
@@ -1067,7 +2161,12 @@ class ObjectiveService:
             .order_by("due_at", "objective__title", "sort_order", "created_at")
         )
         items: list[dict[str, Any]] = []
-        summary = {"total": 0, "covered": 0, "partial": 0, "uncovered": 0}
+        summary = {"total": 0, "covered": 0, "uncovered": 0}
+        _matched_by_event, matched_by_task = ObjectiveService._matched_hard_event_links(
+            window_start,
+            window_end,
+            hard_events=hard_events,
+        )
         for task in tasks:
             link_qs = SoftEventTask.objects.filter(task=task)
             soft_event_ids = list(link_qs.values_list("soft_event_id", flat=True))
@@ -1087,16 +2186,22 @@ class ObjectiveService:
             for slot in slot_qs:
                 scheduled_minutes += max(int((slot.end_at - slot.start_at).total_seconds() // 60), 0)
                 slot_ids.append(str(slot.id))
-            required_minutes = task.remaining_effort_minutes or task.estimated_effort_minutes or 0
-            if required_minutes > 0:
-                if scheduled_minutes >= required_minutes:
-                    coverage_state = "covered"
-                elif scheduled_minutes > 0:
-                    coverage_state = "partial"
-                else:
-                    coverage_state = "uncovered"
-            else:
-                coverage_state = "covered" if scheduled_minutes > 0 else "uncovered"
+            hard_event_refs: list[dict[str, Any]] = []
+            deadline = task.due_at or window_end
+            for event in matched_by_task.get(str(task.id), []):
+                start, end = ObjectiveService._event_bounds(event)
+                if not start or not end or start > deadline:
+                    continue
+                scheduled_minutes += max(int((end - start).total_seconds() // 60), 0)
+                hard_event_refs.append(
+                    {
+                        "event_id": str(event.get("id") or ""),
+                        "title": str(event.get("summary") or "(no title)"),
+                        "start": event.get("start"),
+                        "end": event.get("end"),
+                    }
+                )
+            coverage_state = "covered" if slot_ids or hard_event_refs else "uncovered"
             summary["total"] += 1
             summary[coverage_state] += 1
             items.append(
@@ -1106,11 +2211,11 @@ class ObjectiveService:
                     "objective_title": task.objective.title,
                     "task_title": task.title,
                     "due_at": task.due_at.isoformat() if task.due_at else None,
-                    "required_minutes": required_minutes,
+                    "required_minutes": task.remaining_effort_minutes or task.estimated_effort_minutes or 0,
                     "scheduled_minutes": scheduled_minutes,
-                    "missing_minutes": max(required_minutes - scheduled_minutes, 0) if required_minutes > 0 else None,
                     "coverage_state": coverage_state,
                     "slot_ids": slot_ids,
+                    "hard_event_refs": hard_event_refs,
                 }
             )
         return {"summary": summary, "items": items}

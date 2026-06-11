@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import concurrent.futures
 from datetime import datetime, timedelta
-from typing import Optional, List
+import time as time_module
+from typing import Any, Callable, Optional, List
 
 from django.utils import timezone
 
 from orchestration.objectives import ObjectiveService
-from orchestration.models import SoftEvent, SoftEventSlot, Chat
+from orchestration.models import Chat, Job, JobEvent, SoftEvent, SoftEventSlot, ToolFunction
 from orchestration.registry import register_function
-from orchestration.services import SoftEventService
+from orchestration.services import JobService, SoftEventService
 from orchestration.soft_scheduler import collect_window_state
 from orchestration.soft_planner import plan_soft_window
 from orchestration.tools.calendar import list_events
@@ -24,6 +26,234 @@ def _parse_dt(val: Optional[str]) -> Optional[datetime]:
     if timezone.is_naive(dt):
         dt = timezone.make_aware(dt, timezone=timezone.utc)
     return dt
+
+
+class ReplanCanceled(Exception):
+    pass
+
+
+class SoftPlannerJobService:
+    @staticmethod
+    def _update_job(
+        job: Job,
+        *,
+        progress: Optional[float] = None,
+        summary: Optional[str] = None,
+        message: str = "",
+        payload: Optional[dict[str, Any]] = None,
+        visibility: str = JobEvent.VISIBILITY_USER,
+    ) -> None:
+        update_fields: list[str] = []
+        if progress is not None:
+            job.progress = progress
+            update_fields.append("progress")
+        if summary is not None:
+            job.user_visible_summary = summary
+            update_fields.append("user_visible_summary")
+        if update_fields:
+            job.save(update_fields=update_fields + ["updated_at"])
+        if message:
+            JobService.append_event(
+                job,
+                role="soft_planner",
+                event_type=JobEvent.EVENT_PROGRESS if progress is not None else JobEvent.EVENT_INFO,
+                visibility=visibility,
+                message=message,
+                payload=payload or {},
+            )
+
+    @staticmethod
+    def _cancel_check(job: Job) -> None:
+        job.refresh_from_db(fields=["cancel_requested", "status"])
+        if job.cancel_requested or job.status == Job.STATUS_CANCELED:
+            raise ReplanCanceled("Calendar replan canceled")
+
+    @staticmethod
+    def _heartbeat(job: Job, progress: float, message: str, *, payload: Optional[dict[str, Any]] = None) -> None:
+        JobService.heartbeat(job)
+        SoftPlannerJobService._update_job(
+            job,
+            progress=progress,
+            summary=message,
+            message=message,
+            payload=payload,
+        )
+
+    @staticmethod
+    def _run_with_heartbeat(
+        func: Callable[[], Any],
+        *,
+        job: Job,
+        progress: float,
+        heartbeat_message: str,
+        heartbeat_seconds: float = 12.0,
+    ) -> Any:
+        start = time_module.monotonic()
+        heartbeat_count = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(func)
+            while True:
+                SoftPlannerJobService._cancel_check(job)
+                try:
+                    return future.result(timeout=heartbeat_seconds)
+                except concurrent.futures.TimeoutError:
+                    heartbeat_count += 1
+                    elapsed = int(time_module.monotonic() - start)
+                    SoftPlannerJobService._heartbeat(
+                        job,
+                        progress,
+                        f"{heartbeat_message} ({elapsed}s elapsed, heartbeat {heartbeat_count})",
+                        payload={"heartbeat_count": heartbeat_count, "elapsed_seconds": elapsed},
+                    )
+
+    @staticmethod
+    def run_replan_job(job_id: str, *, days: int = 14, note: Optional[str] = None) -> dict[str, Any]:
+        job = Job.objects.select_related("module", "active_function").get(id=job_id)
+        replan_function = ToolFunction.objects.filter(manifest_id="soft_events.replan_window").first()
+        job.status = Job.STATUS_RUNNING
+        job.active_function = replan_function
+        job.progress = 0.01
+        job.user_visible_summary = "Starting calendar replan"
+        job.save(update_fields=["status", "active_function", "progress", "user_visible_summary", "updated_at"])
+        JobService.append_event(
+            job,
+            role="soft_planner",
+            event_type=JobEvent.EVENT_STATE,
+            visibility=JobEvent.VISIBILITY_USER,
+            message="Started calendar replan",
+            payload={"days": days, "note": note},
+        )
+
+        try:
+            now = timezone.now()
+            window_start = now
+            window_end = now + timedelta(days=max(days or 1, 1))
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.05,
+                summary="Preparing objective replan",
+                message="Preparing objective replan",
+                payload={"window_start": window_start.isoformat(), "window_end": window_end.isoformat()},
+            )
+
+            objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(
+                window_start,
+                window_end,
+                planner_note=note,
+                progress_callback=lambda progress, message: SoftPlannerJobService._update_job(
+                    job,
+                    progress=progress,
+                    summary=message,
+                    message=message,
+                ),
+                cancel_check=lambda: SoftPlannerJobService._cancel_check(job),
+            )
+
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.72,
+                summary="Fetching hard calendar events",
+                message="Fetching hard calendar events",
+            )
+            hard_resp = list_events(
+                time_min=window_start.isoformat(),
+                time_max=window_end.isoformat(),
+                max_results=2500,
+            )
+            hard_events = hard_resp.get("events", [])
+
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.78,
+                summary="Collecting remaining soft events",
+                message="Collecting remaining soft events",
+            )
+            soft_state = collect_window_state(window_start, window_end)
+            soft_state["soft_events"] = [
+                event
+                for event in soft_state.get("soft_events", [])
+                if str((event.get("metadata") or {}).get("source") or "") != ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE
+            ]
+            soft_state["objective_inputs"] = []
+
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.82,
+                summary="Running generic soft-event replanner",
+                message="Running generic soft-event replanner",
+                payload={
+                    "soft_event_count": len(soft_state.get("soft_events", [])),
+                    "slot_count": len(soft_state.get("slots", [])),
+                    "hard_event_count": len(hard_events),
+                },
+            )
+            actions, trace_id = SoftPlannerJobService._run_with_heartbeat(
+                lambda: plan_soft_window(
+                    hard_events=hard_events,
+                    soft_state=soft_state,
+                    window_start=window_start,
+                    window_end=window_end,
+                    planner_note=note,
+                ),
+                job=job,
+                progress=0.84,
+                heartbeat_message="Waiting for generic soft-event planner",
+            )
+
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.9,
+                summary="Applying planned slot actions",
+                message="Applying planned slot actions",
+                payload={"action_count": len(actions), "trace_id": trace_id},
+            )
+            created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
+
+            SoftPlannerJobService._update_job(
+                job,
+                progress=0.96,
+                summary="Computing urgent-task coverage",
+                message="Computing urgent-task coverage",
+            )
+            coverage = ObjectiveService.coverage_snapshot(window_start, window_end)
+            result = {
+                "actions": len(actions),
+                "created": created,
+                "updated": updated,
+                "trace_id": trace_id,
+                "objective_sync": objective_sync,
+                "coverage": coverage,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+            }
+            job.metadata = {**(job.metadata or {}), "result": result}
+            job.save(update_fields=["metadata", "updated_at"])
+            SoftPlannerJobService._update_job(
+                job,
+                progress=1.0,
+                summary="Calendar replan completed",
+                message="Calendar replan completed",
+                payload=result,
+            )
+            JobService.mark_status(job, Job.STATUS_COMPLETED, progress=1.0)
+            return result
+        except ReplanCanceled as exc:
+            SoftPlannerJobService._update_job(
+                job,
+                summary="Calendar replan canceled",
+                message=str(exc),
+            )
+            JobService.mark_status(job, Job.STATUS_CANCELED, progress=job.progress)
+            raise
+        except Exception as exc:
+            SoftPlannerJobService._update_job(
+                job,
+                summary="Calendar replan failed",
+                message=str(exc),
+                payload={"error": str(exc)},
+            )
+            JobService.mark_status(job, Job.STATUS_FAILED, error_summary=str(exc), progress=job.progress)
+            raise
 
 
 @register_function(
@@ -264,7 +494,11 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     window_start = now
     window_end = now + timedelta(days=max(days or 1, 1))
 
-    objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(window_start, window_end)
+    objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(
+        window_start,
+        window_end,
+        planner_note=note,
+    )
 
     hard_resp = list_events(
         time_min=window_start.isoformat(),
@@ -273,7 +507,12 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     )
     hard_events = hard_resp.get("events", [])
     soft_state = collect_window_state(window_start, window_end)
-    soft_state["objective_inputs"] = ObjectiveService.scheduler_snapshot(window_start, window_end)
+    soft_state["soft_events"] = [
+        event
+        for event in soft_state.get("soft_events", [])
+        if str((event.get("metadata") or {}).get("source") or "") != ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE
+    ]
+    soft_state["objective_inputs"] = []
 
     actions, trace_id = plan_soft_window(
         hard_events=hard_events,

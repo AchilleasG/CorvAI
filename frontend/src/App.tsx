@@ -16,6 +16,7 @@ import {
   sendVoice,
   renameChat,
   deleteChat,
+  fetchJob,
   cancelJob,
   fetchJobEvents,
   fetchJobMessagesDirect,
@@ -26,10 +27,13 @@ import {
   fetchCalendarCombined,
   fetchObjective,
   fetchObjectiveRoots,
+  fetchObjectiveTasks,
   fetchObjectiveTree,
   createSoftEvent,
+  createHardEventTaskLink,
   updateSoftEvent,
   fetchSoftEvent,
+  deleteHardEventTaskLink,
   deleteSoftEvent,
   promoteSoftSlot,
   markSoftSlotOutcome,
@@ -71,7 +75,9 @@ import {
   UsageSummary,
   SettingsPayload,
   CombinedCalendar,
+  HardEventTaskLink,
   Objective,
+  ObjectiveTaskPicker,
   SoftEventDetail,
   ScheduledTask,
   ScheduledTaskRun,
@@ -135,6 +141,7 @@ type LessonHomeworkItem = {
 };
 const STUDY_PREVIEW_COUNT = 3;
 const STUDY_TOPIC_STATUS_OPTIONS = ["not_started", "in_progress", "review", "mastered"] as const;
+const MOBILE_BREAKPOINT_PX = 900;
 const STUDY_AUDIOBOOK_VOICE_OPTIONS = [
   { value: "en-US-EmmaMultilingualNeural", label: "Emma (US, multilingual)" },
   { value: "en-US-AriaNeural", label: "Aria (US, natural)" },
@@ -216,6 +223,51 @@ function formatWeekRangeLabel(start: Date, endExclusive: Date) {
     month: "short",
     day: "numeric",
   })}`;
+}
+
+function isActiveJob(job: Job | null | undefined) {
+  if (!job) return false;
+  if (job.status === "completed" || job.status === "failed" || job.status === "canceled") {
+    return false;
+  }
+  return (
+    job.cancel_requested === true ||
+    job.status === "pending" ||
+    job.status === "running" ||
+    job.status === "waiting_on_user"
+  );
+}
+
+function isCalendarReplanJob(job: Job | null | undefined) {
+  return ((job?.metadata as Record<string, unknown> | undefined)?.job_kind || "") === "calendar_replan";
+}
+
+function latestJobByUpdatedAt<T extends { updated_at?: string | null; created_at?: string | null }>(items: T[]) {
+  return [...items].sort((a, b) => {
+    const at = a.updated_at ? new Date(a.updated_at).getTime() : a.created_at ? new Date(a.created_at).getTime() : 0;
+    const bt = b.updated_at ? new Date(b.updated_at).getTime() : b.created_at ? new Date(b.created_at).getTime() : 0;
+    return bt - at;
+  })[0] || null;
+}
+
+function formatJobStatusLabel(job: Job | null | undefined) {
+  if (!job) return "Idle";
+  switch (job.status) {
+    case "canceled":
+      return "Canceled";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "pending":
+      return "Queued";
+    case "running":
+      return job.cancel_requested ? "Cancel requested" : "Running";
+    case "waiting_on_user":
+      return "Waiting on input";
+    default:
+      return job.status || "Unknown";
+  }
 }
 
 function clampNumber(value: number, min: number, max: number) {
@@ -481,6 +533,9 @@ export default function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.innerWidth <= MOBILE_BREAKPOINT_PX : false,
+  );
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [voiceSending, setVoiceSending] = useState(false);
@@ -506,6 +561,14 @@ export default function App() {
   const [calendarData, setCalendarData] = useState<CombinedCalendar | null>(null);
   const [calendarError, setCalendarError] = useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
+  const [calendarReplanJob, setCalendarReplanJob] = useState<Job | null>(null);
+  const [calendarReplanEvents, setCalendarReplanEvents] = useState<JobEvent[]>([]);
+  const [calendarReplanEventsLoading, setCalendarReplanEventsLoading] = useState(false);
+  const [calendarReplanLogsOpen, setCalendarReplanLogsOpen] = useState(false);
+  const [hardEventTaskOptions, setHardEventTaskOptions] = useState<ObjectiveTaskPicker[]>([]);
+  const [hardEventTaskOptionsLoading, setHardEventTaskOptionsLoading] = useState(false);
+  const [selectedHardEventTaskId, setSelectedHardEventTaskId] = useState("");
+  const [hardEventTaskLinkLoading, setHardEventTaskLinkLoading] = useState(false);
   const [selectedCalendarWeekStart, setSelectedCalendarWeekStart] = useState<string | null>(null);
   const [objectiveRoots, setObjectiveRoots] = useState<Objective[]>([]);
   const [selectedObjectiveRootId, setSelectedObjectiveRootId] = useState<string | null>(null);
@@ -521,6 +584,12 @@ export default function App() {
     id: string;
     title: string;
     description?: string;
+    location?: string;
+    all_day?: boolean;
+    source?: "hard";
+    task_links?: HardEventTaskLink[];
+    rawStart?: string;
+    rawEnd?: string;
     segmentStart: Date;
     segmentEnd: Date;
     soft_event_id?: string;
@@ -656,6 +725,20 @@ export default function App() {
   }, [authed]);
 
   useEffect(() => {
+    const onResize = () => {
+      const mobile = window.innerWidth <= MOBILE_BREAKPOINT_PX;
+      setIsMobileViewport(mobile);
+      if (!mobile) {
+        setSidebarOpen(true);
+      }
+    };
+
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
     if (!authed) return;
     if (!showStudy) return;
     refreshStudyData();
@@ -675,7 +758,49 @@ export default function App() {
     if (!showCalendar) return;
     refreshCalendar();
     refreshObjectives();
+    refreshCalendarReplanJob();
+    refreshHardEventTaskOptions();
   }, [authed, showCalendar]);
+
+  useEffect(() => {
+    if (!authed) return;
+    if (!showCalendar) return;
+    if (!calendarReplanJob || !isActiveJob(calendarReplanJob)) return;
+    const jobId = calendarReplanJob.id;
+    let canceled = false;
+    const tick = async () => {
+      try {
+        const [nextJob, payload] = await Promise.all([fetchJob(jobId), fetchJobEvents(jobId)]);
+        if (canceled) return;
+        setCalendarReplanJob(nextJob);
+        setCalendarReplanEvents(payload.events || []);
+        if (!isActiveJob(nextJob)) {
+          await Promise.all([
+            refreshCalendar(),
+            refreshObjectives(selectedObjectiveRootId, selectedObjectiveId),
+          ]);
+        }
+      } catch (err: any) {
+        if (canceled) return;
+        if (handleAuthError(err)) return;
+        setCalendarError(err.message || "Failed to refresh calendar replan job");
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 4000);
+    return () => {
+      canceled = true;
+      window.clearInterval(id);
+    };
+  }, [
+    authed,
+    showCalendar,
+    calendarReplanJob?.id,
+    calendarReplanJob?.status,
+    calendarReplanJob?.cancel_requested,
+    selectedObjectiveId,
+    selectedObjectiveRootId,
+  ]);
 
   useEffect(() => {
     if (!authed) return;
@@ -694,6 +819,12 @@ export default function App() {
     if (!showCalls) return;
     refreshCallSessions();
   }, [authed, showCalls]);
+
+  useEffect(() => {
+    if (calendarDetailEntry?.kind === "hard") {
+      setSelectedHardEventTaskId("");
+    }
+  }, [calendarDetailEntry?.id, calendarDetailEntry?.kind]);
 
   useEffect(() => {
     if (!authed) return;
@@ -753,9 +884,13 @@ export default function App() {
 
   async function handleCancelJob(jobId: string) {
     try {
-      await cancelJob(jobId);
+      const updatedJob = await cancelJob(jobId);
       const jobsData = await fetchJobs(activeChatId || undefined);
       setJobs(jobsData);
+      if (calendarReplanJob?.id === jobId) {
+        setCalendarReplanJob(updatedJob);
+        await refreshCalendarReplanJob(jobId);
+      }
       if (activeChatId) {
         const msgs = await fetchMessages(activeChatId, false);
         setMessages(msgs);
@@ -868,6 +1003,12 @@ export default function App() {
     [objectiveRoots, selectedObjectiveRootId],
   );
   const objectiveCoverage = calendarData?.objective_coverage || null;
+  const objectiveCoverageSummary = objectiveCoverage?.summary || null;
+  const objectiveCoveragePartialCount = objectiveCoverageSummary?.partial || 0;
+  const availableHardEventTaskOptions = useMemo(() => {
+    const linkedTaskIds = new Set((calendarDetailEntry?.task_links || []).map((item) => item.task_id));
+    return hardEventTaskOptions.filter((task) => !linkedTaskIds.has(task.id));
+  }, [calendarDetailEntry?.task_links, hardEventTaskOptions]);
   const urgentCoverageItems = useMemo(
     () =>
       (objectiveCoverage?.items || []).filter(
@@ -1033,6 +1174,43 @@ export default function App() {
     });
   }, [chats]);
 
+  const currentSection =
+    showSettings
+      ? "settings"
+      : showStudy
+        ? "study"
+        : showCalendar
+          ? "calendar"
+          : showScheduler
+            ? "scheduler"
+            : showMessages
+              ? "messages"
+              : showCalls
+                ? "calls"
+                : "chat";
+
+  const currentSectionLabel = {
+    chat: "Chat",
+    calendar: "Calendar",
+    scheduler: "Scheduler",
+    messages: "Messages",
+    calls: "Calls",
+    study: "Study",
+    settings: "Settings",
+  }[currentSection];
+
+  function navigateToSection(section: "chat" | "calendar" | "scheduler" | "messages" | "calls" | "study" | "settings") {
+    setShowCalendar(section === "calendar");
+    setShowSettings(section === "settings");
+    setShowStudy(section === "study");
+    setShowScheduler(section === "scheduler");
+    setShowMessages(section === "messages");
+    setShowCalls(section === "calls");
+    if (isMobileViewport) {
+      setSidebarOpen(false);
+    }
+  }
+
   function renderObjectiveNode(objective: Objective, depth = 0): JSX.Element {
     const isSelected = objective.id === selectedObjectiveId;
     const incompleteTasks = objective.tasks.filter((task) => task.status !== "done" && task.status !== "canceled");
@@ -1106,11 +1284,56 @@ export default function App() {
       setCalendarError(null);
       const data = await fetchCalendarCombined({ days: 14 });
       setCalendarData(data);
+      return data;
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setCalendarError(err.message || "Failed to load calendar");
     } finally {
       setCalendarLoading(false);
+    }
+  }
+
+  async function refreshHardEventTaskOptions() {
+    try {
+      setHardEventTaskOptionsLoading(true);
+      const tasks = await fetchObjectiveTasks();
+      setHardEventTaskOptions(tasks);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to load objective tasks");
+    } finally {
+      setHardEventTaskOptionsLoading(false);
+    }
+  }
+
+  async function refreshCalendarReplanJob(preferredJobId?: string | null) {
+    try {
+      setCalendarReplanEventsLoading(true);
+      let job: Job | null = null;
+      if (preferredJobId) {
+        try {
+          job = await fetchJob(preferredJobId);
+        } catch {
+          job = null;
+        }
+      }
+      if (!job) {
+        const allJobs = await fetchJobs();
+        const replanJobs = allJobs.filter((item) => isCalendarReplanJob(item));
+        job = latestJobByUpdatedAt(replanJobs);
+      }
+      setCalendarReplanJob(job);
+      if (!job) {
+        setCalendarReplanEvents([]);
+        return;
+      }
+      const payload = await fetchJobEvents(job.id);
+      setCalendarReplanEvents(payload.events || []);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to load calendar replan job");
+    } finally {
+      setCalendarReplanEventsLoading(false);
     }
   }
 
@@ -2117,13 +2340,72 @@ export default function App() {
     const note = window.prompt("Optional note for replanning", "");
     try {
       setReplanLoading(true);
-      await replanCalendar({ days: 14, note: note?.trim() || undefined });
-      await refreshCalendar();
+      setCalendarError(null);
+      const job = await replanCalendar({ days: 14, note: note?.trim() || undefined });
+      setCalendarReplanJob(job);
+      setCalendarReplanEvents([]);
+      setCalendarReplanLogsOpen(false);
+      await refreshCalendarReplanJob(job.id);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setCalendarError(err.message || "Failed to replan calendar");
     } finally {
       setReplanLoading(false);
+    }
+  }
+
+  async function handleCreateHardEventTaskLink() {
+    if (!calendarDetailEntry || calendarDetailEntry.kind !== "hard") return;
+    if (!selectedHardEventTaskId) return;
+    try {
+      setHardEventTaskLinkLoading(true);
+      const link = await createHardEventTaskLink({
+        task_id: selectedHardEventTaskId,
+        event: {
+          id: calendarDetailEntry.id,
+          title: calendarDetailEntry.title,
+          description: calendarDetailEntry.description,
+          location: calendarDetailEntry.location,
+          start: calendarDetailEntry.rawStart,
+          end: calendarDetailEntry.rawEnd,
+          all_day: calendarDetailEntry.all_day,
+          source: "google_calendar",
+        },
+      });
+      setCalendarDetailEntry((prev) => {
+        if (!prev || prev.kind !== "hard") return prev;
+        return {
+          ...prev,
+          task_links: [...(prev.task_links || []), link],
+        };
+      });
+      setSelectedHardEventTaskId("");
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to link hard event to objective task");
+    } finally {
+      setHardEventTaskLinkLoading(false);
+    }
+  }
+
+  async function handleDeleteHardEventTaskLink(linkId: string) {
+    try {
+      setHardEventTaskLinkLoading(true);
+      await deleteHardEventTaskLink(linkId);
+      setCalendarDetailEntry((prev) => {
+        if (!prev || prev.kind !== "hard") return prev;
+        return {
+          ...prev,
+          task_links: (prev.task_links || []).filter((item) => item.id !== linkId),
+        };
+      });
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setCalendarError(err.message || "Failed to unlink hard event task");
+    } finally {
+      setHardEventTaskLinkLoading(false);
     }
   }
 
@@ -2433,16 +2715,47 @@ export default function App() {
   }
 
   return (
-    <div className="page">
+    <div className={`page ${isMobileViewport && sidebarOpen ? "mobile-sidebar-open" : ""}`}>
+      {isMobileViewport && sidebarOpen && (
+        <button
+          type="button"
+          className="sidebar-overlay"
+          aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
       <aside className={`sidebar ${sidebarOpen ? "open" : "closed"}`}>
         <div className="sidebar-header">
           <h1>Corv</h1>
           <button className="ghost" onClick={() => setSidebarOpen(!sidebarOpen)}>
-            {sidebarOpen ? "Hide" : "Show"}
+            {isMobileViewport ? "Close" : sidebarOpen ? "Hide" : "Show"}
           </button>
         </div>
         {sidebarOpen && (
           <>
+            <div className="sidebar-section-nav">
+              <button className={`ghost full ${currentSection === "chat" ? "is-active" : ""}`} onClick={() => navigateToSection("chat")}>
+                Chat
+              </button>
+              <button className={`ghost full ${currentSection === "calendar" ? "is-active" : ""}`} onClick={() => navigateToSection("calendar")}>
+                Calendar
+              </button>
+              <button className={`ghost full ${currentSection === "scheduler" ? "is-active" : ""}`} onClick={() => navigateToSection("scheduler")}>
+                Scheduler
+              </button>
+              <button className={`ghost full ${currentSection === "messages" ? "is-active" : ""}`} onClick={() => navigateToSection("messages")}>
+                Messages
+              </button>
+              <button className={`ghost full ${currentSection === "calls" ? "is-active" : ""}`} onClick={() => navigateToSection("calls")}>
+                Calls
+              </button>
+              <button className={`ghost full ${currentSection === "study" ? "is-active" : ""}`} onClick={() => navigateToSection("study")}>
+                Study
+              </button>
+              <button className={`ghost full ${currentSection === "settings" ? "is-active" : ""}`} onClick={() => navigateToSection("settings")}>
+                Settings
+              </button>
+            </div>
             <button className="primary full" onClick={handleNewChat}>
               + New chat
             </button>
@@ -2474,12 +2787,7 @@ export default function App() {
                       className="chat-select"
                       onClick={() => {
                         setActiveChatId(chat.chat_id);
-                        setShowSettings(false);
-                        setShowStudy(false);
-                        setShowCalendar(false);
-                        setShowScheduler(false);
-                        setShowMessages(false);
-                        setShowCalls(false);
+                        navigateToSection("chat");
                       }}
                     >
                       <span>{formatChatLabel(chat)}</span>
@@ -2534,6 +2842,44 @@ export default function App() {
       </aside>
 
       <main className="main">
+        <div className="shell-topbar">
+          <div className="shell-topbar-row">
+            <button className="ghost shell-menu-button" onClick={() => setSidebarOpen((prev) => !prev)}>
+              {sidebarOpen && isMobileViewport ? "Close" : "Menu"}
+            </button>
+            <div className="shell-topbar-copy">
+              <p className="eyebrow">Workspace</p>
+              <h2>{currentSectionLabel}</h2>
+            </div>
+            <button className="ghost shell-utility-button" onClick={handleNewChat}>
+              New chat
+            </button>
+          </div>
+          <div className="shell-tabstrip" role="tablist" aria-label="Workspace sections">
+            {[
+              ["chat", "Chat"],
+              ["calendar", "Calendar"],
+              ["scheduler", "Scheduler"],
+              ["messages", "Messages"],
+              ["calls", "Calls"],
+              ["study", "Study"],
+              ["settings", "Settings"],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                className={`shell-tab ${currentSection === key ? "active" : ""}`}
+                onClick={() =>
+                  navigateToSection(
+                    key as "chat" | "calendar" | "scheduler" | "messages" | "calls" | "study" | "settings",
+                  )
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
         {showSettings ? (
           <div className="settings-panel">
             <header className="main-header">
@@ -3427,8 +3773,12 @@ export default function App() {
                 >
                   Refresh
                 </button>
-                <button className="ghost" onClick={handleReplanCalendar} disabled={replanLoading}>
-                  {replanLoading ? "Replanning…" : "Replan"}
+                <button
+                  className="ghost"
+                  onClick={handleReplanCalendar}
+                  disabled={replanLoading || isActiveJob(calendarReplanJob)}
+                >
+                  {replanLoading ? "Queueing…" : isActiveJob(calendarReplanJob) ? "Replan running…" : "Replan"}
                 </button>
                 <button className="ghost" onClick={openSoftEventCreator}>
                   Add soft event
@@ -3437,6 +3787,92 @@ export default function App() {
             </header>
             {calendarError && <div className="alert">{calendarError}</div>}
             {calendarLoading && <div className="muted">Loading calendar…</div>}
+            {calendarReplanJob && (
+              <div className="card full calendar-replan-card">
+                <div className="card-head">
+                  <div>
+                    <p className="eyebrow">Replan job</p>
+                    <h3>{calendarReplanJob.user_visible_summary || "Calendar replan"}</h3>
+                    <p className="muted small">
+                      Status {formatJobStatusLabel(calendarReplanJob)}
+                      {calendarReplanJob.updated_at ? ` · Updated ${formatDateTime(calendarReplanJob.updated_at)}` : ""}
+                    </p>
+                  </div>
+                  <div className="card-head-actions">
+                    <span className={`pill ${isActiveJob(calendarReplanJob) ? "coverage-pill-warning" : ""}`}>
+                      {Math.round((calendarReplanJob.progress || 0) * 100)}%
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => refreshCalendarReplanJob(calendarReplanJob.id)}
+                      disabled={calendarReplanEventsLoading}
+                    >
+                      {calendarReplanEventsLoading ? "Refreshing logs…" : "Refresh logs"}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => handleCancelJob(calendarReplanJob.id)}
+                      disabled={!isActiveJob(calendarReplanJob)}
+                    >
+                      {calendarReplanJob.status === "canceled"
+                        ? "Canceled"
+                        : calendarReplanJob.cancel_requested
+                          ? "Canceling…"
+                          : "Cancel"}
+                    </button>
+                  </div>
+                </div>
+                <div className="study-progress-track calendar-replan-progress">
+                  <div
+                    className="study-progress-fill"
+                    style={{ width: `${Math.round((calendarReplanJob.progress || 0) * 100)}%` }}
+                  />
+                </div>
+                {calendarReplanJob.error_summary && (
+                  <div className="alert">{calendarReplanJob.error_summary}</div>
+                )}
+                <div className="calendar-replan-log-toggle">
+                  <div className="muted small">
+                    {calendarReplanEvents.length
+                      ? `${calendarReplanEvents.length} log event${calendarReplanEvents.length === 1 ? "" : "s"}`
+                      : calendarReplanEventsLoading
+                        ? "Loading logs…"
+                        : "No logs yet for this replan job."}
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setCalendarReplanLogsOpen((prev) => !prev)}
+                  >
+                    {calendarReplanLogsOpen ? "Hide logs" : "Show logs"}
+                  </button>
+                </div>
+                {calendarReplanLogsOpen && (
+                  <div className="calendar-list">
+                    {calendarReplanEvents.length ? (
+                      calendarReplanEvents.map((event) => (
+                        <div key={event.id} className="cal-row">
+                          <div className="cal-badge soft">{event.event_type}</div>
+                          <div className="cal-body">
+                            <div className="cal-title">{event.message}</div>
+                            <div className="cal-meta muted small">
+                              {event.created_at ? formatDateTime(event.created_at) : "Waiting for timestamp"}
+                              {event.role ? ` · ${event.role}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="muted small calendar-replan-empty">
+                        {calendarReplanEventsLoading ? "Loading logs…" : "No logs yet for this replan job."}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {!calendarLoading && calendarData && (
               <div className="calendar-grid">
                 <div className="card full">
@@ -3535,6 +3971,12 @@ export default function App() {
                                           id: entry.id,
                                           title: entry.title,
                                           description: "description" in entry ? entry.description : undefined,
+                                          location: "location" in entry ? entry.location : undefined,
+                                          all_day: "all_day" in entry ? entry.all_day : undefined,
+                                          source: entry.kind === "hard" ? "hard" : undefined,
+                                          task_links: "task_links" in entry ? entry.task_links : undefined,
+                                          rawStart: "start" in entry ? entry.start : undefined,
+                                          rawEnd: "end" in entry ? entry.end : undefined,
                                           segmentStart: entry.segmentStart,
                                           segmentEnd: entry.segmentEnd,
                                           soft_event_id: "soft_event_id" in entry ? entry.soft_event_id : undefined,
@@ -3732,13 +4174,13 @@ export default function App() {
                     </div>
                     {objectiveCoverage && (
                       <div className="pill-stack">
-                        <span className="pill">Total {objectiveCoverage.summary.total}</span>
-                        <span className="pill">Covered {objectiveCoverage.summary.covered}</span>
-                        <span className={`pill ${objectiveCoverage.summary.partial ? "coverage-pill-warning" : ""}`}>
-                          Partial {objectiveCoverage.summary.partial}
+                        <span className="pill">Total {objectiveCoverageSummary?.total || 0}</span>
+                        <span className="pill">Covered {objectiveCoverageSummary?.covered || 0}</span>
+                        <span className={`pill ${objectiveCoveragePartialCount ? "coverage-pill-warning" : ""}`}>
+                          Partial {objectiveCoveragePartialCount}
                         </span>
-                        <span className={`pill ${objectiveCoverage.summary.uncovered ? "coverage-pill-danger" : ""}`}>
-                          Uncovered {objectiveCoverage.summary.uncovered}
+                        <span className={`pill ${(objectiveCoverageSummary?.uncovered || 0) ? "coverage-pill-danger" : ""}`}>
+                          Uncovered {objectiveCoverageSummary?.uncovered || 0}
                         </span>
                       </div>
                     )}
@@ -5609,6 +6051,12 @@ export default function App() {
                       <span>{calendarDetailEntry.description}</span>
                     </div>
                   )}
+                  {calendarDetailEntry.location && (
+                    <div className="cal-detail-row">
+                      <span className="cal-detail-label">Location</span>
+                      <span>{calendarDetailEntry.location}</span>
+                    </div>
+                  )}
                   {calendarDetailEntry.kind === "soft" && (
                     <>
                       {calendarDetailEntry.status && (
@@ -5650,6 +6098,69 @@ export default function App() {
                     </>
                   )}
                 </div>
+                {calendarDetailEntry.kind === "hard" && (
+                  <div className="hard-event-task-panel">
+                    <div className="card-head" style={{ padding: 0, marginTop: "0.75rem" }}>
+                      <div>
+                        <p className="eyebrow">Objective tasks</p>
+                        <h3>Count this hard event as planned work</h3>
+                        <p className="muted small">Linked tasks are treated as already scheduled, and Corv will avoid rescheduling them.</p>
+                      </div>
+                    </div>
+                    {calendarDetailEntry.task_links?.length ? (
+                      <div className="calendar-list">
+                        {calendarDetailEntry.task_links.map((link) => (
+                          <div key={link.id} className="cal-row">
+                            <div className="cal-badge soft">Task</div>
+                            <div className="cal-body">
+                              <div className="cal-title">{link.task_title}</div>
+                              <div className="cal-meta muted small">
+                                {link.objective_title}
+                                {link.due_at ? ` · Due ${formatDateTime(link.due_at)}` : ""}
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              className="ghost pill-action"
+                              onClick={() => handleDeleteHardEventTaskLink(link.id)}
+                              disabled={hardEventTaskLinkLoading}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="muted small">No objective tasks linked to this hard event yet.</p>
+                    )}
+                    <div className="hard-event-task-actions">
+                      <label className="field">
+                        <span>Add task</span>
+                        <select
+                          value={selectedHardEventTaskId}
+                          onChange={(e) => setSelectedHardEventTaskId(e.target.value)}
+                          disabled={hardEventTaskOptionsLoading || hardEventTaskLinkLoading}
+                        >
+                          <option value="">Select an objective task</option>
+                          {availableHardEventTaskOptions.map((task) => (
+                            <option key={task.id} value={task.id}>
+                              {task.objective_title} - {task.title}
+                              {task.due_at ? ` (due ${new Date(task.due_at).toLocaleDateString()})` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={handleCreateHardEventTaskLink}
+                        disabled={!selectedHardEventTaskId || hardEventTaskOptionsLoading || hardEventTaskLinkLoading}
+                      >
+                        {hardEventTaskLinkLoading ? "Saving…" : "Link task"}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {calendarDetailEntry.kind === "soft" && calendarDetailEntry.soft_event_id && (
                   <div className="modal-actions" style={{ marginTop: "1.25rem" }}>
                     <div />
