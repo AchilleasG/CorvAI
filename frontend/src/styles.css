@@ -7,6 +7,10 @@
   --text: #e5e7eb;
   --muted: #94a3b8;
   --border: #1f2937;
+  --control-bg: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(12, 24, 41, 0.92));
+  --control-bg-hover: linear-gradient(180deg, rgba(19, 31, 54, 0.98), rgba(13, 27, 46, 0.94));
+  --control-border-strong: rgba(148, 163, 184, 0.22);
+  --control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 24px rgba(0, 0, 0, 0.18);
   font-family: "Space Grotesk", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -25,6 +29,127 @@ body {
     var(--bg);
   color: var(--text);
   overflow-x: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+textarea {
+  width: 100%;
+  border: 1px solid var(--control-border-strong);
+  border-radius: 12px;
+  background: var(--control-bg);
+  color: var(--text);
+  box-shadow: var(--control-shadow);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+select {
+  min-height: 44px;
+  padding: 0.7rem 0.85rem;
+}
+
+textarea {
+  padding: 0.75rem 0.85rem;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):hover,
+textarea:hover {
+  border-color: rgba(42, 209, 163, 0.32);
+  background: var(--control-bg-hover);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):focus,
+textarea:focus {
+  outline: none;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  border-color: rgba(42, 209, 163, 0.7);
+  box-shadow: 0 0 0 1px rgba(42, 209, 163, 0.55), 0 0 0 4px rgba(42, 209, 163, 0.14), var(--control-shadow);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: rgba(148, 163, 184, 0.78);
+}
+
+select {
+  border: 1px solid var(--control-border-strong);
+  border-radius: 12px;
+  background: var(--control-bg);
+  color: var(--text);
+  box-shadow: var(--control-shadow);
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+select:hover {
+  border-color: rgba(42, 209, 163, 0.32);
+  background: var(--control-bg-hover);
+}
+
+select:focus {
+  outline: none;
+}
+
+select:focus-visible {
+  border-color: rgba(42, 209, 163, 0.7);
+  box-shadow: 0 0 0 1px rgba(42, 209, 163, 0.55), 0 0 0 4px rgba(42, 209, 163, 0.14), var(--control-shadow);
+}
+
+select option {
+  background: #0f172a;
+  color: var(--text);
+}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.92) saturate(0.2) brightness(1.2);
+  cursor: pointer;
+}
+
+input[type="file"] {
+  width: 100%;
+  color: var(--muted);
+}
+
+input[type="file"]::file-selector-button {
+  margin-right: 0.8rem;
+  border: 1px solid rgba(42, 209, 163, 0.28);
+  border-radius: 10px;
+  background: rgba(42, 209, 163, 0.12);
+  color: var(--text);
+  padding: 0.6rem 0.9rem;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+input[type="file"]::file-selector-button:hover {
+  background: rgba(42, 209, 163, 0.18);
+  border-color: rgba(42, 209, 163, 0.42);
+  transform: translateY(-1px);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled,
+button:disabled {
+  opacity: 0.62;
 }
 
 .page {
@@ -1494,6 +1619,12 @@ button {
   padding: 0.95rem;
 }
 
+.study-topic-card.active {
+  border-color: rgba(42, 209, 163, 0.5);
+  background: rgba(42, 209, 163, 0.08);
+  box-shadow: 0 0 0 1px rgba(42, 209, 163, 0.18), 0 14px 28px rgba(0, 0, 0, 0.12);
+}
+
 .study-assignment-card {
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -1818,7 +1949,75 @@ button {
 
 .study-audiobook-player {
   width: 100%;
-  height: 36px;
+  height: 42px;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(18, 28, 48, 0.98), rgba(10, 18, 33, 0.98));
+  border: 1px solid rgba(42, 209, 163, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 12px 28px rgba(0, 0, 0, 0.24);
+}
+
+.study-audiobook-player:hover {
+  border-color: rgba(42, 209, 163, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 14px 32px rgba(0, 0, 0, 0.28);
+}
+
+.study-audiobook-player:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px rgba(42, 209, 163, 0.55),
+    0 0 0 4px rgba(42, 209, 163, 0.14),
+    0 14px 32px rgba(0, 0, 0, 0.28);
+}
+
+.study-audiobook-player::-webkit-media-controls-panel {
+  background:
+    linear-gradient(180deg, rgba(18, 28, 48, 0.98), rgba(10, 18, 33, 0.98));
+}
+
+.study-audiobook-player::-webkit-media-controls-current-time-display,
+.study-audiobook-player::-webkit-media-controls-time-remaining-display {
+  color: var(--text);
+}
+
+.study-audiobook-player::-webkit-media-controls-play-button,
+.study-audiobook-player::-webkit-media-controls-mute-button {
+  filter: invert(0.92) saturate(0.7) hue-rotate(330deg);
+}
+
+.study-audiobook-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 0.55rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid rgba(42, 209, 163, 0.26);
+  background: rgba(42, 209, 163, 0.1);
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-decoration: none;
+  transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.study-audiobook-link:hover {
+  border-color: rgba(42, 209, 163, 0.42);
+  background: rgba(42, 209, 163, 0.16);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  transform: translateY(-1px);
+}
+
+.study-audiobook-link:focus-visible {
+  outline: none;
+  border-color: rgba(42, 209, 163, 0.7);
+  box-shadow: 0 0 0 1px rgba(42, 209, 163, 0.55), 0 0 0 4px rgba(42, 209, 163, 0.14);
 }
 
 .study-audiobook-error {

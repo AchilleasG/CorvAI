@@ -61,6 +61,12 @@ MAX_IMAGE_EDGE_PX = 2000
 MAX_IMAGE_UPLOAD_BYTES = 8 * 1024 * 1024
 JPEG_QUALITY_HIGH = 88
 JPEG_QUALITY_FALLBACK = 72
+QUESTION_DRIVEN_MATERIAL_KINDS = {
+    StudyMaterial.KIND_PAST_EXAM,
+    "exam",
+    "assignment",
+    "worksheet",
+}
 
 MATERIAL_PAGE_INSTRUCTIONS = (
     "You are converting a study material page into structured notes. "
@@ -79,6 +85,16 @@ MATERIAL_PAGE_INSTRUCTIONS = (
     "If a problem is not fully solvable from the image alone, explain the missing assumption instead of inventing facts."
 )
 
+MATERIAL_PAGE_MARKDOWN_INSTRUCTIONS = (
+    "You are transcribing a single study material page into markdown. "
+    "Read the image carefully. Do not use OCR tools or external transcription services. "
+    "Use only the image content visible to you. Be faithful to the page. "
+    "Return JSON only with keys: converted_markdown. "
+    "Write the markdown in English, translating when needed while preserving meaning. "
+    "converted_markdown should be a clean, structured markdown transcription of all visible content on this page. "
+    "Do not solve the exercises yet. Do not add theory summaries yet. Do not infer missing content."
+)
+
 MATERIAL_TEXT_INSTRUCTIONS = (
     "You are converting a pasted study material into structured notes. "
     "Read the text carefully. Return JSON only with keys: converted_markdown, solved_markdown, theory_markdown, extracted_data. "
@@ -94,18 +110,33 @@ MATERIAL_TEXT_INSTRUCTIONS = (
     "If the text is incomplete or ambiguous, explain what is missing instead of inventing facts."
 )
 
+MATERIAL_MARKDOWN_ANALYSIS_INSTRUCTIONS = (
+    "You are analyzing the full markdown transcription of a study material. "
+    "Return JSON only with keys: solved_markdown. "
+    "Write ALL output fields in English, even when the source text is in another language. "
+    "solved_markdown must solve ALL visible questions/problems in the full material with complete working. "
+    "Do not skip exercises for brevity, compactness, or time. "
+    "Never write statements like 'the remaining exercises are not solved'. "
+    "If any item cannot be fully solved from the provided markdown, include it under an 'Unresolved Items' section with: question label, what is missing, and the most likely method. "
+    "Base all reasoning strictly on the provided markdown transcription of the full material. "
+    "If the markdown is incomplete or ambiguous, explain what is missing instead of inventing facts."
+)
+
 TOPIC_RECONCILIATION_INSTRUCTIONS = (
     "You are reconciling freshly extracted study concepts against an existing course topic catalog. "
     "You must decide whether each concept should update an existing topic, create a new topic, or do nothing. "
+    "In the SAME pass, identify every substantive question/problem in the material markdown and assign each one to the topic updates/creates it belongs to. "
     "Prefer updating an existing topic when the concept is the same topic under a different phrasing. "
     "Avoid duplicates. Do not rename existing topics unless absolutely necessary; use aliases or description updates instead. "
-    "Return JSON only with keys: summary, actions. "
+    "Return JSON only with keys: summary, actions, unassigned_questions. "
     "Each action must contain: action, rationale. "
     "Allowed actions: create, update, noop. "
     "Write all returned strings and list items in English only, regardless of the source material language. "
-    "For create include: name, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
-    "For update include: target_topic_id, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, aliases, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions. "
+    "For create include: name, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions, questions. "
+    "For update include: target_topic_id, description, summary, order_index, estimated_effort_minutes, weight, status, metadata_patch, aliases, why_it_matters, what_to_know, mastery_checks, common_pitfalls, prerequisite_assumptions, questions. "
     "For noop include: rationale. "
+    "Each questions item must contain: question_ref, source_exercise_label, question_text. "
+    "question_ref must be a concise, stable identifier in the format '[material title] [short question identifier]'. Examples: 'K25 Q7', 'K25 Problem 1', 'June2025 Problem 2(d)'. "
     "Descriptions must be concrete and detailed enough for a student to study directly from them. "
     "Avoid generic one-liners. Include exam-relevant emphasis when possible. "
     "summary must be a SHORT, HUMAN-FRIENDLY bullet-point list (3-6 bullets) of the key learning outcomes or topics covered. "
@@ -123,6 +154,13 @@ TOPIC_RECONCILIATION_INSTRUCTIONS = (
     "Use update actions liberally. If concepts are even remotely related to an existing topic (same subject area, same exam/course unit, overlapping skills), merge them with update instead of creating a new topic. "
     "Only create a new topic if it is genuinely orthogonal to all existing topics—i.e., it covers a completely different major theme that no existing topic touches at all. "
     "This keeps the topic catalog lean and consolidated as material accumulates. "
+    "You must derive the question inventory directly from the material markdown and solved markdown. Do not rely on any pre-extracted question list. "
+    "Account for ALL substantive questions visible in the markdown including long-form problems and subparts. "
+    "Assign EVERY question you identify exactly once to the best create/update action whenever reasonably possible. "
+    "Use questions to show which problems motivated each topic update/create. "
+    "A newly created topic should usually carry the questions that caused it to be created. "
+    "For past exams and worksheets, every create/update action should normally have at least one question unless it is a pure theory-only topic clearly justified by the material. "
+    "Only leave a question in unassigned_questions if it truly does not fit any topic yet. "
     "For create and update actions, include at least 3 bullets in what_to_know, at least 3 bullets in mastery_checks, and at least 2 bullets in common_pitfalls. "
     "If detail is missing in the material, explicitly state what is unknown rather than fabricating. "
     "Base your decision on the solved material outputs and the full existing topic catalog provided."
@@ -160,6 +198,8 @@ AUDIOBOOK_SCRIPT_INSTRUCTIONS = (
     "If audience or user profile context is provided, adapt the depth, pacing, wording, and examples to that target student while still covering the lesson completely. "
     "Explain concepts from fundamentals to advanced exam tactics. "
     "Teach all prerequisite ideas, the core theory, the meaning of the formulas, when each method applies, and how to recognize which approach to use. "
+    "When you introduce a technical term for the first time, explain it immediately in simple language, especially if the student is likely not to have encountered it before. "
+    "Do not assume prior familiarity with specialized vocabulary when a short first-use explanation would make the lesson clearer. "
     "Include worked examples, common traps, and step-by-step solving heuristics. "
     "Make sure the final script contains all of the practical knowledge, reasoning patterns, and problem-solving methods needed for the exercise types implied by the lesson material. "
     "Do not omit difficult parts. Do not hand-wave. Do not give a short summary when a full explanation is required. "
@@ -167,16 +207,22 @@ AUDIOBOOK_SCRIPT_INSTRUCTIONS = (
     "Use a conversational, direct, and slightly friendly tone, like a strong one-on-one tutor speaking to the student. "
     "Sound natural and human, not formal, robotic, academic, or overly scripted. "
     "Address the listener directly when helpful using plain spoken phrasing, but stay focused on teaching. "
+    "Do not shy away from personal comments, personal encouragement, or personalized observations when they help the lesson feel like it is truly for this student. "
+    "Personalization and human warmth are important, as long as they remain relevant to the student's goals and the lesson content. "
     "The final result must flow naturally as an audio-only lesson, as if a skilled tutor is teaching aloud. "
     "Prioritize listening clarity over visual organization. "
     "Do not rely on diagrams, tables, written layout, symbols on a page, or phrases like 'as you can see above' or 'look at the figure'. "
     "Avoid long strings of numbers, excessive variable lists, dense notation dumps, or formatting that is hard to follow by ear. "
     "When formulas or steps are necessary, introduce them slowly in spoken form and immediately explain what they mean and how they are used. "
     "This script will be fed directly into a TTS engine, so it must be plain text only. "
-    "Do not use markdown, headings, bullet points, numbered lists, tables, code blocks, emojis, symbols, decorative separators, or formatting markup of any kind. "
-    "Do not include special characters unless they are standard sentence punctuation needed for natural speech. "
+    "Start with a short spoken introduction explaining what we will be talking about today and why it matters. "
+    "Divide the lesson into clearly separated chapters, each with a short spoken title line that sounds natural when read aloud. "
+    "Use simple chapter titles such as 'Chapter 1. Sampling and reconstruction' or 'Chapter 2. Worked examples'. "
+    "Do not use markdown, bullet points, numbered lists, tables, code blocks, emojis, symbols, decorative separators, or formatting markup of any kind. "
+    "Write everything in a fully audio-friendly manner, with no mathematical symbols, no notation-heavy expressions, and no special characters beyond ordinary sentence punctuation. "
+    "Spell formulas, operators, variable relationships, and technical notation out in natural spoken language instead of using symbols. "
     "Do not wrap words in quotes for emphasis and do not use shorthand notation that sounds unnatural when read aloud. "
-    "Organize the lesson naturally in plain paragraphs using simple transitions instead of formatting. "
+    "Organize the lesson naturally in plain paragraphs using simple transitions instead of visual formatting. "
     "Cover, in order, the lesson overview, the core theory and formulas, how to solve the main exercise types, worked walkthroughs, typical mistakes and how to avoid them, a rapid revision recap, and self-test practice prompts."
 )
 
@@ -847,6 +893,30 @@ class StudyIngestionService:
             progress_callback(progress, message)
 
     @staticmethod
+    def _persist_material_progress(
+        material: StudyMaterial,
+        *,
+        extracted_data: Optional[Dict[str, Any]] = None,
+        raw_text_override: Optional[str] = None,
+    ) -> None:
+        material.raw_text = raw_text_override if raw_text_override is not None else (material.raw_text.strip() or material.converted_markdown)
+        material.parsed_text = material.converted_markdown
+        if extracted_data is not None:
+            material.extracted_data = extracted_data
+        material.save(
+            update_fields=[
+                "page_count",
+                "converted_markdown",
+                "solved_markdown",
+                "theory_markdown",
+                "extracted_data",
+                "raw_text",
+                "parsed_text",
+                "updated_at",
+            ]
+        )
+
+    @staticmethod
     def _material_path(material: StudyMaterial) -> str:
         if material.uploaded_file:
             return material.uploaded_file.path
@@ -962,6 +1032,58 @@ class StudyIngestionService:
         }
 
     @staticmethod
+    def _extract_page_markdown(material: StudyMaterial, page: RenderedPage, model: Optional[str] = None) -> Dict[str, Any]:
+        model_name = model or ModelConfigService.get_study_model()
+        provider = resolve_provider(model_name)
+
+        page_text = (
+            f"Course: {material.course.title}\n"
+            f"Material: {material.title}\n"
+            f"Kind: {material.kind}\n"
+            f"Page: {page.index}\n"
+            "Return the requested JSON now."
+        )
+
+        if provider != "openai":
+            provider = "openai"
+
+        resp = get_client("openai").with_options(max_retries=0).responses.create(
+            model=model_name,
+            input=[
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": MATERIAL_PAGE_MARKDOWN_INSTRUCTIONS}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": page_text},
+                        {"type": "input_image", "image_url": page.data_url},
+                    ],
+                },
+            ],
+            text={"format": {"type": "json_object"}, "verbosity": "medium"},
+            reasoning={"effort": "medium"},
+            store=False,
+            timeout=180,
+        )
+        usage_obj = getattr(resp, "usage", None)
+        if usage_obj:
+            UsageService.log_usage(
+                source="study_processing_page_markdown",
+                model=model_name,
+                cache_mode=ModelConfigService.get_cache_mode(),
+                usage=usage_obj,
+                job=None,
+            )
+        raw = getattr(resp, "output_text", "") or "{}"
+        data = _safe_json_load(raw)
+        return {
+            "converted_markdown": data.get("converted_markdown", "") or "",
+            "raw_response": raw,
+        }
+
+    @staticmethod
     def _extract_page_with_heartbeat(
         material: StudyMaterial,
         page: RenderedPage,
@@ -993,6 +1115,82 @@ class StudyIngestionService:
                         ),
                     )
                     continue
+
+    @staticmethod
+    def _extract_page_markdown_with_heartbeat(
+        material: StudyMaterial,
+        page: RenderedPage,
+        *,
+        page_index: int,
+        page_total: int,
+        model: Optional[str] = None,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        cancel_check: Optional[Callable[[], None]] = None,
+        heartbeat_seconds: float = 12.0,
+    ) -> Dict[str, Any]:
+        start = time_module.monotonic()
+        heartbeat_count = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(StudyIngestionService._extract_page_markdown, material, page, model)
+            while True:
+                StudyIngestionService._ensure_not_canceled(cancel_check)
+                try:
+                    return future.result(timeout=heartbeat_seconds)
+                except concurrent.futures.TimeoutError:
+                    heartbeat_count += 1
+                    elapsed = int(time_module.monotonic() - start)
+                    StudyIngestionService._emit_progress(
+                        progress_callback,
+                        0.1 + (0.45 * ((page_index - 1) / max(page_total, 1))),
+                        (
+                            f"Still transcribing page {page_index} of {page_total} "
+                            f"({elapsed}s elapsed, heartbeat {heartbeat_count})"
+                        ),
+                    )
+                    continue
+
+    @staticmethod
+    def _analyze_material_markdown(material: StudyMaterial, markdown: str, model: Optional[str] = None) -> Dict[str, Any]:
+        model_name = model or ModelConfigService.get_study_model()
+        prompt = (
+            f"Course: {material.course.title}\n"
+            f"Material: {material.title}\n"
+            f"Kind: {material.kind}\n\n"
+            f"Markdown transcription of the full material:\n{markdown}\n\n"
+            "Return the requested JSON now."
+        )
+        resp = get_client("openai").with_options(max_retries=0).responses.create(
+            model=model_name,
+            input=[
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": MATERIAL_MARKDOWN_ANALYSIS_INSTRUCTIONS}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
+            ],
+            text={"format": {"type": "json_object"}, "verbosity": "medium"},
+            reasoning={"effort": "medium"},
+            store=False,
+            timeout=180,
+        )
+        usage_obj = getattr(resp, "usage", None)
+        if usage_obj:
+            UsageService.log_usage(
+                source="study_processing_markdown_analysis",
+                model=model_name,
+                cache_mode=ModelConfigService.get_cache_mode(),
+                usage=usage_obj,
+                job=None,
+            )
+        raw = getattr(resp, "output_text", "") or "{}"
+        data = _safe_json_load(raw)
+        return {
+            "solved_markdown": data.get("solved_markdown", "") or "",
+            "raw_response": raw,
+        }
 
     @staticmethod
     def _merge_text_blocks(blocks: Sequence[str]) -> str:
@@ -1256,15 +1454,61 @@ class StudyIngestionService:
                 course,
                 material.extracted_data if isinstance(material.extracted_data, dict) else {},
             )
+            fallback["assignment_map"] = {}
+            fallback["question_items"] = []
+            fallback["assigned_question_count"] = 0
+            fallback["question_count"] = 0
+            fallback["unassigned_question_refs"] = []
             fallback["raw_response"] = raw
             return fallback
 
         existing_by_id = {str(topic.id): topic for topic in course.topics.all()}
         valid_statuses = {choice[0] for choice in StudyTopic.STATUS_CHOICES}
+        require_question_refs_for_new_topics = material.kind in QUESTION_DRIVEN_MATERIAL_KINDS
         created_count = 0
         updated_count = 0
         noop_count = 0
         touched_topics: List[StudyTopic] = []
+        assignment_map: Dict[str, str] = {}
+        question_items_by_assignment_id: Dict[str, Dict[str, Any]] = {}
+        seen_question_refs: set[str] = set()
+
+        def normalize_question_items(raw_items: Any) -> List[Dict[str, Any]]:
+            items = raw_items if isinstance(raw_items, list) else []
+            normalized: List[Dict[str, Any]] = []
+            for idx, item in enumerate(items, start=1):
+                if not isinstance(item, dict):
+                    continue
+                question_ref = str(item.get("question_ref") or "").strip()
+                if not question_ref or question_ref in seen_question_refs:
+                    continue
+                source_exercise_label = str(item.get("source_exercise_label") or "").strip()
+                if not source_exercise_label:
+                    tail = question_ref
+                    prefix = f"{material.title} "
+                    if tail.startswith(prefix):
+                        tail = tail[len(prefix):].strip()
+                    source_exercise_label = tail or f"Q{idx}"
+                question_text = str(item.get("question_text") or item.get("text") or "").strip()
+                assignment_id = StudyPlannerService._question_assignment_id(material, question_ref)
+                normalized_item = {
+                    "assignment_id": assignment_id,
+                    "question_ref": question_ref,
+                    "source_material_id": str(material.id),
+                    "source_material_title": material.title,
+                    "source_exercise_label": source_exercise_label,
+                    "question_index": len(question_items_by_assignment_id) + len(normalized) + 1,
+                    "text": question_text,
+                    "raw": item,
+                }
+                seen_question_refs.add(question_ref)
+                normalized.append(normalized_item)
+            return normalized
+
+        raw_unassigned_questions = data.get("unassigned_questions", [])
+        if not isinstance(raw_unassigned_questions, list):
+            raw_unassigned_questions = []
+        normalized_unassigned_questions = normalize_question_items(raw_unassigned_questions)
 
         for action in actions:
             StudyIngestionService._ensure_not_canceled(cancel_check)
@@ -1272,9 +1516,16 @@ class StudyIngestionService:
                 noop_count += 1
                 continue
             action_type = str(action.get("action") or "noop").strip().lower()
+            action_question_items = normalize_question_items(action.get("questions", []))
             if action_type == "create":
                 raw_name = str(action.get("name") or "").strip()
                 if not raw_name:
+                    noop_count += 1
+                    continue
+                if require_question_refs_for_new_topics and not action_question_items:
+                    # For past-exam-like materials, a brand-new topic must be anchored to at least
+                    # one extracted question from the current material; otherwise it is too easy for
+                    # the model to invent an extra broad topic that receives zero homework.
                     noop_count += 1
                     continue
                 existing = StudyTopic.objects.filter(course=course, name__iexact=raw_name).first()
@@ -1314,6 +1565,10 @@ class StudyIngestionService:
                     ObjectiveService.ensure_topic_objective(existing)
                     StudyIngestionService._ensure_topic_mastery(course, existing)
                     touched_topics.append(existing)
+                    for question_item in action_question_items:
+                        assignment_id = question_item["assignment_id"]
+                        question_items_by_assignment_id.setdefault(assignment_id, question_item)
+                        assignment_map.setdefault(assignment_id, str(existing.id))
                     continue
                 course_objective = ObjectiveService.ensure_course_objective(course)
                 topic = StudyTopic.objects.create(
@@ -1340,6 +1595,10 @@ class StudyIngestionService:
                 ObjectiveService.ensure_topic_objective(topic)
                 StudyIngestionService._ensure_topic_mastery(course, topic)
                 touched_topics.append(topic)
+                for question_item in action_question_items:
+                    assignment_id = question_item["assignment_id"]
+                    question_items_by_assignment_id.setdefault(assignment_id, question_item)
+                    assignment_map.setdefault(assignment_id, str(topic.id))
                 created_count += 1
                 continue
             if action_type == "update":
@@ -1400,8 +1659,15 @@ class StudyIngestionService:
                 ObjectiveService.ensure_topic_objective(topic)
                 StudyIngestionService._ensure_topic_mastery(course, topic)
                 touched_topics.append(topic)
+                for question_item in action_question_items:
+                    assignment_id = question_item["assignment_id"]
+                    question_items_by_assignment_id.setdefault(assignment_id, question_item)
+                    assignment_map.setdefault(assignment_id, str(topic.id))
                 continue
             noop_count += 1
+
+        for question_item in normalized_unassigned_questions:
+            question_items_by_assignment_id.setdefault(question_item["assignment_id"], question_item)
 
         return {
             "topics": touched_topics,
@@ -1411,7 +1677,125 @@ class StudyIngestionService:
             "noop_count": noop_count,
             "mode": "ai_reconciled",
             "summary": str(data.get("summary") or "AI topic reconciliation completed."),
+            "assignment_map": assignment_map,
+            "question_items": list(question_items_by_assignment_id.values()),
+            "assigned_question_count": len(assignment_map),
+            "question_count": len(question_items_by_assignment_id),
+            "unassigned_question_refs": [
+                item["question_ref"]
+                for item in question_items_by_assignment_id.values()
+                if item["assignment_id"] not in assignment_map
+            ],
             "raw_response": raw,
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def apply_material_homework_assignments(
+        course: StudyCourse,
+        material: StudyMaterial,
+        assignment_map: Dict[str, str],
+        *,
+        question_items: Optional[Sequence[Dict[str, Any]]] = None,
+        touched_topic_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, int]:
+        topics = list(course.topics.all().order_by("order_index", "name"))
+        source_questions = [
+            item for item in (question_items or []) if isinstance(item, dict)
+        ] or StudyPlannerService._collect_questions_for_material(material)
+        source_assignment_ids = {
+            str(question.get("assignment_id") or "").strip()
+            for question in source_questions
+            if str(question.get("assignment_id") or "").strip()
+        }
+        if not topics:
+            return {
+                "source_material_question_count": len(source_questions),
+                "past_exam_question_count": len(source_questions),
+                "topics_with_homework": 0,
+                "model_assigned_count": 0,
+                "fallback_assigned_count": 0,
+            }
+
+        valid_topic_ids = {str(topic.id) for topic in topics}
+        candidate_topics = [topic for topic in topics if str(topic.id) in set(touched_topic_ids or [])]
+        if not candidate_topics:
+            candidate_topics = topics
+
+        existing_done_state: Dict[str, bool] = {}
+        for topic in topics:
+            if not isinstance(topic.homework, list):
+                continue
+            for item in topic.homework:
+                if not isinstance(item, dict):
+                    continue
+                assignment_id = str(item.get("assignment_id") or "").strip()
+                if assignment_id in source_assignment_ids:
+                    existing_done_state[assignment_id] = bool(item.get("done"))
+
+        normalized_assignment_map: Dict[str, str] = {}
+        model_assigned_count = 0
+        fallback_assigned_count = 0
+        for question in source_questions:
+            assignment_id = str(question.get("assignment_id") or "").strip()
+            topic_id = str(assignment_map.get(assignment_id) or "").strip()
+            if topic_id in valid_topic_ids:
+                normalized_assignment_map[assignment_id] = topic_id
+                model_assigned_count += 1
+                continue
+            fallback_topic = StudyPlannerService._fallback_topic_for_homework_question(question, candidate_topics)
+            normalized_assignment_map[assignment_id] = str(fallback_topic.id)
+            fallback_assigned_count += 1
+
+        topic_buckets: Dict[str, List[Dict[str, Any]]] = {str(topic.id): [] for topic in topics}
+        for question in source_questions:
+            assignment_id = str(question.get("assignment_id") or "").strip()
+            topic_id = normalized_assignment_map.get(assignment_id)
+            if not topic_id:
+                continue
+            topic_buckets[topic_id].append(
+                {
+                    **question,
+                    "done": existing_done_state.get(assignment_id, False),
+                }
+            )
+
+        topics_with_homework = 0
+        for topic in topics:
+            existing_items = topic.homework if isinstance(topic.homework, list) else []
+            preserved_items = []
+            for item in existing_items:
+                if not isinstance(item, dict):
+                    preserved_items.append(item)
+                    continue
+                assignment_id = str(item.get("assignment_id") or "").strip()
+                source_material_id = str(item.get("source_material_id") or "").strip()
+                if assignment_id in source_assignment_ids or source_material_id == str(material.id):
+                    continue
+                preserved_items.append(item)
+
+            assigned_items = topic_buckets[str(topic.id)]
+            assigned_items.sort(
+                key=lambda item: (
+                    str(item.get("source_material_title") or "").lower(),
+                    str(item.get("source_exercise_label") or "").lower(),
+                    int(item.get("question_index") or 0),
+                )
+            )
+            next_homework = preserved_items + assigned_items
+            if next_homework != existing_items:
+                topic.homework = next_homework
+                topic.save(update_fields=["homework", "updated_at"])
+            ObjectiveService.ensure_topic_objective(topic)
+            if assigned_items:
+                topics_with_homework += 1
+
+        return {
+            "source_material_question_count": len(source_questions),
+            "past_exam_question_count": len(source_questions),
+            "topics_with_homework": topics_with_homework,
+            "model_assigned_count": model_assigned_count,
+            "fallback_assigned_count": fallback_assigned_count,
         }
 
     @staticmethod
@@ -1448,74 +1832,151 @@ class StudyIngestionService:
                 if not pages:
                     raise ValueError("No pages could be rendered from the material")
 
+                material_ext = _file_extension(path)
                 page_results: List[Dict[str, Any]] = []
                 converted_blocks: List[str] = []
                 solved_blocks: List[str] = []
                 theory_blocks: List[str] = []
 
                 page_total = len(pages)
-                for page_index, page in enumerate(pages, start=1):
-                    StudyIngestionService._ensure_not_canceled(cancel_check)
-                    StudyIngestionService._emit_progress(
-                        progress_callback,
-                        0.1 + (0.6 * ((page_index - 1) / max(page_total, 1))),
-                        f"Analyzing page {page_index} of {page_total}",
-                    )
-                    try:
-                        result = StudyIngestionService._extract_page_with_heartbeat(
-                            material,
-                            page,
-                            page_index=page_index,
-                            page_total=page_total,
-                            model=model,
-                            progress_callback=progress_callback,
-                            cancel_check=cancel_check,
+                if material_ext == ".pdf":
+                    for page_index, page in enumerate(pages, start=1):
+                        StudyIngestionService._ensure_not_canceled(cancel_check)
+                        StudyIngestionService._emit_progress(
+                            progress_callback,
+                            0.1 + (0.45 * ((page_index - 1) / max(page_total, 1))),
+                            f"Transcribing page {page_index} of {page_total}",
                         )
-                    except Exception as exc:
-                        if "timed out" in str(exc).lower():
-                            raise TimeoutError(
-                                f"Timed out while analyzing page {page_index} of {page_total}. "
-                                "Try a clearer crop or PDF export for this page."
-                            ) from exc
-                        raise
-                    page_results.append(
-                        {
-                            "page": page.index,
-                            "converted_markdown": result["converted_markdown"],
-                            "solved_markdown": result["solved_markdown"],
-                            "theory_markdown": result["theory_markdown"],
-                            "extracted_data": result["extracted_data"],
-                        }
-                    )
-                    if result["converted_markdown"]:
-                        converted_blocks.append(f"## Page {page.index}\n\n{result['converted_markdown']}")
-                    if result["solved_markdown"]:
-                        solved_blocks.append(f"## Page {page.index}\n\n{result['solved_markdown']}")
-                    if result["theory_markdown"]:
-                        theory_blocks.append(f"## Page {page.index}\n\n{result['theory_markdown']}")
+                        try:
+                            result = StudyIngestionService._extract_page_markdown_with_heartbeat(
+                                material,
+                                page,
+                                page_index=page_index,
+                                page_total=page_total,
+                                model=model,
+                                progress_callback=progress_callback,
+                                cancel_check=cancel_check,
+                            )
+                        except Exception as exc:
+                            if "timed out" in str(exc).lower():
+                                raise TimeoutError(
+                                    f"Timed out while transcribing page {page_index} of {page_total}. "
+                                    "Try a clearer crop or PDF export for this page."
+                                ) from exc
+                            raise
+                        page_results.append(
+                            {
+                                "page": page.index,
+                                "converted_markdown": result["converted_markdown"],
+                                "solved_markdown": "",
+                                "theory_markdown": "",
+                                "extracted_data": {},
+                            }
+                        )
+                        if result["converted_markdown"]:
+                            converted_blocks.append(f"## Page {page.index}\n\n{result['converted_markdown']}")
+                        material.page_count = len(pages)
+                        material.converted_markdown = StudyIngestionService._merge_text_blocks(converted_blocks)
+                        extracted_data["pages"] = page_results
+                        extracted_data["source"] = "pdf_page_markdown_then_full_analysis"
+                        StudyIngestionService._persist_material_progress(
+                            material,
+                            extracted_data=extracted_data,
+                        )
+                        StudyIngestionService._emit_progress(
+                            progress_callback,
+                            0.1 + (0.45 * (page_index / max(page_total, 1))),
+                            f"Transcribed page {page_index} of {page_total}",
+                        )
 
-                    page_data = result["extracted_data"] if isinstance(result["extracted_data"], dict) else {}
-                    for key in extracted_data.keys():
-                        if key in {"needs_followup"}:
-                            extracted_data[key] = bool(extracted_data.get(key)) or bool(page_data.get(key))
-                            continue
-                        if key not in page_data:
-                            continue
-                        current_value = extracted_data.get(key)
-                        incoming = page_data.get(key)
-                        if isinstance(current_value, list) and isinstance(incoming, list):
-                            current_value.extend(incoming)
-                    StudyIngestionService._emit_progress(
-                        progress_callback,
-                        0.1 + (0.6 * (page_index / max(page_total, 1))),
-                        f"Processed page {page_index} of {page_total}",
+                    material.page_count = len(pages)
+                    material.converted_markdown = StudyIngestionService._merge_text_blocks(converted_blocks)
+                    StudyIngestionService._emit_progress(progress_callback, 0.6, "Analyzing full material markdown")
+                    aggregate_result = StudyIngestionService._analyze_material_markdown(
+                        material,
+                        material.converted_markdown,
+                        model=model,
                     )
+                    material.solved_markdown = aggregate_result["solved_markdown"]
+                    material.theory_markdown = ""
+                    extracted_data["pages"] = page_results
+                    extracted_data["source"] = "pdf_page_markdown_then_full_analysis"
+                    StudyIngestionService._persist_material_progress(
+                        material,
+                        extracted_data=extracted_data,
+                    )
+                else:
+                    for page_index, page in enumerate(pages, start=1):
+                        StudyIngestionService._ensure_not_canceled(cancel_check)
+                        StudyIngestionService._emit_progress(
+                            progress_callback,
+                            0.1 + (0.6 * ((page_index - 1) / max(page_total, 1))),
+                            f"Analyzing page {page_index} of {page_total}",
+                        )
+                        try:
+                            result = StudyIngestionService._extract_page_with_heartbeat(
+                                material,
+                                page,
+                                page_index=page_index,
+                                page_total=page_total,
+                                model=model,
+                                progress_callback=progress_callback,
+                                cancel_check=cancel_check,
+                            )
+                        except Exception as exc:
+                            if "timed out" in str(exc).lower():
+                                raise TimeoutError(
+                                    f"Timed out while analyzing page {page_index} of {page_total}. "
+                                    "Try a clearer crop or PDF export for this page."
+                                ) from exc
+                            raise
+                        page_results.append(
+                            {
+                                "page": page.index,
+                                "converted_markdown": result["converted_markdown"],
+                                "solved_markdown": result["solved_markdown"],
+                                "theory_markdown": result["theory_markdown"],
+                                "extracted_data": result["extracted_data"],
+                            }
+                        )
+                        if result["converted_markdown"]:
+                            converted_blocks.append(f"## Page {page.index}\n\n{result['converted_markdown']}")
+                        if result["solved_markdown"]:
+                            solved_blocks.append(f"## Page {page.index}\n\n{result['solved_markdown']}")
+                        if result["theory_markdown"]:
+                            theory_blocks.append(f"## Page {page.index}\n\n{result['theory_markdown']}")
 
-                material.page_count = len(pages)
-                material.converted_markdown = StudyIngestionService._merge_text_blocks(converted_blocks)
-                material.solved_markdown = StudyIngestionService._merge_text_blocks(solved_blocks)
-                material.theory_markdown = StudyIngestionService._merge_text_blocks(theory_blocks)
-                extracted_data["pages"] = page_results
+                        page_data = result["extracted_data"] if isinstance(result["extracted_data"], dict) else {}
+                        for key in extracted_data.keys():
+                            if key in {"needs_followup"}:
+                                extracted_data[key] = bool(extracted_data.get(key)) or bool(page_data.get(key))
+                                continue
+                            if key not in page_data:
+                                continue
+                            current_value = extracted_data.get(key)
+                            incoming = page_data.get(key)
+                            if isinstance(current_value, list) and isinstance(incoming, list):
+                                current_value.extend(incoming)
+                        material.page_count = len(pages)
+                        material.converted_markdown = StudyIngestionService._merge_text_blocks(converted_blocks)
+                        material.solved_markdown = StudyIngestionService._merge_text_blocks(solved_blocks)
+                        material.theory_markdown = StudyIngestionService._merge_text_blocks(theory_blocks)
+                        extracted_data["pages"] = page_results
+                        StudyIngestionService._persist_material_progress(
+                            material,
+                            extracted_data=extracted_data,
+                        )
+                        StudyIngestionService._emit_progress(
+                            progress_callback,
+                            0.1 + (0.6 * (page_index / max(page_total, 1))),
+                            f"Processed page {page_index} of {page_total}",
+                        )
+
+                    material.page_count = len(pages)
+                    material.converted_markdown = StudyIngestionService._merge_text_blocks(converted_blocks)
+                    material.solved_markdown = StudyIngestionService._merge_text_blocks(solved_blocks)
+                    material.theory_markdown = StudyIngestionService._merge_text_blocks(theory_blocks)
+                    extracted_data["pages"] = page_results
             elif material.raw_text.strip():
                 StudyIngestionService._emit_progress(progress_callback, 0.05, "Processing pasted text")
                 result = StudyIngestionService._extract_text_material(material, material.raw_text.strip(), model=model)
@@ -1526,6 +1987,11 @@ class StudyIngestionService:
                 extracted_data.update(result["extracted_data"] if isinstance(result["extracted_data"], dict) else {})
                 extracted_data["source"] = "pasted_text"
                 extracted_data["text_length"] = len(material.raw_text.strip())
+                StudyIngestionService._persist_material_progress(
+                    material,
+                    extracted_data=extracted_data,
+                    raw_text_override=material.raw_text.strip(),
+                )
             else:
                 raise ValueError("Study material needs either an uploaded file or pasted text")
 
@@ -1544,10 +2010,21 @@ class StudyIngestionService:
                 cancel_check=cancel_check,
             )
 
+            StudyIngestionService._emit_progress(progress_callback, 0.84, "Assigning source questions to topics")
+            homework_stats = StudyIngestionService.apply_material_homework_assignments(
+                material.course,
+                material,
+                topic_result.get("assignment_map", {}) if isinstance(topic_result.get("assignment_map"), dict) else {},
+                question_items=topic_result.get("question_items", []) if isinstance(topic_result.get("question_items"), list) else [],
+                touched_topic_ids=[str(topic.id) for topic in topic_result.get("topics", []) if getattr(topic, "id", None)],
+            )
+
             StudyIngestionService._emit_progress(progress_callback, 0.9, "Recalculating study plan")
             plan_refresh: Dict[str, Any] = StudyPlannerService.recalculate_plan_for_course(
                 material.course,
                 source_material=material,
+                reassign_homework=False,
+                homework_stats_override=homework_stats,
             )
 
             extracted_data["topic_reconciliation"] = {
@@ -1556,7 +2033,11 @@ class StudyIngestionService:
                 "created_count": topic_result.get("created_count", 0),
                 "updated_count": topic_result.get("updated_count", 0),
                 "noop_count": topic_result.get("noop_count", 0),
+                "assigned_question_count": topic_result.get("assigned_question_count", 0),
+                "question_count": topic_result.get("question_count", 0),
             }
+            extracted_data["llm_question_inventory"] = topic_result.get("question_items", [])
+            extracted_data["homework_assignment"] = homework_stats
             extracted_data["plan_refresh"] = plan_refresh
             material.save(
                 update_fields=[
@@ -1835,6 +2316,29 @@ class StudyPlannerService:
         return ""
 
     @staticmethod
+    def _normalize_question_label(label: str, *, fallback_index: int) -> str:
+        text = re.sub(r"\s+", " ", str(label or "").strip())
+        if not text:
+            return f"Q{fallback_index}"
+        match = re.match(r"^(problem)\s+(\d+)$", text, flags=re.IGNORECASE)
+        if match:
+            return f"Problem {match.group(2)}"
+        match = re.match(r"^(\d+)[\.)]?$", text)
+        if match:
+            return f"Q{match.group(1)}"
+        return text[:80]
+
+    @staticmethod
+    def _question_assignment_id(material: StudyMaterial, label: str) -> str:
+        safe_label = re.sub(r"[^A-Za-z0-9]+", "-", str(label or "").strip()).strip("-").lower() or "question"
+        return f"{material.id}:{safe_label}"
+
+    @staticmethod
+    def _question_ref(material: StudyMaterial, label: str) -> str:
+        normalized = StudyPlannerService._normalize_question_label(label, fallback_index=0)
+        return f"{material.title} {normalized}".strip()
+
+    @staticmethod
     def _topic_text_for_homework_scoring(topic: StudyTopic) -> str:
         metadata = topic.metadata if isinstance(topic.metadata, dict) else {}
         metadata_bits: List[str] = []
@@ -1988,50 +2492,93 @@ class StudyPlannerService:
         )
 
         for material in materials:
-            extracted = material.extracted_data if isinstance(material.extracted_data, dict) else {}
-            raw_questions = extracted.get("questions") if isinstance(extracted, dict) else []
-            if not isinstance(raw_questions, list):
-                raw_questions = []
+            questions.extend(StudyPlannerService._collect_questions_for_material(material))
 
-            # Fallback: if top-level questions are missing, try page-level extraction blocks.
-            if not raw_questions:
-                page_blocks = extracted.get("pages") if isinstance(extracted, dict) else []
-                if isinstance(page_blocks, list):
-                    for page in page_blocks:
-                        if not isinstance(page, dict):
-                            continue
-                        page_data = page.get("extracted_data")
-                        if not isinstance(page_data, dict):
-                            continue
-                        page_questions = page_data.get("questions")
-                        if isinstance(page_questions, list):
-                            raw_questions.extend(page_questions)
+        return questions
 
-            for idx, raw_question in enumerate(raw_questions, start=1):
-                text = StudyPlannerService._past_exam_question_text(raw_question)
-                if not text:
+    @staticmethod
+    def _collect_questions_for_material(material: StudyMaterial) -> List[Dict[str, Any]]:
+        llm_inventory = []
+        extracted = material.extracted_data if isinstance(material.extracted_data, dict) else {}
+        raw_inventory = extracted.get("llm_question_inventory") if isinstance(extracted, dict) else []
+        if isinstance(raw_inventory, list):
+            llm_inventory = raw_inventory
+        if llm_inventory:
+            questions: List[Dict[str, Any]] = []
+            seen_assignment_ids: set[str] = set()
+            for idx, item in enumerate(llm_inventory, start=1):
+                if not isinstance(item, dict):
                     continue
+                question_ref = str(item.get("question_ref") or "").strip()
+                if not question_ref:
+                    continue
+                source_exercise_label = str(item.get("source_exercise_label") or "").strip() or question_ref
+                question_text = str(item.get("text") or item.get("question_text") or "").strip()
+                assignment_id = StudyPlannerService._question_assignment_id(material, question_ref)
+                if assignment_id in seen_assignment_ids:
+                    assignment_id = f"{assignment_id}-{idx}"
+                seen_assignment_ids.add(assignment_id)
                 questions.append(
                     {
-                        "assignment_id": f"{material.id}:{idx}",
+                        "assignment_id": assignment_id,
+                        "question_ref": question_ref,
                         "source_material_id": str(material.id),
                         "source_material_title": material.title,
-                        "source_exercise_label": (
-                            str(
-                                raw_question.get("label")
-                                or raw_question.get("question_number")
-                                or raw_question.get("number")
-                                or raw_question.get("exercise")
-                                or ""
-                            ).strip()
-                            if isinstance(raw_question, dict)
-                            else ""
-                        ),
+                        "source_exercise_label": source_exercise_label,
                         "question_index": idx,
-                        "text": text,
-                        "raw": raw_question if isinstance(raw_question, dict) else {"question": text},
+                        "text": question_text,
+                        "raw": item,
                     }
                 )
+            if questions:
+                return questions
+
+        questions: List[Dict[str, Any]] = []
+        raw_questions = extracted.get("questions") if isinstance(extracted, dict) else []
+        if not isinstance(raw_questions, list):
+            raw_questions = []
+
+        if not raw_questions:
+            page_blocks = extracted.get("pages") if isinstance(extracted, dict) else []
+            if isinstance(page_blocks, list):
+                for page in page_blocks:
+                    if not isinstance(page, dict):
+                        continue
+                    page_data = page.get("extracted_data")
+                    if not isinstance(page_data, dict):
+                        continue
+                    page_questions = page_data.get("questions")
+                    if isinstance(page_questions, list):
+                        raw_questions.extend(page_questions)
+
+        for idx, raw_question in enumerate(raw_questions, start=1):
+            text = StudyPlannerService._past_exam_question_text(raw_question)
+            if not text:
+                continue
+            raw_label = (
+                str(
+                    raw_question.get("label")
+                    or raw_question.get("question_number")
+                    or raw_question.get("number")
+                    or raw_question.get("exercise")
+                    or f"Q{idx}"
+                ).strip()
+                if isinstance(raw_question, dict)
+                else f"Q{idx}"
+            )
+            normalized_label = StudyPlannerService._normalize_question_label(raw_label, fallback_index=idx)
+            questions.append(
+                {
+                    "assignment_id": StudyPlannerService._question_assignment_id(material, normalized_label),
+                    "question_ref": f"{material.title} {normalized_label}",
+                    "source_material_id": str(material.id),
+                    "source_material_title": material.title,
+                    "source_exercise_label": normalized_label,
+                    "question_index": idx,
+                    "text": text,
+                    "raw": raw_question if isinstance(raw_question, dict) else {"question": text},
+                }
+            )
 
         return questions
 
@@ -2324,6 +2871,8 @@ class StudyPlannerService:
         course: StudyCourse,
         *,
         source_material: Optional[StudyMaterial] = None,
+        reassign_homework: bool = True,
+        homework_stats_override: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         ObjectiveService.ensure_course_objective(course)
         current_active = (
@@ -2346,10 +2895,21 @@ class StudyPlannerService:
             start_date=start_date,
             end_date=end_date,
         )
-        homework_stats = StudyPlannerService.assign_past_exam_homework_to_topics(
-            course,
-            source_material=source_material,
+        homework_stats = (
+            homework_stats_override
+            if homework_stats_override is not None
+            else {
+                "past_exam_question_count": 0,
+                "topics_with_homework": 0,
+                "model_assigned_count": 0,
+                "fallback_assigned_count": 0,
+            }
         )
+        if reassign_homework:
+            homework_stats = StudyPlannerService.assign_past_exam_homework_to_topics(
+                course,
+                source_material=source_material,
+            )
         soft_event_stats = ObjectiveService.rebuild_objective_soft_events_for_window(
             plan.window_start,
             plan.window_end,

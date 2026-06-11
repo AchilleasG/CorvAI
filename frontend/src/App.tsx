@@ -657,6 +657,7 @@ export default function App() {
   const [studyFileDragOver, setStudyFileDragOver] = useState(false);
   const [studyMaterialText, setStudyMaterialText] = useState("");
   const [studyLessonDetailId, setStudyLessonDetailId] = useState<string | null>(null);
+  const [studyLastViewedLessonId, setStudyLastViewedLessonId] = useState<string | null>(null);
   const [studyLessonDetailTab, setStudyLessonDetailTab] = useState<StudyLessonDetailTab>("overview");
   const [topicAudiobookVersions, setTopicAudiobookVersions] = useState<Record<string, StudyTopicAudiobookVersion[]>>({});
   const [topicAudiobookLoadingByTopic, setTopicAudiobookLoadingByTopic] = useState<Record<string, boolean>>({});
@@ -925,7 +926,7 @@ export default function App() {
     const materialJobs = studyJobs.filter(
       (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
     );
-    return [...assignmentJobs, ...materialJobs];
+    return [...materialJobs, ...assignmentJobs];
   }, [studyJobs, studySelectedMaterialId]);
   const selectedStudyJob = useMemo(
     () => selectedStudyMaterialJobs.find((job) => job.id === studySelectedJobId) || null,
@@ -939,6 +940,7 @@ export default function App() {
   useEffect(() => {
     if (studyLessonDetailId) {
       setStudyLessonDetailTab("overview");
+      setStudyLastViewedLessonId(studyLessonDetailId);
     }
   }, [studyLessonDetailId]);
   const selectedCourseTopics = useMemo(
@@ -1449,7 +1451,7 @@ export default function App() {
         const materialJobs = studyOnly.filter(
           (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
         );
-        const jobsForMaterial = studySelectedMaterialId ? [...assignmentJobs, ...materialJobs] : studyOnly;
+        const jobsForMaterial = studySelectedMaterialId ? [...materialJobs, ...assignmentJobs] : studyOnly;
         if (prev && jobsForMaterial.some((job) => job.id === prev)) return prev;
         return jobsForMaterial[0]?.id || prev;
       });
@@ -3204,7 +3206,10 @@ export default function App() {
                       const lessonHomework = normalizeLessonHomework(topic.homework);
                       const lessonHomeworkStats = homeworkProgress(lessonHomework);
                       return (
-                        <div key={topic.id} className="study-topic-card">
+                        <div
+                          key={topic.id}
+                          className={`study-topic-card ${topic.id === (studyLessonDetailId || studyLastViewedLessonId) ? "active" : ""}`}
+                        >
                           <div className="study-topic-header">
                             <div>
                               <div className="study-material-title">{topic.name}</div>
@@ -5967,7 +5972,7 @@ export default function App() {
                                           className="study-audiobook-player"
                                         />
                                         <a
-                                          className="small"
+                                          className="study-audiobook-link"
                                           href={getTopicAudiobookDownloadUrl(selectedStudyLesson.id, v.id)}
                                           target="_blank"
                                           rel="noreferrer"
