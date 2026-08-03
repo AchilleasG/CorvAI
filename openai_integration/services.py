@@ -7,6 +7,7 @@ import logging
 import json
 from django.db import transaction
 
+from Corv.config import settings
 from chat.models import ChatMessage  # adjust if your app label differs
 from orchestration.model_providers import resolve_provider, get_client
 from orchestration.services import ModuleDirectory, PersonaService, ModelConfigService, UsageService
@@ -543,16 +544,28 @@ class ChatAIService:
     @staticmethod
     def transcribe_audio(
         audio_file_path: str,
-        model: str = "whisper-1",
+        model: str | None = None,
+        language: str | None = None,
     ) -> str:
         """
-        Transcribe the given audio file using OpenAI's Whisper model.
-        Returns the transcribed text.
+        Transcribe audio without translating it. An explicit ISO-639-1 language
+        prevents short clips from being misdetected as another language.
         """
+        model_name = model or settings.transcription_model
+        request_args = {
+            "model": model_name,
+            "prompt": "Transcribe verbatim in the original spoken language. Do not translate into another language.",
+        }
+        if language:
+            request_args["language"] = language
+        # GPT-4o transcription models return a JSON object; Whisper also
+        # supports plain text and remains usable when explicitly configured.
+        request_args["response_format"] = "text" if model_name == "whisper-1" else "json"
         with open(audio_file_path, "rb") as audio_file:
             transcription = get_client("openai").audio.transcriptions.create(
-                model=model,
                 file=audio_file,
-                response_format="text"
+                **request_args,
             )
-        return transcription if transcription else ""
+        if isinstance(transcription, str):
+            return transcription.strip()
+        return (getattr(transcription, "text", None) or "").strip()

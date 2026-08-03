@@ -20,14 +20,14 @@ notifee.onBackgroundEvent(async ({ type, detail }) => {
   if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
     const sessionId = detail.notification?.data?.call_session_id;
     if (sessionId) {
-      await answerCallFromNotification(sessionId);
+      await answerCallFromNotification(String(sessionId));
     }
     return;
   }
   if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
     const sessionId = detail.notification?.data?.call_session_id;
     if (sessionId) {
-      await declineCallFromNotification(sessionId);
+      await declineCallFromNotification(String(sessionId));
     }
     return;
   }

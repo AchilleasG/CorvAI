@@ -31,3 +31,5 @@ redis==5.2.1
 PyMuPDF==1.24.10
 Pillow==10.4.0
 edge-tts==7.2.8
+paramiko==3.5.1
+selenium==4.34.2

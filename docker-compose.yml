@@ -1,11 +1,16 @@
-version: "3.9"
-
 services:
   web:
     build: .
-    command: python manage.py runserver 0.0.0.0:8000
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000 --noreload"
+    restart: unless-stopped
+    init: true
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    pids_limit: 256
     volumes:
       - .:/app
+      - codex-data:/root/.codex
+      - coding-data:/var/lib/corv-coding
     ports:
       - "8004:8000"
     environment:
@@ -14,9 +19,18 @@ services:
       - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      - CORV_CODING_DIR=/var/lib/corv-coding
+      - FCM_PROJECT_ID=${FCM_PROJECT_ID:-}
+      - FCM_SERVICE_ACCOUNT_JSON=${FCM_SERVICE_ACCOUNT_JSON:-}
+      - FCM_SERVICE_ACCOUNT_FILE=${FCM_SERVICE_ACCOUNT_FILE:-}
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
     ports:
       - "5173:5173"
     environment:
@@ -30,7 +44,17 @@ services:
 
   celery-worker:
     build: .
-    command: celery -A CorvAI worker -l info
+    command: >-
+      celery -A CorvAI worker -l info
+      --concurrency=2
+      --prefetch-multiplier=1
+      --max-tasks-per-child=20
+      --max-memory-per-child=550000
+    restart: unless-stopped
+    init: true
+    mem_limit: 1536m
+    memswap_limit: 1536m
+    pids_limit: 256
     volumes:
       - .:/app
     environment:
@@ -39,12 +63,20 @@ services:
       - APP_ACCESS_TOKEN=${APP_ACCESS_TOKEN:-}
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      - FCM_PROJECT_ID=${FCM_PROJECT_ID:-}
+      - FCM_SERVICE_ACCOUNT_JSON=${FCM_SERVICE_ACCOUNT_JSON:-}
+      - FCM_SERVICE_ACCOUNT_FILE=${FCM_SERVICE_ACCOUNT_FILE:-}
     depends_on:
       - redis
 
   celery-beat:
     build: .
     command: celery -A CorvAI beat -l info
+    restart: unless-stopped
+    init: true
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
     volumes:
       - .:/app
     environment:
@@ -58,5 +90,15 @@ services:
 
   redis:
     image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction
+    restart: unless-stopped
+    init: true
+    mem_limit: 384m
+    memswap_limit: 384m
+    pids_limit: 128
     ports:
       - "6379:6379"
+
+volumes:
+  codex-data:
+  coding-data:

@@ -7,6 +7,7 @@ import notifee, {
 const CALL_CHANNEL_ID = "corv_calls";
 const CALL_NOTIFICATION_ID = "corv_incoming_call";
 const MESSAGE_CHANNEL_ID = "corv_messages";
+const CODING_CHANNEL_ID = "corv_coding";
 
 export type CallNotificationPayload = {
   call_session_id?: string;
@@ -17,6 +18,15 @@ export type CallNotificationPayload = {
 
 export type MessageNotificationPayload = {
   message_id?: string;
+  title?: string;
+  body?: string;
+  type?: string;
+};
+
+export type CodingNotificationPayload = {
+  session_id?: string;
+  delegation_id?: string;
+  event?: string;
   title?: string;
   body?: string;
   type?: string;
@@ -101,6 +111,36 @@ export async function showMessageNotification(payload: MessageNotificationPayloa
       pressAction: { id: "default" },
       autoCancel: true,
     },
+  });
+}
+
+export async function showCodingNotification(payload: CodingNotificationPayload) {
+  const channelId = await ensureCodingChannel();
+  const data: Record<string, string> = {};
+  Object.entries(payload).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) data[key] = String(value);
+  });
+  await notifee.displayNotification({
+    title: payload.title || "Coding session update",
+    body: payload.body || "A coding session needs your attention.",
+    data,
+    android: {
+      channelId,
+      importance: AndroidImportance.HIGH,
+      category: AndroidCategory.MESSAGE,
+      visibility: AndroidVisibility.PRIVATE,
+      pressAction: { id: "default" },
+      autoCancel: true,
+    },
+  });
+}
+
+export async function ensureCodingChannel() {
+  return notifee.createChannel({
+    id: CODING_CHANNEL_ID,
+    name: "Corv Coding",
+    importance: AndroidImportance.HIGH,
+    vibration: true,
   });
 }
 

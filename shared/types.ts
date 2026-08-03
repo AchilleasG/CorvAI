@@ -459,3 +459,186 @@ export type StudyAssignment = {
   created_at?: string | null;
   updated_at?: string | null;
 };
+
+export type SshMachine = {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  auth_type: "password" | "private_key" | "agent";
+  has_credentials: boolean;
+  allow_ai_commands: boolean;
+  connect_timeout_seconds: number;
+  command_timeout_seconds: number;
+  keepalive_seconds: number;
+  notes: string;
+  host_key_fingerprint?: string | null;
+  connected: boolean;
+  connected_for_seconds?: number | null;
+  last_connected_at?: string | null;
+  last_error: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type SshMachineInput = {
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  auth_type?: "password" | "private_key" | "agent";
+  password?: string;
+  private_key?: string;
+  passphrase?: string;
+  allow_ai_commands?: boolean;
+  connect_timeout_seconds?: number;
+  command_timeout_seconds?: number;
+  keepalive_seconds?: number;
+  notes?: string;
+};
+
+export type SshCommandResult = {
+  machine_id: string;
+  machine_name: string;
+  terminal_session_id?: string;
+  terminal_session_name?: string;
+  cwd?: string;
+  command: string;
+  stdout: string;
+  stderr: string;
+  exit_status: number;
+  duration_ms: number;
+  truncated: boolean;
+  connected: boolean;
+};
+
+export type SshTerminalSession = {
+  id: string;
+  name: string;
+  connected: boolean;
+  cwd?: string | null;
+  created_at: number;
+  last_used_at: number;
+};
+
+export type SshCommandRecord = {
+  id: string;
+  command: string;
+  source: "api" | "assistant";
+  exit_status?: number | null;
+  duration_ms: number;
+  succeeded: boolean;
+  error_summary: string;
+  created_at: string;
+};
+
+export type CodingCliStatus = {
+  installed: boolean;
+  authenticated: boolean;
+  version: string;
+  auth_message: string;
+  tmux_available: boolean;
+  ssh_available: boolean;
+  password_ssh_available: boolean;
+  browser_qa_available: boolean;
+};
+
+export type CodingDeviceAuth = {
+  active: boolean;
+  id?: string | null;
+  status: "idle" | "starting" | "waiting" | "succeeded" | "failed" | "cancelled" | "expired";
+  verification_url: string;
+  user_code: string;
+  message: string;
+  created_at?: string | null;
+  expires_at?: string | null;
+};
+
+export type CodingTurn = {
+  id: string;
+  source: "corv" | "ui" | "decision" | "feature";
+  prompt: string;
+  status: "queued" | "running" | "completed" | "needs_input" | "failed" | "cancelled";
+  codex_thread_id?: string | null;
+  summary: string;
+  question: string;
+  options: string[];
+  error: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+};
+
+export type CodingSession = {
+  id: string;
+  name: string;
+  machine_id: string;
+  machine_name: string;
+  machine_target: string;
+  remote_working_directory: string;
+  status: "ready" | "running" | "needs_input" | "direct" | "failed" | "stopped";
+  permission_mode: "danger-full-access";
+  codex_thread_id?: string | null;
+  direct_terminal_running: boolean;
+  last_summary: string;
+  pending_question: string;
+  pending_options: string[];
+  last_error: string;
+  turns: CodingTurn[];
+  created_at: string;
+  updated_at: string;
+  stopped_at?: string | null;
+};
+
+export type CodingTerminal = {
+  running: boolean;
+  output: string;
+  thread_id?: string | null;
+};
+
+export type CodingLiveLogs = {
+  session_id: string;
+  active: boolean;
+  content: string;
+  updated_at: string;
+};
+
+export type FeatureQaRun = {
+  id: string;
+  iteration: number;
+  status: "running" | "passed" | "failed" | "blocked" | "error";
+  summary: string;
+  failures: string[];
+  evidence: string[];
+  question: string;
+  options: string[];
+  error: string;
+  started_at: string;
+  completed_at?: string | null;
+};
+
+export type FeatureDelegation = {
+  id: string;
+  session_id: string;
+  session_name: string;
+  machine_name: string;
+  title: string;
+  description: string;
+  acceptance_criteria: string[];
+  qa_enabled: boolean;
+  max_iterations: number;
+  current_iteration: number;
+  status: "queued" | "coding" | "qa" | "fixing" | "needs_input" | "completed" | "failed" | "stopped";
+  implementation_summary: string;
+  qa_summary: string;
+  pending_question: string;
+  pending_options: string[];
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+  stopped_at?: string | null;
+  coding_turns: CodingTurn[];
+  qa_runs: FeatureQaRun[];
+};

@@ -26,6 +26,18 @@ import {
   UserMessage,
   CallSession,
   CallTranscriptEntry,
+  SshMachine,
+  SshMachineInput,
+  SshCommandResult,
+  SshCommandRecord,
+  SshTerminalSession,
+  CodingCliStatus,
+  CodingDeviceAuth,
+  CodingSession,
+  CodingTurn,
+  CodingTerminal,
+  CodingLiveLogs,
+  FeatureDelegation,
 } from "./types";
 
 type TokenGetter = () => string | null | Promise<string | null>;
@@ -83,6 +95,18 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
+async function requestBlob(config: ApiConfig, path: string): Promise<Blob> {
+  const token = await resolveToken(config.getToken);
+  const res = await fetch(`${config.baseUrl}${path}`, {
+    headers: token ? { "X-App-Token": token } : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Request failed with ${res.status}`);
+  }
+  return await res.blob();
+}
+
 export function createApi(config: ApiConfig) {
   return {
     fetchChats() {
@@ -126,10 +150,21 @@ export function createApi(config: ApiConfig) {
         body: JSON.stringify({ chat_id, text }),
       });
     },
-    async sendVoice(chat_id: string, file: Blob) {
+    async sendVoice(chat_id: string, file: Blob, language?: string) {
       const formData = new FormData();
       formData.append("chat_id", chat_id);
-      formData.append("file", file, "voice.webm");
+      const mime = (file.type || "").toLowerCase();
+      const extension = mime.includes("mp4") || mime.includes("m4a")
+        ? "m4a"
+        : mime.includes("ogg")
+          ? "ogg"
+          : mime.includes("wav")
+            ? "wav"
+            : mime.includes("mpeg") || mime.includes("mp3")
+              ? "mp3"
+              : "webm";
+      formData.append("file", file, `voice.${extension}`);
+      if (language) formData.append("language", language);
 
       const token = await resolveToken(config.getToken);
       const res = await fetch(`${config.baseUrl}/input/voice/`, {
@@ -140,7 +175,14 @@ export function createApi(config: ApiConfig) {
 
       if (!res.ok) {
         const text = await res.text();
-        const err: any = new Error(text || `Request failed with ${res.status}`);
+        let message = text;
+        try {
+          const body = JSON.parse(text) as { message?: string; detail?: string };
+          message = body.message || body.detail || text;
+        } catch {
+          // Keep a non-JSON response as-is.
+        }
+        const err: any = new Error(message || `Request failed with ${res.status}`);
         err.status = res.status;
         throw err;
       }
@@ -706,6 +748,168 @@ export function createApi(config: ApiConfig) {
       return request<{ ok: boolean }>(config, `/study/assignments/${assignment_id}`, {
         method: "DELETE",
       });
+    },
+    fetchSshMachines() {
+      return request<{ machines: SshMachine[] }>(config, "/ssh/machines");
+    },
+    createSshMachine(payload: SshMachineInput) {
+      return request<SshMachine>(config, "/ssh/machines", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateSshMachine(machine_id: string, payload: Partial<SshMachineInput> & { reset_host_key?: boolean }) {
+      return request<SshMachine>(config, `/ssh/machines/${machine_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteSshMachine(machine_id: string) {
+      return request<{ ok: boolean }>(config, `/ssh/machines/${machine_id}`, {
+        method: "DELETE",
+      });
+    },
+    connectSshMachine(machine_id: string) {
+      return request<SshMachine>(config, `/ssh/machines/${machine_id}/connect`, {
+        method: "POST",
+      });
+    },
+    disconnectSshMachine(machine_id: string) {
+      return request<SshMachine>(config, `/ssh/machines/${machine_id}/disconnect`, {
+        method: "POST",
+      });
+    },
+    runSshCommand(machine_id: string, command: string, timeout_seconds?: number) {
+      return request<SshCommandResult>(config, `/ssh/machines/${machine_id}/commands`, {
+        method: "POST",
+        body: JSON.stringify({ command, timeout_seconds }),
+      });
+    },
+    fetchSshCommandHistory(machine_id: string, limit = 50) {
+      return request<{ commands: SshCommandRecord[] }>(
+        config,
+        `/ssh/machines/${machine_id}/history?limit=${limit}`,
+      );
+    },
+    fetchSshTerminalSessions(machine_id: string) {
+      return request<{ sessions: SshTerminalSession[] }>(config, `/ssh/machines/${machine_id}/sessions`);
+    },
+    createSshTerminalSession(machine_id: string, name: string) {
+      return request<SshTerminalSession>(config, `/ssh/machines/${machine_id}/sessions`, {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      });
+    },
+    closeSshTerminalSession(machine_id: string, session_id: string) {
+      return request<{ id: string; closed: boolean }>(config, `/ssh/machines/${machine_id}/sessions/${session_id}`, {
+        method: "DELETE",
+      });
+    },
+    runSshTerminalCommand(machine_id: string, session_id: string, command: string, timeout_seconds?: number) {
+      return request<SshCommandResult>(config, `/ssh/machines/${machine_id}/sessions/${session_id}/commands`, {
+        method: "POST",
+        body: JSON.stringify({ command, timeout_seconds }),
+      });
+    },
+    fetchCodingStatus() {
+      return request<CodingCliStatus>(config, "/coding/status");
+    },
+    fetchCodingDeviceAuth() {
+      return request<CodingDeviceAuth>(config, "/coding/auth/device");
+    },
+    startCodingDeviceAuth() {
+      return request<CodingDeviceAuth>(config, "/coding/auth/device", { method: "POST" });
+    },
+    cancelCodingDeviceAuth() {
+      return request<CodingDeviceAuth>(config, "/coding/auth/device/cancel", { method: "POST" });
+    },
+    logoutCodingCodex() {
+      return request<{ authenticated: boolean; message: string }>(config, "/coding/auth/logout", { method: "POST" });
+    },
+    fetchCodingSessions() {
+      return request<{ sessions: CodingSession[] }>(config, "/coding/sessions");
+    },
+    fetchCodingSession(session_id: string) {
+      return request<CodingSession>(config, `/coding/sessions/${session_id}`);
+    },
+    fetchCodingSessionLogs(session_id: string) {
+      return request<CodingLiveLogs>(config, `/coding/sessions/${session_id}/logs`);
+    },
+    createCodingSession(payload: { name: string; machine_id: string; remote_working_directory: string }) {
+      return request<CodingSession>(config, "/coding/sessions", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteCodingSession(session_id: string) {
+      return request<{ ok: boolean }>(config, `/coding/sessions/${session_id}`, { method: "DELETE" });
+    },
+    startCodingTask(session_id: string, prompt: string) {
+      return request<CodingTurn>(config, `/coding/sessions/${session_id}/tasks`, {
+        method: "POST",
+        body: JSON.stringify({ prompt, source: "ui" }),
+      });
+    },
+    answerCodingDecision(session_id: string, prompt: string) {
+      return request<CodingTurn>(config, `/coding/sessions/${session_id}/decisions`, {
+        method: "POST",
+        body: JSON.stringify({ prompt, source: "decision" }),
+      });
+    },
+    startCodingTerminal(session_id: string) {
+      return request<CodingTerminal>(config, `/coding/sessions/${session_id}/terminal/start`, { method: "POST" });
+    },
+    fetchCodingTerminal(session_id: string) {
+      return request<CodingTerminal>(config, `/coding/sessions/${session_id}/terminal`);
+    },
+    sendCodingTerminalInput(session_id: string, payload: { text?: string; key?: "Enter" | "Up" | "Down" | "Left" | "Right" | "Tab" | "Escape" | "C-c" | "C-d" }) {
+      return request<CodingTerminal>(config, `/coding/sessions/${session_id}/terminal/input`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    closeCodingTerminal(session_id: string) {
+      return request<{ closed: boolean; session_id: string; thread_id?: string | null }>(
+        config,
+        `/coding/sessions/${session_id}/terminal/close`,
+        { method: "POST" },
+      );
+    },
+    stopCodingSession(session_id: string) {
+      return request<CodingSession>(config, `/coding/sessions/${session_id}/stop`, { method: "POST" });
+    },
+    fetchFeatureDelegations(session_id?: string) {
+      const query = session_id ? `?session_id=${encodeURIComponent(session_id)}` : "";
+      return request<{ delegations: FeatureDelegation[] }>(config, `/coding/delegations${query}`);
+    },
+    fetchFeatureDelegation(delegation_id: string) {
+      return request<FeatureDelegation>(config, `/coding/delegations/${delegation_id}`);
+    },
+    createFeatureDelegation(session_id: string, payload: {
+      title: string;
+      description: string;
+      acceptance_criteria: string[];
+      qa_enabled: boolean;
+      max_iterations?: number;
+    }) {
+      return request<FeatureDelegation>(config, `/coding/sessions/${session_id}/delegations`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    resumeFeatureDelegation(delegation_id: string, decision = "") {
+      return request<FeatureDelegation>(config, `/coding/delegations/${delegation_id}/resume`, {
+        method: "POST",
+        body: JSON.stringify({ decision }),
+      });
+    },
+    stopFeatureDelegation(delegation_id: string) {
+      return request<FeatureDelegation>(config, `/coding/delegations/${delegation_id}/stop`, {
+        method: "POST",
+      });
+    },
+    fetchFeatureQaEvidence(qa_run_id: string, evidence_index: number) {
+      return requestBlob(config, `/coding/qa-runs/${qa_run_id}/evidence/${evidence_index}`);
     },
   };
 }

@@ -5,6 +5,7 @@ import {
   Alert,
   AppState,
   FlatList,
+  Image,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -74,7 +75,11 @@ import {
   cancelIncomingCallNotification,
   showIncomingCallNotification,
   showMessageNotification,
+  showCodingNotification,
+  ensureCodingChannel,
 } from "./src/notifications";
+import SshScreen from "./src/SshScreen";
+import CodingScreen from "./src/CodingScreen";
 import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
@@ -95,7 +100,7 @@ import {
 import { Audio } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 
-type TabKey = "chat" | "settings" | "study" | "calendar" | "scheduler" | "messages" | "calls";
+type TabKey = "chat" | "settings" | "study" | "calendar" | "scheduler" | "messages" | "calls" | "ssh" | "coding";
 
 type SoftEventDraft = {
   id: string;
@@ -140,6 +145,10 @@ function formatDateTime(value?: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function pushString(value: unknown): string | undefined {
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
 
 function RoleBadge({ role }: { role: Message["role"] }) {
@@ -191,6 +200,8 @@ function InnerApp() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [activeTab, setActiveTab] = useState<TabKey>("chat");
+  const [requestedCodingSessionId, setRequestedCodingSessionId] = useState<string | null>(null);
+  const [requestedDelegationId, setRequestedDelegationId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [chats, setChats] = useState<ChatListItem[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -297,6 +308,13 @@ function InnerApp() {
     return false;
   }
 
+  function openCodingNotification(data: Record<string, any> | undefined | null) {
+    if (!data || data.type !== "coding_session") return;
+    setRequestedCodingSessionId(data.session_id ? String(data.session_id) : null);
+    setRequestedDelegationId(data.delegation_id ? String(data.delegation_id) : null);
+    setActiveTab("coding");
+  }
+
   useEffect(() => {
     AsyncStorage.getItem("appAccessToken")
       .then((token) => {
@@ -309,10 +327,13 @@ function InnerApp() {
     Notifications.setNotificationHandler({
       handleNotification: async () => ({
         shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
         shouldPlaySound: true,
         shouldSetBadge: true,
       }),
     });
+    if (Platform.OS === "android") void ensureCodingChannel();
   }, []);
 
   useEffect(() => {
@@ -334,7 +355,12 @@ function InnerApp() {
       if (data?.type === "user_message") {
         void refreshMessages();
       }
+      if (data?.type === "coding_session") openCodingNotification(data);
     });
+    Notifications.getLastNotificationResponseAsync().then((response) => {
+      const data = response?.notification.request.content.data as Record<string, any> | undefined;
+      if (data?.type === "coding_session") openCodingNotification(data);
+    }).catch(() => undefined);
     return () => {
       receivedSub.remove();
       responseSub.remove();
@@ -384,7 +410,12 @@ function InnerApp() {
     const unsubscribeMessage = messaging().onMessage(async (remoteMessage) => {
       const messageType = remoteMessage?.data?.type;
       if (messageType === "call_incoming" && mounted) {
-        await showIncomingCallNotification(remoteMessage?.data);
+        await showIncomingCallNotification({
+          call_session_id: pushString(remoteMessage?.data?.call_session_id),
+          title: pushString(remoteMessage?.data?.title),
+          body: pushString(remoteMessage?.data?.body),
+          type: "call_incoming",
+        });
         await refreshCallSessions();
       }
       if (messageType === "user_message" && mounted) {
@@ -397,12 +428,22 @@ function InnerApp() {
           remoteMessage?.data?.body ||
           "You have a new message.";
         await showMessageNotification({
-          message_id: remoteMessage?.data?.message_id,
-          title,
-          body,
+          message_id: pushString(remoteMessage?.data?.message_id),
+          title: pushString(title),
+          body: pushString(body),
           type: "user_message",
         });
         await refreshMessages();
+      }
+      if (messageType === "coding_session" && mounted) {
+        await showCodingNotification({
+          session_id: pushString(remoteMessage?.data?.session_id),
+          delegation_id: pushString(remoteMessage?.data?.delegation_id),
+          event: pushString(remoteMessage?.data?.event),
+          title: remoteMessage?.notification?.title || pushString(remoteMessage?.data?.title),
+          body: remoteMessage?.notification?.body || pushString(remoteMessage?.data?.body),
+          type: "coding_session",
+        });
       }
     });
 
@@ -413,6 +454,7 @@ function InnerApp() {
       if (remoteMessage?.data?.type === "user_message") {
         await refreshMessages();
       }
+      if (remoteMessage?.data?.type === "coding_session") openCodingNotification(remoteMessage.data);
     });
 
     messaging()
@@ -425,6 +467,7 @@ function InnerApp() {
         if (remoteMessage?.data?.type === "user_message") {
           void refreshMessages();
         }
+        if (remoteMessage?.data?.type === "coding_session") openCodingNotification(remoteMessage.data);
       });
 
     const unsubscribeNotifee = notifee.onForegroundEvent(async ({ type, detail }) => {
@@ -440,13 +483,13 @@ function InnerApp() {
         if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "answer") {
           const sessionId = detail.notification?.data?.call_session_id;
           if (sessionId) {
-            await answerCallSession(sessionId);
+            await answerCallSession(String(sessionId));
           }
         }
         if (type === EventType.ACTION_PRESS && detail.pressAction?.id === "decline") {
           const sessionId = detail.notification?.data?.call_session_id;
           if (sessionId) {
-            await declineCallSession(sessionId);
+            await declineCallSession(String(sessionId));
           }
         }
         return;
@@ -455,6 +498,9 @@ function InnerApp() {
         if (type === EventType.PRESS) {
           await refreshMessages();
         }
+      }
+      if (dataType === "coding_session" && type === EventType.PRESS) {
+        openCodingNotification(detail.notification?.data);
       }
     });
 
@@ -1423,13 +1469,13 @@ function InnerApp() {
       const pc = new RTCPeerConnection();
       peerConnectionRef.current = pc;
 
-      pc.ontrack = (event: any) => {
+      (pc as any).ontrack = (event: any) => {
         if (event.streams && event.streams[0]) {
           remoteStreamRef.current = event.streams[0];
         }
       };
 
-      pc.ondatachannel = (event: any) => {
+      (pc as any).ondatachannel = (event: any) => {
         dataChannelRef.current = event.channel;
         event.channel.onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
       };
@@ -1446,7 +1492,7 @@ function InnerApp() {
 
       const dataChannel = pc.createDataChannel("oai-events");
       dataChannelRef.current = dataChannel;
-      dataChannel.onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
+      (dataChannel as any).onmessage = (msg: any) => handleRealtimeMessage(session.id, msg.data);
 
       const offer = await pc.createOffer({ offerToReceiveAudio: true });
       if (callSeq !== callSeqRef.current) return;
@@ -1474,7 +1520,7 @@ function InnerApp() {
       }
       await pc.setRemoteDescription(new RTCSessionDescription({ type: "answer", sdp: answerSdp }));
 
-      dataChannel.onopen = () => {
+      (dataChannel as any).onopen = () => {
         dataChannel.send(
           JSON.stringify({
             type: "response.create",
@@ -1601,6 +1647,7 @@ function InnerApp() {
   ) : !authed ? (
     <SafeAreaView style={styles.authContainer}>
       <View style={styles.authCard}>
+        <Image source={require("../corv-logo-v2.png")} style={styles.authLogo} resizeMode="contain" />
         <Text style={styles.title}>Corv Access</Text>
         <Text style={styles.muted}>Enter the shared access password to continue.</Text>
         {authError && <Text style={styles.errorText}>{authError}</Text>}
@@ -1634,7 +1681,7 @@ function InnerApp() {
         style={styles.header}
         onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)}
       >
-        <Text style={styles.headerTitle}>Corv</Text>
+        <View style={styles.headerBrand}><Image source={require("../corv-logo-v2.png")} style={styles.headerLogo} resizeMode="contain" /><View><Text style={styles.headerTitle}>Corv</Text><Text style={styles.headerSubtitle}>Personal intelligence workspace</Text></View></View>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -1667,6 +1714,8 @@ function InnerApp() {
               Study
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity style={[styles.tabButton, activeTab === "ssh" && styles.tabButtonActive]} onPress={() => setActiveTab("ssh")}><Ionicons name="server-outline" size={14} color={activeTab === "ssh" ? "#041316" : "#94a3b8"} /><Text style={[styles.tabButtonText, activeTab === "ssh" && styles.tabButtonTextActive]}>SSH</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.tabButton, activeTab === "coding" && styles.tabButtonActive]} onPress={() => setActiveTab("coding")}><Ionicons name="code-slash-outline" size={14} color={activeTab === "coding" ? "#041316" : "#94a3b8"} /><Text style={[styles.tabButtonText, activeTab === "coding" && styles.tabButtonTextActive]}>Coding</Text></TouchableOpacity>
           <TouchableOpacity
             style={[styles.tabButton, activeTab === "calendar" && styles.tabButtonActive]}
             onPress={() => setActiveTab("calendar")}
@@ -2323,6 +2372,10 @@ function InnerApp() {
                 <Text style={styles.primaryButtonText}>Start test call</Text>
               </TouchableOpacity>
         </ScrollView>
+      ) : activeTab === "ssh" ? (
+        <SshScreen />
+      ) : activeTab === "coding" ? (
+        <CodingScreen requestedSessionId={requestedCodingSessionId} requestedDelegationId={requestedDelegationId} onRequestHandled={() => { setRequestedCodingSessionId(null); setRequestedDelegationId(null); }} />
       ) : (
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <Text style={styles.sectionTitle}>Calendar</Text>
@@ -2940,6 +2993,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#1f2937",
   },
+  authLogo: {
+    width: 72,
+    height: 72,
+    alignSelf: "center",
+    marginBottom: 14,
+    borderRadius: 18,
+  },
   authInput: {
     backgroundColor: "#0c1829",
     color: "#e5e7eb",
@@ -2951,16 +3011,33 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   header: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 11,
     borderBottomWidth: 1,
     borderBottomColor: "#1f2937",
     backgroundColor: "#0f172a",
   },
+  headerBrand: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 11,
+  },
+  headerLogo: {
+    width: 38,
+    height: 38,
+    borderRadius: 11,
+    marginRight: 10,
+  },
   headerTitle: {
     color: "#e5e7eb",
-    fontSize: 22,
-    fontWeight: "600",
-    marginBottom: 12,
+    fontSize: 19,
+    fontWeight: "800",
+  },
+  headerSubtitle: {
+    color: "#72839a",
+    fontSize: 10,
+    marginTop: 1,
   },
   headerTabs: {
     maxHeight: 42,
@@ -2970,6 +3047,9 @@ const styles = StyleSheet.create({
     paddingRight: 8,
   },
   tabButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 999,

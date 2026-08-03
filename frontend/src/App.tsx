@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import SshPanel from "./SshPanel";
+import CodingPanel from "./CodingPanel";
+import WorkspaceNavigation, { type WorkspaceSection } from "./WorkspaceNavigation";
 import {
   createChat,
   createStudyCourse,
@@ -149,6 +152,17 @@ const STUDY_AUDIOBOOK_VOICE_OPTIONS = [
   { value: "en-GB-SoniaNeural", label: "Sonia (UK)" },
   { value: "en-GB-RyanNeural", label: "Ryan (UK)" },
   { value: "en-AU-NatashaNeural", label: "Natasha (AU)" },
+] as const;
+const VOICE_INPUT_LANGUAGES = [
+  { value: "", label: "Automatic" },
+  { value: "en", label: "English" },
+  { value: "el", label: "Greek" },
+  { value: "es", label: "Spanish" },
+  { value: "fr", label: "French" },
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "tr", label: "Turkish" },
 ] as const;
 
 function formatTopicStatus(status: string) {
@@ -523,12 +537,15 @@ export default function App() {
   const [usageRecent, setUsageRecent] = useState<UsageEvent[]>([]);
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [input, setInput] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [showStudy, setShowStudy] = useState(false);
-  const [showCalendar, setShowCalendar] = useState(false);
-  const [showScheduler, setShowScheduler] = useState(false);
-  const [showMessages, setShowMessages] = useState(false);
-  const [showCalls, setShowCalls] = useState(false);
+  const [currentSection, setCurrentSection] = useState<WorkspaceSection>("chat");
+  const showSettings = currentSection === "settings";
+  const showStudy = currentSection === "study";
+  const showCalendar = currentSection === "calendar";
+  const showScheduler = currentSection === "scheduler";
+  const showMessages = currentSection === "messages";
+  const showCalls = currentSection === "calls";
+  const showSsh = currentSection === "ssh";
+  const showCoding = currentSection === "coding";
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -544,6 +561,12 @@ export default function App() {
   const [micReady, setMicReady] = useState(false);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState<string>("");
+  const [voiceInputLanguage, setVoiceInputLanguage] = useState<string>(() => {
+    const saved = localStorage.getItem("voiceInputLanguage");
+    if (saved !== null) return saved;
+    const browserLanguage = (navigator.language || "").slice(0, 2).toLowerCase();
+    return VOICE_INPUT_LANGUAGES.some((item) => item.value === browserLanguage) ? browserLanguage : "";
+  });
   const [openChatActionsId, setOpenChatActionsId] = useState<string | null>(null);
   const [jobLogMessages, setJobLogMessages] = useState<Message[]>([]);
   const [showJobLog, setShowJobLog] = useState(false);
@@ -553,6 +576,12 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState("");
   const [showMicSettings, setShowMicSettings] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderMimeTypeRef = useRef<string>("");
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioLevelFrameRef = useRef<number | null>(null);
+  const audioLevelMonitoringAvailableRef = useRef(false);
+  const voicedAudioDurationRef = useRef(0);
+  const lastAudioLevelTimeRef = useRef(0);
   const studyFileInputRef = useRef<HTMLInputElement | null>(null);
   const assignmentFileInputRef = useRef<HTMLInputElement | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -918,19 +947,15 @@ export default function App() {
     () => studyMaterials.find((material) => material.id === studySelectedMaterialId) || null,
     [studyMaterials, studySelectedMaterialId],
   );
-  const selectedStudyMaterialJobs = useMemo(() => {
-    const assignmentJobs = studyJobs.filter(
-      (job) => (job.metadata as Record<string, unknown> | undefined)?.job_kind === "assignment_processing",
+  const selectedStudyCourseJobs = useMemo(() => {
+    if (!studySelectedCourseId) return studyJobs;
+    return studyJobs.filter(
+      (job) => (job.metadata as Record<string, unknown> | undefined)?.study_course_id === studySelectedCourseId,
     );
-    if (!studySelectedMaterialId) return studyJobs;
-    const materialJobs = studyJobs.filter(
-      (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
-    );
-    return [...materialJobs, ...assignmentJobs];
-  }, [studyJobs, studySelectedMaterialId]);
+  }, [studyJobs, studySelectedCourseId]);
   const selectedStudyJob = useMemo(
-    () => selectedStudyMaterialJobs.find((job) => job.id === studySelectedJobId) || null,
-    [selectedStudyMaterialJobs, studySelectedJobId],
+    () => selectedStudyCourseJobs.find((job) => job.id === studySelectedJobId) || null,
+    [selectedStudyCourseJobs, studySelectedJobId],
   );
   const selectedStudyLesson = useMemo(
     () => studyTopics.find((topic) => topic.id === studyLessonDetailId) || null,
@@ -993,8 +1018,8 @@ export default function App() {
     [studyMaterials, studyShowAllMaterials],
   );
   const visibleStudyJobs = useMemo(
-    () => (studyShowAllJobs ? selectedStudyMaterialJobs : selectedStudyMaterialJobs.slice(0, STUDY_PREVIEW_COUNT)),
-    [selectedStudyMaterialJobs, studyShowAllJobs],
+    () => (studyShowAllJobs ? selectedStudyCourseJobs : selectedStudyCourseJobs.slice(0, STUDY_PREVIEW_COUNT)),
+    [selectedStudyCourseJobs, studyShowAllJobs],
   );
   const visibleStudyAssignments = useMemo(
     () => (studyShowAllAssignments ? studyAssignments : studyAssignments.slice(0, STUDY_PREVIEW_COUNT)),
@@ -1155,19 +1180,16 @@ export default function App() {
     }
   }, [calendarWeekOptions, selectedCalendarWeekStart]);
   useEffect(() => {
-    if (!studySelectedMaterialId) {
-      return;
-    }
-    if (!selectedStudyMaterialJobs.length) {
-      return;
-    }
     setStudySelectedJobId((prev) => {
-      if (prev && selectedStudyMaterialJobs.some((job) => job.id === prev)) {
+      if (!studySelectedCourseId || !selectedStudyCourseJobs.length) {
+        return null;
+      }
+      if (prev && selectedStudyCourseJobs.some((job) => job.id === prev)) {
         return prev;
       }
-      return selectedStudyMaterialJobs[0].id;
+      return selectedStudyCourseJobs[0].id;
     });
-  }, [studySelectedMaterialId, selectedStudyMaterialJobs]);
+  }, [studySelectedCourseId, selectedStudyCourseJobs]);
   const sortedChats = useMemo(() => {
     return [...chats].sort((a, b) => {
       const aTime = a.last_activity_at ? new Date(a.last_activity_at).getTime() : 0;
@@ -1176,38 +1198,8 @@ export default function App() {
     });
   }, [chats]);
 
-  const currentSection =
-    showSettings
-      ? "settings"
-      : showStudy
-        ? "study"
-        : showCalendar
-          ? "calendar"
-          : showScheduler
-            ? "scheduler"
-            : showMessages
-              ? "messages"
-              : showCalls
-                ? "calls"
-                : "chat";
-
-  const currentSectionLabel = {
-    chat: "Chat",
-    calendar: "Calendar",
-    scheduler: "Scheduler",
-    messages: "Messages",
-    calls: "Calls",
-    study: "Study",
-    settings: "Settings",
-  }[currentSection];
-
-  function navigateToSection(section: "chat" | "calendar" | "scheduler" | "messages" | "calls" | "study" | "settings") {
-    setShowCalendar(section === "calendar");
-    setShowSettings(section === "settings");
-    setShowStudy(section === "study");
-    setShowScheduler(section === "scheduler");
-    setShowMessages(section === "messages");
-    setShowCalls(section === "calls");
+  function navigateToSection(section: WorkspaceSection) {
+    setCurrentSection(section);
     if (isMobileViewport) {
       setSidebarOpen(false);
     }
@@ -1445,15 +1437,13 @@ export default function App() {
       });
       setStudySelectedJobId((prev) => {
         const studyOnly = (jobsResp || []).filter((job) => job.module_slug === "study");
-        const assignmentJobs = studyOnly.filter(
-          (job) => (job.metadata as Record<string, unknown> | undefined)?.job_kind === "assignment_processing",
-        );
-        const materialJobs = studyOnly.filter(
-          (job) => (job.metadata as Record<string, unknown> | undefined)?.study_material_id === studySelectedMaterialId,
-        );
-        const jobsForMaterial = studySelectedMaterialId ? [...materialJobs, ...assignmentJobs] : studyOnly;
-        if (prev && jobsForMaterial.some((job) => job.id === prev)) return prev;
-        return jobsForMaterial[0]?.id || prev;
+        const jobsForCourse = studySelectedCourseId
+          ? studyOnly.filter(
+              (job) => (job.metadata as Record<string, unknown> | undefined)?.study_course_id === studySelectedCourseId,
+            )
+          : studyOnly;
+        if (prev && jobsForCourse.some((job) => job.id === prev)) return prev;
+        return jobsForCourse[0]?.id || prev;
       });
       setStudySelectedMaterialId((prev) => {
         if (prev && materials.some((material) => material.id === prev)) {
@@ -2465,12 +2455,7 @@ export default function App() {
 
   async function handleNewChat() {
     try {
-      setShowSettings(false);
-      setShowStudy(false);
-      setShowCalendar(false);
-      setShowScheduler(false);
-      setShowMessages(false);
-      setShowCalls(false);
+      navigateToSection("chat");
       const created = await createChat("");
       await refreshChats(created.chat_id);
       setMessages([]);
@@ -2508,8 +2493,56 @@ export default function App() {
   }
 
   function cleanupStream() {
+    if (audioLevelFrameRef.current !== null) {
+      cancelAnimationFrame(audioLevelFrameRef.current);
+      audioLevelFrameRef.current = null;
+    }
+    if (audioContextRef.current) {
+      void audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+  }
+
+  async function monitorSpeechLevels(stream: MediaStream) {
+    const AudioContextClass = window.AudioContext;
+    audioLevelMonitoringAvailableRef.current = false;
+    voicedAudioDurationRef.current = 0;
+    lastAudioLevelTimeRef.current = performance.now();
+    if (!AudioContextClass) return;
+
+    try {
+      const audioContext = new AudioContextClass();
+      audioContextRef.current = audioContext;
+      if (audioContext.state === "suspended") await audioContext.resume();
+      if (audioContext.state !== "running") return;
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.2;
+      audioContext.createMediaStreamSource(stream).connect(analyser);
+      audioLevelMonitoringAvailableRef.current = true;
+      const samples = new Float32Array(analyser.fftSize);
+
+      const sampleLevel = (now: number) => {
+        analyser.getFloatTimeDomainData(samples);
+        let sumSquares = 0;
+        for (const sample of samples) sumSquares += sample * sample;
+        const rms = Math.sqrt(sumSquares / samples.length);
+        const elapsed = Math.min(now - lastAudioLevelTimeRef.current, 100);
+        if (rms >= 0.012) voicedAudioDurationRef.current += elapsed;
+        lastAudioLevelTimeRef.current = now;
+        audioLevelFrameRef.current = requestAnimationFrame(sampleLevel);
+      };
+
+      audioLevelFrameRef.current = requestAnimationFrame(sampleLevel);
+    } catch {
+      audioLevelMonitoringAvailableRef.current = false;
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+    }
   }
 
   async function sendVoiceMessage(blob: Blob) {
@@ -2517,7 +2550,7 @@ export default function App() {
       setVoiceSending(true);
       setError(null);
       const chatId = await ensureChat();
-      await sendVoice(chatId, blob);
+      await sendVoice(chatId, blob, voiceInputLanguage || undefined);
       const [msgs, jobsData] = await Promise.all([
         fetchMessages(chatId, true),
         fetchJobs(chatId),
@@ -2588,7 +2621,21 @@ export default function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       streamRef.current = stream;
       audioChunksRef.current = [];
-      const recorder = new MediaRecorder(stream);
+      await monitorSpeechLevels(stream);
+      const supportedMimeType = typeof MediaRecorder.isTypeSupported === "function"
+        ? (mimeType: string) => MediaRecorder.isTypeSupported(mimeType)
+        : () => false;
+      const preferredMimeType = [
+        "audio/webm;codecs=opus",
+        "audio/mp4;codecs=mp4a.40.2",
+        "audio/mp4",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+      ].find(supportedMimeType);
+      const recorder = preferredMimeType
+        ? new MediaRecorder(stream, { mimeType: preferredMimeType })
+        : new MediaRecorder(stream);
+      recorderMimeTypeRef.current = recorder.mimeType || preferredMimeType || "audio/webm";
       recorderRef.current = recorder;
 
       recorder.ondataavailable = (event) => {
@@ -2599,17 +2646,26 @@ export default function App() {
 
       recorder.onstop = async () => {
         setRecording(false);
+        const hasSpeech = !audioLevelMonitoringAvailableRef.current
+          || voicedAudioDurationRef.current >= 180;
         cleanupStream();
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const chunkMimeType = audioChunksRef.current.find((chunk) => chunk.type)?.type;
+        const blob = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || chunkMimeType || recorderMimeTypeRef.current,
+        });
         audioChunksRef.current = [];
         if (!blob.size) {
           setError("No audio captured");
           return;
         }
+        if (!hasSpeech) {
+          setError("No speech detected — recording discarded");
+          return;
+        }
         await sendVoiceMessage(blob);
       };
 
-      recorder.start();
+      recorder.start(250);
       setRecording(true);
       setMicReady(true);
       loadMics();
@@ -2717,7 +2773,11 @@ export default function App() {
   }
 
   return (
-    <div className={`page ${isMobileViewport && sidebarOpen ? "mobile-sidebar-open" : ""}`}>
+    <div
+      className={`page ${!sidebarOpen ? "sidebar-collapsed" : ""} ${
+        isMobileViewport && sidebarOpen ? "mobile-sidebar-open" : ""
+      }`}
+    >
       {isMobileViewport && sidebarOpen && (
         <button
           type="button"
@@ -2735,29 +2795,6 @@ export default function App() {
         </div>
         {sidebarOpen && (
           <>
-            <div className="sidebar-section-nav">
-              <button className={`ghost full ${currentSection === "chat" ? "is-active" : ""}`} onClick={() => navigateToSection("chat")}>
-                Chat
-              </button>
-              <button className={`ghost full ${currentSection === "calendar" ? "is-active" : ""}`} onClick={() => navigateToSection("calendar")}>
-                Calendar
-              </button>
-              <button className={`ghost full ${currentSection === "scheduler" ? "is-active" : ""}`} onClick={() => navigateToSection("scheduler")}>
-                Scheduler
-              </button>
-              <button className={`ghost full ${currentSection === "messages" ? "is-active" : ""}`} onClick={() => navigateToSection("messages")}>
-                Messages
-              </button>
-              <button className={`ghost full ${currentSection === "calls" ? "is-active" : ""}`} onClick={() => navigateToSection("calls")}>
-                Calls
-              </button>
-              <button className={`ghost full ${currentSection === "study" ? "is-active" : ""}`} onClick={() => navigateToSection("study")}>
-                Study
-              </button>
-              <button className={`ghost full ${currentSection === "settings" ? "is-active" : ""}`} onClick={() => navigateToSection("settings")}>
-                Settings
-              </button>
-            </div>
             <button className="primary full" onClick={handleNewChat}>
               + New chat
             </button>
@@ -2844,65 +2881,20 @@ export default function App() {
       </aside>
 
       <main className="main">
-        <div className="shell-topbar">
-          <div className="shell-topbar-row">
-            <button className="ghost shell-menu-button" onClick={() => setSidebarOpen((prev) => !prev)}>
-              {sidebarOpen && isMobileViewport ? "Close" : "Menu"}
-            </button>
-            <div className="shell-topbar-copy">
-              <p className="eyebrow">Workspace</p>
-              <h2>{currentSectionLabel}</h2>
-            </div>
-            <button className="ghost shell-utility-button" onClick={handleNewChat}>
-              New chat
-            </button>
-          </div>
-          <div className="shell-tabstrip" role="tablist" aria-label="Workspace sections">
-            {[
-              ["chat", "Chat"],
-              ["calendar", "Calendar"],
-              ["scheduler", "Scheduler"],
-              ["messages", "Messages"],
-              ["calls", "Calls"],
-              ["study", "Study"],
-              ["settings", "Settings"],
-            ].map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                className={`shell-tab ${currentSection === key ? "active" : ""}`}
-                onClick={() =>
-                  navigateToSection(
-                    key as "chat" | "calendar" | "scheduler" | "messages" | "calls" | "study" | "settings",
-                  )
-                }
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
+        <WorkspaceNavigation
+          activeSection={currentSection}
+          sidebarOpen={sidebarOpen}
+          isMobileViewport={isMobileViewport}
+          onNavigate={navigateToSection}
+          onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+          onNewChat={handleNewChat}
+        />
         {showSettings ? (
           <div className="settings-panel">
             <header className="main-header">
               <div>
                 <p className="eyebrow">Settings</p>
                 <h2>Models & Usage</h2>
-              </div>
-              <div className="main-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowCalendar(false);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Back to chat
-                </button>
               </div>
             </header>
             <div className="settings-grid">
@@ -3095,19 +3087,6 @@ export default function App() {
                   title="Only affects study processing, solutions, and lesson generation"
                 >
                   {savingSettings ? "Saving…" : "Save study model"}
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowStudy(false);
-                    setShowSettings(false);
-                    setShowCalendar(false);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Back to chat
                 </button>
                 <button className="ghost" onClick={refreshStudyData} disabled={studyLoading}>
                   {studyLoading ? "Refreshing…" : "Refresh"}
@@ -3559,7 +3538,7 @@ export default function App() {
                     <p className="muted small">Recent queued and completed study jobs.</p>
                   </div>
                 </div>
-                {studyJobs.length ? (
+                {selectedStudyCourseJobs.length ? (
                   <div className="study-job-list">
                     {visibleStudyJobs.map((job) => (
                       <div key={job.id} className="study-job-card">
@@ -3605,14 +3584,14 @@ export default function App() {
                 ) : (
                   <p className="muted">No study jobs yet.</p>
                 )}
-                {studyJobs.length > STUDY_PREVIEW_COUNT && (
+                {selectedStudyCourseJobs.length > STUDY_PREVIEW_COUNT && (
                   <div className="actions-row">
                     <button
                       type="button"
                       className="ghost"
                       onClick={() => setStudyShowAllJobs((prev) => !prev)}
                     >
-                      {studyShowAllJobs ? "Show less" : `Show all (${studyJobs.length})`}
+                      {studyShowAllJobs ? "Show less" : `Show all (${selectedStudyCourseJobs.length})`}
                     </button>
                   </div>
                 )}
@@ -3759,19 +3738,6 @@ export default function App() {
                 <h2>Hard + Soft Events</h2>
               </div>
               <div className="main-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Back to chat
-                </button>
                 <button
                   className="ghost"
                   onClick={refreshCalendar}
@@ -4361,19 +4327,6 @@ export default function App() {
                 <button className="primary" onClick={() => setShowSchedulerCreateModal(true)}>
                   Create task
                 </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowScheduler(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowCalendar(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Back to chat
-                </button>
               </div>
             </header>
             <div style={{ display: "grid", gridTemplateColumns: "2fr 1.5fr", gap: "1rem", marginTop: "1rem" }}>
@@ -4480,19 +4433,6 @@ export default function App() {
                 <h2>Inbox</h2>
               </div>
               <div className="main-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowMessages(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowCalendar(false);
-                    setShowScheduler(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Back to chat
-                </button>
                 <button className="ghost" onClick={refreshInboxMessages} disabled={messagesLoading}>
                   {messagesLoading ? "Refreshing…" : "Refresh"}
                 </button>
@@ -4545,19 +4485,6 @@ export default function App() {
                 <h2>Call sessions</h2>
               </div>
               <div className="main-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalls(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowCalendar(false);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                  }}
-                >
-                  Back to chat
-                </button>
                 <button className="ghost" onClick={refreshCallSessions} disabled={callsLoading}>
                   {callsLoading ? "Refreshing…" : "Refresh"}
                 </button>
@@ -4640,6 +4567,10 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : showSsh ? (
+          <SshPanel />
+        ) : showCoding ? (
+          <CodingPanel />
         ) : (
           <>
             <header className="main-header">
@@ -4710,89 +4641,6 @@ export default function App() {
                     })()}
                   </div>
                 )}
-              </div>
-              <div className="header-actions">
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowCalendar(true);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Calendar
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowScheduler(true);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Scheduler
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowScheduler(false);
-                    setShowMessages(true);
-                    setShowCalls(false);
-                  }}
-                >
-                  Messages
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowSettings(false);
-                    setShowStudy(false);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(true);
-                  }}
-                >
-                  Calls
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowSettings(false);
-                    setShowStudy(true);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Study
-                </button>
-                <button
-                  className="ghost"
-                  onClick={() => {
-                    setShowCalendar(false);
-                    setShowStudy(false);
-                    setShowSettings(true);
-                    setShowScheduler(false);
-                    setShowMessages(false);
-                    setShowCalls(false);
-                  }}
-                >
-                  Settings
-                </button>
-                <button className="ghost" onClick={handleNewChat}>
-                  Start fresh
-                </button>
               </div>
             </header>
 
@@ -4879,19 +4727,35 @@ export default function App() {
                   {sending ? "…" : <SendIcon />}
                 </button>
               </div>
-              {showMicSettings && mics.length > 0 && (
+              {showMicSettings && (
                 <div className="muted mic-row">
-                  <span>Mic:</span>
+                  {mics.length > 0 && <>
+                    <span>Mic:</span>
+                    <select
+                      className="mic-select"
+                      value={selectedMicId}
+                      onChange={(e) => setSelectedMicId(e.target.value)}
+                      disabled={recording}
+                    >
+                      {mics.map((mic, idx) => (
+                        <option key={mic.deviceId} value={mic.deviceId}>
+                          {mic.label || `Microphone ${idx + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </>}
+                  <span>Voice language:</span>
                   <select
                     className="mic-select"
-                    value={selectedMicId}
-                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    value={voiceInputLanguage}
+                    onChange={(e) => {
+                      setVoiceInputLanguage(e.target.value);
+                      localStorage.setItem("voiceInputLanguage", e.target.value);
+                    }}
                     disabled={recording}
                   >
-                    {mics.map((mic, idx) => (
-                      <option key={mic.deviceId} value={mic.deviceId}>
-                        {mic.label || `Microphone ${idx + 1}`}
-                      </option>
+                    {VOICE_INPUT_LANGUAGES.map((language) => (
+                      <option key={language.value || "auto"} value={language.value}>{language.label}</option>
                     ))}
                   </select>
                   {!micReady && !recording && !voiceSending && (

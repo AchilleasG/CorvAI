@@ -95,8 +95,12 @@ INSTALLED_APPS = [
     'chat',
     'orchestration.apps.OrchestrationConfig',
     'study.apps.StudyConfig',
+    'ssh_connections.apps.SshConnectionsConfig',
+    'coding.apps.CodingConfig',
     'openai_integration',
 ]
+
+CORV_CODING_DIR = os.getenv("CORV_CODING_DIR", "/var/lib/corv-coding")
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -172,6 +176,11 @@ def _database_settings():
 DATABASES = {
     'default': _database_settings()
 }
+
+# Keep Celery's Redis result backend bounded. Worker process recycling and hard
+# container limits are configured in docker-compose.yml.
+CELERY_RESULT_EXPIRES = int(os.getenv("CELERY_RESULT_EXPIRES", "3600"))
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", "1"))
 
 
 # Password validation

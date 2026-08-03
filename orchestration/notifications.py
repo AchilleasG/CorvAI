@@ -83,6 +83,7 @@ def send_fcm(
     body: str,
     data: Optional[Dict[str, Any]] = None,
     include_notification: bool = True,
+    channel_id: str = "corv_messages",
 ) -> None:
     project_id, creds = _load_fcm_credentials()
     if not project_id or not creds:
@@ -106,7 +107,7 @@ def send_fcm(
         if include_notification:
             payload["message"]["notification"] = {"title": title, "body": body}
             payload["message"]["android"]["notification"] = {
-                "channel_id": "corv_calls",
+                "channel_id": channel_id,
                 "sound": "default",
             }
         try:
@@ -156,4 +157,45 @@ def send_message_push_to_all(
     if not tokens:
         return
     logger.info("FCM message push token_count=%s", len(tokens))
-    send_fcm(tokens=tokens, title=title, body=body, data=payload, include_notification=True)
+    send_fcm(
+        tokens=tokens,
+        title=title,
+        body=body,
+        data=payload,
+        include_notification=True,
+        channel_id="corv_messages",
+    )
+
+
+def send_coding_push_to_all(
+    *,
+    title: str,
+    body: str,
+    session_id: str,
+    event: str,
+    delegation_id: str = "",
+) -> None:
+    payload = {
+        "type": "coding_session",
+        "title": title,
+        "body": body,
+        "session_id": session_id,
+        "delegation_id": delegation_id,
+        "event": event,
+    }
+    expo_tokens = PushToken.objects.filter(
+        platform__in=["ios", "web", "unknown"]
+    ).values_list("token", flat=True)
+    send_push(tokens=expo_tokens, title=title, body=body, data=payload)
+    tokens = list(
+        PushToken.objects.filter(platform="android_fcm").values_list("token", flat=True)
+    )
+    if tokens:
+        send_fcm(
+            tokens=tokens,
+            title=title,
+            body=body,
+            data=payload,
+            include_notification=True,
+            channel_id="corv_coding",
+        )
