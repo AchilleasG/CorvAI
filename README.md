@@ -323,6 +323,12 @@ CorvAI is a personal passion project under active development, not a hardened mu
 
 CorvAI is intentionally broad and experimental. Features evolve quickly, and some integrations require external accounts or infrastructure. The repository currently prioritizes a powerful personal deployment and transparent agent workflow over turnkey multi-user hosting.
 
+## License
+
+CorvAI is source-available for viewing, evaluation, education, and personal non-commercial use. Commercial use or redistribution requires prior written permission from the copyright holder.
+
+See the [CORV Source-Available License](LICENSE) for the complete terms.
+
 ## Author
 
 **Achilleas Georgiou** — creator and developer of CorvAI.
