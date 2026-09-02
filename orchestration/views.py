@@ -1,12 +1,14 @@
 from typing import List, Optional
 import logging
 import json
+import base64
 from uuid import UUID
 from ninja import Router
 from ninja.errors import HttpError
 
-from django.db import OperationalError
-from django.db.models import Sum
+from django.db import OperationalError, transaction
+from django.db.models import Q, Sum
+from django.shortcuts import get_object_or_404
 from datetime import timedelta
 from django.utils import timezone
 from datetime import datetime
@@ -46,27 +48,42 @@ from orchestration.models import (
     UserMessage,
     CallSession,
     CallTranscriptEntry,
+    UserNote,
+    KnowledgeEntity,
 )
 from orchestration.objectives import ObjectiveService
 from orchestration.call_processing import (
     create_call_session,
+    notify_incoming_call,
     accept_call,
     complete_call,
+    execute_call_action,
     mark_call_missed,
     should_end_call,
+    AUTOMATIC_CALL_COMPLETION_ENABLED,
 )
-from orchestration.notifications import send_call_push_to_all, send_push_to_all
+from orchestration.notifications import send_push_to_all
 from Corv.config import settings as corv_settings
 import httpx
-from orchestration.services import JobService, ModelConfigService
+from orchestration.services import JobService, KnowledgeBaseService, LocationSearchService, ModelConfigService, PersonaService, UserInfoService
 from chat.models import ChatMessage
 from chat.schemas import MessageOut
 from orchestration.tools.calendar import list_events
 from orchestration.tools import calendar_manager, soft_events
 from orchestration.tasks import run_calendar_replan_job
+from coding.auth import CodexAuthService
+from orchestration.presence import PresenceService
 
 router = Router(tags=["orchestration"])
 logger = logging.getLogger(__name__)
+
+
+@router.post("/presence")
+def update_presence(request):
+    try:
+        return PresenceService.update(_request_json_dict(request))
+    except ValueError as exc:
+        raise HttpError(400, str(exc))
 
 
 def _request_json_dict(request) -> dict:
@@ -223,7 +240,193 @@ def get_settings(request):
         "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
+        "call_voice": ModelConfigService.get_call_voice(),
+        "call_voice_options": ModelConfigService.get_call_voice_options(),
+        **CodexAuthService.settings_payload(),
     }
+
+
+def _note_payload(note: UserNote) -> dict:
+    return {
+        "id": str(note.id),
+        "content": note.content_raw,
+        "source": note.source,
+        "tags": note.tags or [],
+        "created_at": note.created_at.isoformat() if note.created_at else None,
+        "updated_at": note.updated_at.isoformat() if note.updated_at else None,
+        "expires_at": note.expires_at.isoformat() if note.expires_at else None,
+        "is_timed": note.expires_at is not None,
+    }
+
+
+def _clean_note_tags(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        tag = str(item).strip()
+        if tag and tag not in tags:
+            tags.append(tag[:64])
+    return tags[:20]
+
+
+@router.get("/notes")
+def list_notes(request, query: str = "", tags: str = "", limit: int = 200):
+    qs = UserInfoService.active_notes()
+    clean_query = query.strip()
+    if clean_query:
+        qs = qs.filter(
+            Q(content_raw__icontains=clean_query)
+            | Q(content_canonical__icontains=clean_query.lower())
+            | Q(source__icontains=clean_query)
+        )
+    selected_tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
+    for tag in selected_tags:
+        qs = qs.filter(tags__contains=[tag])
+    notes = list(qs.order_by("-updated_at")[: min(max(limit, 1), 500)])
+    all_tags = sorted(
+        {
+            tag
+            for values in [
+                *UserInfoService.active_notes().values_list("tags", flat=True),
+                *KnowledgeEntity.objects.filter(user_id=UserInfoService.DEFAULT_USER_ID, deleted_at__isnull=True).values_list("tags", flat=True),
+            ]
+            for tag in (values or []) if tag
+        },
+        key=str.casefold,
+    )
+    return {"notes": [_note_payload(note) for note in notes], "tags": all_tags, "count": len(notes)}
+
+
+@router.post("/notes")
+def create_note(request):
+    payload = _request_json_dict(request)
+    content = str(payload.get("content") or "").strip()
+    if not content:
+        raise HttpError(400, "Note text is required")
+    try:
+        note = UserInfoService.add_note(
+            content=content,
+            source="notes_ui",
+            tags=_clean_note_tags(payload.get("tags")),
+            expires_at=payload.get("expires_at"),
+        )
+    except Exception as exc:
+        logger.exception("Failed to create note")
+        raise HttpError(502, f"Could not create note: {exc}")
+    return _note_payload(note)
+
+
+@router.patch("/notes/{note_id}")
+def update_note(request, note_id: UUID):
+    existing = UserNote.objects.filter(
+        id=note_id,
+        user_id=UserInfoService.DEFAULT_USER_ID,
+        deleted_at__isnull=True,
+    ).first()
+    if existing is None:
+        raise HttpError(404, "Note not found")
+    payload = _request_json_dict(request)
+    content = str(payload.get("content", existing.content_raw) or "").strip()
+    if not content:
+        raise HttpError(400, "Note text is required")
+    try:
+        note = UserInfoService.update_note(
+            str(note_id),
+            content=content,
+            source=existing.source,
+            tags=_clean_note_tags(payload.get("tags", existing.tags)),
+            expires_at=payload.get("expires_at", ...),
+        )
+    except ValueError:
+        raise HttpError(404, "Note not found")
+    except Exception as exc:
+        logger.exception("Failed to update note id=%s", note_id)
+        raise HttpError(502, f"Could not update note: {exc}")
+    return _note_payload(note)
+
+
+@router.delete("/notes/{note_id}")
+def delete_note(request, note_id: UUID):
+    note = UserNote.objects.filter(
+        id=note_id,
+        user_id=UserInfoService.DEFAULT_USER_ID,
+        deleted_at__isnull=True,
+    ).first()
+    if note is None:
+        raise HttpError(404, "Note not found")
+    UserInfoService.delete_note(str(note_id))
+    return {"deleted": True, "id": str(note_id)}
+
+
+def _knowledge_payload_data(entity_type: str, payload: dict, existing=None) -> tuple[str, str, dict, list]:
+    name=str(payload.get("name",existing.name if existing else "") or "").strip()
+    description=str(payload.get("description",existing.description if existing else "") or "").strip()
+    data=dict(existing.data or {}) if existing else {}
+    if isinstance(payload.get("data"),dict): data.update(payload["data"])
+    if entity_type=="location":
+        for field in ("latitude","longitude"):
+            if field in payload: data[field]=payload[field]
+    elif entity_type=="person":
+        for field in ("relationship","facts"):
+            if field in payload: data[field]=payload[field]
+    tags=_clean_note_tags(payload.get("tags",existing.tags if existing else []))
+    return name,description,data,tags
+
+
+@router.get("/knowledge/location-search")
+def search_locations_for_note(request, query: str, limit: int=6):
+    try: return {"query":query,"results":LocationSearchService.search(query,limit=limit),"attribution":"Search data © OpenStreetMap contributors"}
+    except ValueError as exc: raise HttpError(400,str(exc))
+    except Exception as exc: logger.exception("Location search failed"); raise HttpError(502,f"Location search is temporarily unavailable: {exc}")
+
+
+@router.get("/knowledge/search")
+def search_knowledge(request, query: str, tags: str="", limit: int=20):
+    try: return KnowledgeBaseService.search(query,tags=[x.strip() for x in tags.split(",") if x.strip()],limit=limit)
+    except ValueError as exc: raise HttpError(400,str(exc))
+
+
+@router.get("/knowledge/tags")
+def list_knowledge_tags(request):
+    note_tags=UserInfoService.active_notes().values_list("tags",flat=True)
+    entity_tags=KnowledgeEntity.objects.filter(user_id=UserInfoService.DEFAULT_USER_ID,deleted_at__isnull=True).values_list("tags",flat=True)
+    return {"tags":sorted({tag for values in [*note_tags,*entity_tags] for tag in (values or []) if tag},key=str.casefold)}
+
+
+@router.get("/knowledge/{entity_type}")
+def list_knowledge_type(request, entity_type: str, query: str="", tags: str="", limit: int=200):
+    try: return {"entity_type":entity_type,"entities":KnowledgeBaseService.list_type(entity_type,query=query,tags=[x.strip() for x in tags.split(",") if x.strip()],limit=limit)}
+    except ValueError as exc: raise HttpError(400,str(exc))
+
+
+@router.post("/knowledge/{entity_type}")
+def create_knowledge_entity(request, entity_type: str):
+    payload=_request_json_dict(request); name,description,data,tags=_knowledge_payload_data(entity_type,payload)
+    try: return KnowledgeBaseService.payload(KnowledgeBaseService.create(entity_type,name=name,description=description,data=data,tags=tags,source="notes_ui"))
+    except ValueError as exc: raise HttpError(400,str(exc))
+    except Exception as exc: logger.exception("Failed to create knowledge entity"); raise HttpError(502,f"Could not create entity: {exc}")
+
+
+@router.get("/knowledge/{entity_type}/{entity_id}")
+def get_knowledge_entity(request, entity_type: str, entity_id: UUID):
+    try: return KnowledgeBaseService.payload(KnowledgeBaseService.get(entity_id,entity_type=entity_type))
+    except ValueError as exc: raise HttpError(404,str(exc))
+
+
+@router.patch("/knowledge/{entity_type}/{entity_id}")
+def update_knowledge_entity(request, entity_type: str, entity_id: UUID):
+    try:
+        existing=KnowledgeBaseService.get(entity_id,entity_type=entity_type); payload=_request_json_dict(request); name,description,data,tags=_knowledge_payload_data(entity_type,payload,existing)
+        return KnowledgeBaseService.payload(KnowledgeBaseService.update(entity_id,entity_type=entity_type,name=name,description=description,data=data,tags=tags,source=existing.source))
+    except ValueError as exc: raise HttpError(404 if "not found" in str(exc).lower() else 400,str(exc))
+    except Exception as exc: logger.exception("Failed to update knowledge entity"); raise HttpError(502,f"Could not update entity: {exc}")
+
+
+@router.delete("/knowledge/{entity_type}/{entity_id}")
+def delete_knowledge_entity(request, entity_type: str, entity_id: UUID):
+    try: KnowledgeBaseService.delete(entity_id,entity_type=entity_type); return {"deleted":True,"id":str(entity_id)}
+    except ValueError as exc: raise HttpError(404,str(exc))
 
 
 @router.post("/push_tokens", response=PushTokenOut)
@@ -280,8 +483,13 @@ def mark_message_read(request, message_id: UUID):
 
 
 @router.get("/call_sessions", response=List[CallSessionOut])
-def list_call_sessions(request, status: Optional[str] = None):
+def list_call_sessions(
+    request, status: Optional[str] = None, platform: Optional[str] = None
+):
     qs = CallSession.objects.all()
+    if platform == "mobile":
+        # Keep legacy/system sessions visible while excluding only explicit web calls.
+        qs = qs.filter(Q(metadata__origin__isnull=True) | ~Q(metadata__origin="web"))
     if status:
         qs = qs.filter(status=status)
     qs = qs.order_by("-created_at")[:100]
@@ -302,10 +510,28 @@ def list_call_sessions(request, status: Optional[str] = None):
     ]
 
 
+def _call_origin_from_request(request, requested_origin: str) -> str:
+    """Classify browser calls server-side instead of trusting one client query flag."""
+    if requested_origin in {"web", "mobile"}:
+        return requested_origin
+    headers = getattr(request, "headers", {}) or {}
+    # Native mobile requests do not send browser Origin/Referer headers. Browser
+    # requests do, including when Vite proxies the API to Django.
+    if headers.get("Origin") or headers.get("Referer"):
+        return "web"
+    return "corv"
+
+
 @router.post("/call_sessions", response=CallSessionOut)
-def create_call(request, goal: str, scheduled_for: Optional[str] = None):
+def create_call(
+    request,
+    goal: str,
+    scheduled_for: Optional[str] = None,
+    origin: str = "corv",
+):
     dt = _parse_dt(scheduled_for) if scheduled_for else None
-    session = create_call_session(goal=goal, scheduled_for=dt)
+    normalized_origin = _call_origin_from_request(request, origin)
+    session = create_call_session(goal=goal, scheduled_for=dt, origin=normalized_origin)
     return CallSessionOut(
         id=session.id,
         goal=session.goal,
@@ -370,7 +596,11 @@ def add_transcript_entry(
     entry = CallTranscriptEntry.objects.create(session=session, role=role, content=content)
     logger.info("call_transcript session=%s role=%s content=%s", session.id, role, content)
     end_call = False
-    if session.status == CallSession.STATUS_IN_CALL and role == "assistant":
+    if (
+        AUTOMATIC_CALL_COMPLETION_ENABLED
+        and session.status == CallSession.STATUS_IN_CALL
+        and role == "assistant"
+    ):
         try:
             end_call = should_end_call(session)
         except Exception:
@@ -393,16 +623,17 @@ def notify_call_session(request, session_id: UUID):
         session = CallSession.objects.get(id=session_id)
     except CallSession.DoesNotExist:
         raise HttpError(404, "Call session not found")
-    send_call_push_to_all(
-        title="Incoming call from Corv",
-        body=session.goal[:120],
-        data={"call_session_id": str(session.id), "type": "call_incoming"},
-    )
+    notify_incoming_call(session)
     return {"ok": True}
 
 
 @router.post("/call_sessions/{session_id}/realtime_token")
-def create_realtime_token(request, session_id: UUID, model: Optional[str] = None):
+def create_realtime_token(
+    request,
+    session_id: UUID,
+    model: Optional[str] = None,
+    manual_turn_detection: bool = False,
+):
     try:
         session = CallSession.objects.get(id=session_id)
     except CallSession.DoesNotExist:
@@ -412,16 +643,45 @@ def create_realtime_token(request, session_id: UUID, model: Optional[str] = None
     if not api_key:
         raise HttpError(500, "OpenAI key not configured")
 
-    model_name = model or "gpt-4o-realtime-preview-2024-12-17"
+    model_name = model or "gpt-realtime-2.1"
     payload = {
-        "model": model_name,
-        "voice": "alloy",
-        "instructions": f"Call goal: {session.goal}. Be concise and helpful.",
+        "session": {
+            "type": "realtime",
+            "model": model_name,
+            "instructions": (
+                f"{PersonaService.build_persona_prompt()}\n\n"
+                f"Call goal: {session.goal}. You are Corv, with the same capabilities as text mode. "
+                "This is spoken conversation: usually answer in one short sentence, occasionally two. "
+                "Sound quick, warm, and dry-witty rather than polished or generic. Never narrate obvious "
+                "steps, deliver mini-essays, or force a joke. Use plain words only, with no markdown, "
+                "bullets, emoji, symbols, or special formatting. When the user asks you to perform an "
+                "action, always call perform_corv_action, wait for its result, then report it briefly. You "
+                "have Corv's full action capabilities through that tool: before saying you do not know, "
+                "cannot do something, or lack access, actively try the relevant available actions and useful "
+                "fallbacks. Only admit a limitation after those routes are genuinely exhausted, and state the "
+                "specific blocker without a speech. New Codex delegations wait by default without asking "
+                "first. The user may interrupt, resume, or switch waits and may track multiple concurrent "
+                "delegations by name."
+            ),
+            "audio": {
+                "input": {"transcription": {"model": "gpt-4o-mini-transcribe"}, **({"turn_detection": None} if manual_turn_detection else {})},
+                "output": {"voice": ModelConfigService.get_call_voice()},
+            },
+            "tools": [{
+                "type": "function", "name": "perform_corv_action",
+                "description": "Perform an action with Corv's full text-mode tools and return the outcome.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"instruction": {"type": "string"}},
+                    "required": ["instruction"],
+                },
+            }],
+        },
     }
     try:
         with httpx.Client(timeout=15) as client:
             resp = client.post(
-                "https://api.openai.com/v1/realtime/sessions",
+                "https://api.openai.com/v1/realtime/client_secrets",
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=payload,
             )
@@ -430,6 +690,35 @@ def create_realtime_token(request, session_id: UUID, model: Optional[str] = None
     except Exception as exc:
         raise HttpError(502, f"Failed to create realtime session: {exc}")
 
+
+@router.post("/call_sessions/{session_id}/action")
+def run_realtime_call_action(request, session_id: UUID, instruction: str):
+    try:
+        session = CallSession.objects.get(id=session_id)
+    except CallSession.DoesNotExist:
+        raise HttpError(404, "Call session not found")
+    if session.status != CallSession.STATUS_IN_CALL:
+        raise HttpError(409, "Call is not active")
+    try:
+        return {"result": execute_call_action(session, instruction)}
+    except Exception as exc:
+        logger.exception("Realtime call action failed session=%s", session.id)
+        raise HttpError(500, f"Action failed: {exc}")
+
+
+@router.get("/call_sessions/{session_id}/delegations")
+def call_delegation_state(request, session_id: UUID, after: str = ""):
+    session = get_object_or_404(CallSession, id=session_id)
+    from coding.chat_waits import CodingChatWaitService
+    from django.utils.dateparse import parse_datetime
+    queryset = session.transcript_entries.filter(role="system", content__startswith="[Delegation update:")
+    parsed = parse_datetime(after) if after else None
+    if parsed:
+        queryset = queryset.filter(created_at__gt=parsed)
+    updates = [{"id": str(x.pk), "content": x.content.split("] ", 1)[-1], "created_at": x.created_at.isoformat()} for x in queryset.order_by("created_at")]
+    state = CodingChatWaitService.list_for_origin(call_session=session)
+    state.update({"updates": updates, "cursor": timezone.now().isoformat()})
+    return state
 
 @router.get("/scheduled_tasks", response=List[ScheduledTaskOut])
 def list_scheduled_tasks(request):
@@ -536,6 +825,9 @@ def set_settings(
     study_model: Optional[str] = None,
     cache_mode: Optional[str] = None,
     max_function_result_chars: Optional[int] = None,
+    call_voice: Optional[str] = None,
+    codex_auth_mode: Optional[str] = None,
+    codex_api_key: Optional[str] = None,
 ):
     body_payload = {}
     try:
@@ -552,6 +844,9 @@ def set_settings(
     study_model = body_payload.get("study_model", study_model)
     cache_mode = body_payload.get("cache_mode", cache_mode)
     max_function_result_chars = body_payload.get("max_function_result_chars", max_function_result_chars)
+    call_voice = body_payload.get("call_voice", call_voice)
+    codex_auth_mode = body_payload.get("codex_auth_mode", codex_auth_mode)
+    codex_api_key = body_payload.get("codex_api_key", codex_api_key)
 
     if frontman_model:
         ModelConfigService.set_setting("frontman_model", frontman_model)
@@ -565,6 +860,16 @@ def set_settings(
         ModelConfigService.set_setting("cache_mode", cache_mode.lower())
     if max_function_result_chars is not None:
         ModelConfigService.set_setting("max_function_result_chars", str(max_function_result_chars))
+    if call_voice is not None:
+        normalized_voice = str(call_voice).lower()
+        if normalized_voice not in ModelConfigService.CALL_VOICES:
+            raise HttpError(400, "Unsupported Corv voice")
+        ModelConfigService.set_setting("call_voice", normalized_voice)
+    if codex_auth_mode is not None or codex_api_key:
+        try:
+            CodexAuthService.update(codex_auth_mode, codex_api_key)
+        except (RuntimeError, ValueError) as exc:
+            raise HttpError(400, str(exc))
     return {
         "frontman_model": ModelConfigService.get_frontman_model(),
         "caller_model": ModelConfigService.get_caller_model(),
@@ -572,6 +877,39 @@ def set_settings(
         "study_model": ModelConfigService.get_study_model(),
         "cache_mode": ModelConfigService.get_cache_mode(),
         "max_function_result_chars": ModelConfigService.get_max_function_result_chars(),
+        "call_voice": ModelConfigService.get_call_voice(),
+        "call_voice_options": ModelConfigService.get_call_voice_options(),
+        **CodexAuthService.settings_payload(),
+    }
+
+
+@router.get("/settings/call_voice_preview")
+def preview_call_voice(request, voice: str):
+    normalized_voice = str(voice).lower()
+    if normalized_voice not in ModelConfigService.CALL_VOICES:
+        raise HttpError(400, "Unsupported Corv voice")
+    if not corv_settings.openai_key:
+        raise HttpError(500, "OpenAI key not configured")
+    try:
+        response = httpx.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {corv_settings.openai_key}"},
+            json={
+                "model": "gpt-4o-mini-tts",
+                "voice": normalized_voice,
+                "input": "Hello, I am Corv. This is how I will sound during your calls.",
+                "response_format": "mp3",
+            },
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.exception("Call voice preview failed voice=%s", normalized_voice)
+        raise HttpError(502, f"Voice preview failed: {exc}")
+    return {
+        "voice": normalized_voice,
+        "content_type": "audio/mpeg",
+        "audio_base64": base64.b64encode(response.content).decode("ascii"),
     }
 
 
@@ -771,11 +1109,14 @@ def create_objective(request):
         if parent is None:
             raise HttpError(404, "Parent objective not found")
     deadline_at = _parse_dt(payload.get("deadline_at")) if payload.get("deadline_at") else None
+    status = str(payload.get("status") or Objective.STATUS_ACTIVE)
+    if status not in dict(Objective.STATUS_CHOICES):
+        raise HttpError(400, "Invalid objective status")
     objective = Objective.objects.create(
         parent=parent,
         title=title,
         description=str(payload.get("description") or ""),
-        status=str(payload.get("status") or Objective.STATUS_ACTIVE),
+        status=status,
         deadline_at=deadline_at,
         estimated_effort_minutes=payload.get("estimated_effort_minutes"),
         remaining_effort_minutes=payload.get("remaining_effort_minutes"),
@@ -801,10 +1142,21 @@ def update_objective(request, objective_id: UUID):
             parent = Objective.objects.filter(id=parent_id).first()
             if parent is None:
                 raise HttpError(404, "Parent objective not found")
+            if parent.id == objective.id:
+                raise HttpError(400, "An objective cannot be its own parent")
+            cursor = parent
+            while cursor.parent_id:
+                if cursor.parent_id == objective.id:
+                    raise HttpError(400, "An objective cannot be moved below one of its descendants")
+                cursor = cursor.parent
             objective.parent = parent
         else:
             objective.parent = None
         updates.append("parent")
+    if "title" in payload and not str(payload.get("title") or "").strip():
+        raise HttpError(400, "title is required")
+    if "status" in payload and str(payload.get("status") or "") not in dict(Objective.STATUS_CHOICES):
+        raise HttpError(400, "Invalid objective status")
     for key in ["title", "description", "status", "notes"]:
         if key in payload:
             setattr(objective, key, str(payload.get(key) or ""))
@@ -820,6 +1172,9 @@ def update_objective(request, objective_id: UUID):
     if "metadata" in payload and isinstance(payload.get("metadata"), dict):
         objective.metadata = payload.get("metadata")
         updates.append("metadata")
+    if "status" in payload:
+        objective.completed_at = timezone.now() if objective.status == Objective.STATUS_COMPLETED else None
+        updates.append("completed_at")
     if updates:
         objective.save(update_fields=list(dict.fromkeys(updates + ["updated_at"])))
     return ObjectiveOut.from_model(objective)
@@ -831,8 +1186,27 @@ def delete_objective(request, objective_id: UUID):
         objective = Objective.objects.get(id=objective_id)
     except Objective.DoesNotExist:
         raise HttpError(404, "Objective not found")
-    objective.delete()
-    return {"ok": True}
+    tree_ids = [objective.id]
+    frontier = [objective.id]
+    while frontier:
+        children = list(Objective.objects.filter(parent_id__in=frontier).values_list("id", flat=True))
+        tree_ids.extend(children)
+        frontier = children
+    generated_soft_events = SoftEvent.objects.filter(
+        objective_links__objective_id__in=tree_ids,
+        metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+    ).distinct()
+    generated_count = generated_soft_events.count()
+    task_count = ObjectiveTask.objects.filter(objective_id__in=tree_ids).count()
+    with transaction.atomic():
+        generated_soft_events.delete()
+        objective.delete()
+    return {
+        "ok": True,
+        "deleted_objectives": len(tree_ids),
+        "deleted_tasks": task_count,
+        "deleted_generated_sessions": generated_count,
+    }
 
 
 @router.post("/objectives/{objective_id}/tasks", response=ObjectiveTaskOut)
@@ -844,11 +1218,14 @@ def create_objective_task(request, objective_id: UUID):
     title = str(payload.get("title") or "").strip()
     if not title:
         raise HttpError(400, "title is required")
+    status = str(payload.get("status") or ObjectiveTask.STATUS_TODO)
+    if status not in dict(ObjectiveTask.STATUS_CHOICES):
+        raise HttpError(400, "Invalid objective task status")
     task = ObjectiveTask.objects.create(
         objective=objective,
         title=title,
         description=str(payload.get("description") or ""),
-        status=str(payload.get("status") or ObjectiveTask.STATUS_TODO),
+        status=status,
         estimated_effort_minutes=payload.get("estimated_effort_minutes"),
         remaining_effort_minutes=payload.get("remaining_effort_minutes"),
         due_at=_parse_dt(payload.get("due_at")) if payload.get("due_at") else None,
@@ -866,6 +1243,16 @@ def update_objective_task(request, task_id: UUID):
         raise HttpError(404, "Objective task not found")
     payload = _request_json_dict(request)
     updates: list[str] = []
+    if "objective_id" in payload:
+        objective = Objective.objects.filter(id=payload.get("objective_id")).first()
+        if objective is None:
+            raise HttpError(404, "Destination objective not found")
+        task.objective = objective
+        updates.append("objective")
+    if "title" in payload and not str(payload.get("title") or "").strip():
+        raise HttpError(400, "title is required")
+    if "status" in payload and str(payload.get("status") or "") not in dict(ObjectiveTask.STATUS_CHOICES):
+        raise HttpError(400, "Invalid objective task status")
     for key in ["title", "description", "status"]:
         if key in payload:
             setattr(task, key, str(payload.get(key) or ""))

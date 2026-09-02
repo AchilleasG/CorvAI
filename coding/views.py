@@ -107,7 +107,7 @@ def delete_session(request, session_id: UUID):
 def start_task(request, session_id: UUID, payload: CodingTaskIn):
     session = get_object_or_404(CodingSession.objects.select_related("machine"), pk=session_id)
     try:
-        turn = CodingSessionService.start_turn(session, payload.prompt, source=payload.source)
+        turn = CodingSessionService.start_turn(session, payload.prompt, source=payload.source, file_ids=payload.file_ids)
         return CodingSessionService.turn_payload(turn)
     except Exception as exc:
         raise HttpError(400, str(exc))
@@ -162,6 +162,24 @@ def stop_session(request, session_id: UUID):
     return CodingSessionService.stop(session)
 
 
+@router.post("/sessions/{session_id}/abort")
+def abort_delegation(request, session_id: UUID):
+    session = get_object_or_404(CodingSession.objects.select_related("machine"), pk=session_id)
+    try:
+        return CodingSessionService.abort_delegation(session)
+    except Exception as exc:
+        raise HttpError(400, str(exc))
+
+
+@router.post("/sessions/{session_id}/resume")
+def resume_session(request, session_id: UUID):
+    session = get_object_or_404(CodingSession.objects.select_related("machine"), pk=session_id)
+    try:
+        return CodingSessionService.resume(session)
+    except Exception as exc:
+        raise HttpError(400, str(exc))
+
+
 @router.get("/delegations")
 def list_delegations(request, session_id: str = ""):
     delegations = FeatureDelegation.objects.select_related("session__machine")
@@ -186,6 +204,7 @@ def create_delegation(request, session_id: UUID, payload: FeatureDelegationIn):
             acceptance_criteria=payload.acceptance_criteria,
             qa_enabled=payload.qa_enabled,
             max_iterations=payload.max_iterations,
+            file_ids=payload.file_ids,
         )
         return FeatureDelegationService.payload(delegation)
     except Exception as exc:
@@ -206,7 +225,7 @@ def resume_delegation(request, delegation_id: UUID, payload: FeatureDelegationRe
         FeatureDelegation.objects.select_related("session__machine"), pk=delegation_id
     )
     try:
-        FeatureDelegationService.resume(delegation, payload.decision)
+        FeatureDelegationService.resume(delegation, payload.decision, mode=payload.mode)
         delegation.refresh_from_db()
         return FeatureDelegationService.payload(delegation)
     except Exception as exc:

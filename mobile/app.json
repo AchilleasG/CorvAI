@@ -27,6 +27,14 @@
     },
     "web": {
       "favicon": "../corv-logo-v2.png"
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Corv to use your location for location-aware answers without asking where you are."
+        }
+      ]
+    ],
     }
   }
 }

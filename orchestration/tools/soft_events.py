@@ -5,15 +5,16 @@ from datetime import datetime, timedelta
 import time as time_module
 from typing import Any, Callable, Optional, List
 
+from django.db import transaction
 from django.utils import timezone
 
 from orchestration.objectives import ObjectiveService
-from orchestration.models import Chat, Job, JobEvent, SoftEvent, SoftEventSlot, ToolFunction
+from orchestration.models import Chat, Job, JobEvent, Objective, SoftEvent, SoftEventSlot, ToolFunction
 from orchestration.registry import register_function
 from orchestration.services import JobService, SoftEventService
 from orchestration.soft_scheduler import collect_window_state
-from orchestration.soft_planner import plan_soft_window
 from orchestration.tools.calendar import list_events
+from orchestration.two_week_planner import TwoWeekPlannerService
 
 
 def _parse_dt(val: Optional[str]) -> Optional[datetime]:
@@ -136,24 +137,11 @@ class SoftPlannerJobService:
                 payload={"window_start": window_start.isoformat(), "window_end": window_end.isoformat()},
             )
 
-            objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(
-                window_start,
-                window_end,
-                planner_note=note,
-                progress_callback=lambda progress, message: SoftPlannerJobService._update_job(
-                    job,
-                    progress=progress,
-                    summary=message,
-                    message=message,
-                ),
-                cancel_check=lambda: SoftPlannerJobService._cancel_check(job),
-            )
-
             SoftPlannerJobService._update_job(
                 job,
-                progress=0.72,
-                summary="Fetching hard calendar events",
-                message="Fetching hard calendar events",
+                progress=0.08,
+                summary="Collecting the complete two-week planning context",
+                message="Collecting hard events, urgent objective tasks, and flexible events",
             )
             hard_resp = list_events(
                 time_min=window_start.isoformat(),
@@ -161,13 +149,14 @@ class SoftPlannerJobService:
                 max_results=2500,
             )
             hard_events = hard_resp.get("events", [])
-
-            SoftPlannerJobService._update_job(
-                job,
-                progress=0.78,
-                summary="Collecting remaining soft events",
-                message="Collecting remaining soft events",
+            objectives = list(
+                Objective.objects.all().select_related("parent", "chat").prefetch_related("tasks")
             )
+            relevant = [
+                objective
+                for objective in objectives
+                if ObjectiveService._should_schedule_objective(objective, window_start, window_end)
+            ]
             soft_state = collect_window_state(window_start, window_end)
             soft_state["soft_events"] = [
                 event
@@ -176,38 +165,47 @@ class SoftPlannerJobService:
             ]
             soft_state["objective_inputs"] = []
 
-            SoftPlannerJobService._update_job(
-                job,
-                progress=0.82,
-                summary="Running generic soft-event replanner",
-                message="Running generic soft-event replanner",
-                payload={
-                    "soft_event_count": len(soft_state.get("soft_events", [])),
-                    "slot_count": len(soft_state.get("slots", [])),
-                    "hard_event_count": len(hard_events),
-                },
-            )
-            actions, trace_id = SoftPlannerJobService._run_with_heartbeat(
-                lambda: plan_soft_window(
+            session_plans, actions, trace_id, planner_summary = SoftPlannerJobService._run_with_heartbeat(
+                lambda: TwoWeekPlannerService.plan(
+                    objectives=relevant,
                     hard_events=hard_events,
                     soft_state=soft_state,
                     window_start=window_start,
                     window_end=window_end,
                     planner_note=note,
+                    progress_callback=lambda progress, message: SoftPlannerJobService._update_job(
+                        job,
+                        progress=progress,
+                        summary=message,
+                        message=message,
+                    ),
                 ),
                 job=job,
-                progress=0.84,
-                heartbeat_message="Waiting for generic soft-event planner",
+                progress=0.4,
+                heartbeat_message="Waiting for the unified two-week planner",
             )
 
             SoftPlannerJobService._update_job(
                 job,
-                progress=0.9,
-                summary="Applying planned slot actions",
-                message="Applying planned slot actions",
-                payload={"action_count": len(actions), "trace_id": trace_id},
+                progress=0.62,
+                summary="Applying the validated two-week schedule",
+                message="Replacing the previous plan only after local validation passed",
+                payload={
+                    "objective_session_count": len(session_plans),
+                    "soft_slot_count": len(actions),
+                    "trace_id": trace_id,
+                },
             )
-            created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
+            SoftPlannerJobService._cancel_check(job)
+            with transaction.atomic():
+                objective_sync = ObjectiveService._apply_objective_window_plan(
+                    objectives=objectives,
+                    relevant=relevant,
+                    session_plans=session_plans,
+                    window_start=window_start,
+                    window_end=window_end,
+                )
+                created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
 
             SoftPlannerJobService._update_job(
                 job,
@@ -221,6 +219,8 @@ class SoftPlannerJobService:
                 "created": created,
                 "updated": updated,
                 "trace_id": trace_id,
+                "planner_summary": planner_summary,
+                "model_calls": 1,
                 "objective_sync": objective_sync,
                 "coverage": coverage,
                 "window_start": window_start.isoformat(),
@@ -480,7 +480,7 @@ def mark_slot_outcome(
     manifest_id="soft_events.replan_window",
     module="soft_events",
     name="soft_events.replan_window",
-    description="Manually trigger a replan of the next N days with an optional note.",
+    description="Create one unified replacement schedule for the next N days from hard calendar events, deadline-bound objective tasks, and flexible events, with an optional user constraint.",
     params_schema={
         "type": "object",
         "properties": {
@@ -494,18 +494,20 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     window_start = now
     window_end = now + timedelta(days=max(days or 1, 1))
 
-    objective_sync = ObjectiveService.rebuild_objective_soft_events_for_window(
-        window_start,
-        window_end,
-        planner_note=note,
-    )
-
     hard_resp = list_events(
         time_min=window_start.isoformat(),
         time_max=window_end.isoformat(),
         max_results=2500,
     )
     hard_events = hard_resp.get("events", [])
+    objectives = list(
+        Objective.objects.all().select_related("parent", "chat").prefetch_related("tasks")
+    )
+    relevant = [
+        objective
+        for objective in objectives
+        if ObjectiveService._should_schedule_objective(objective, window_start, window_end)
+    ]
     soft_state = collect_window_state(window_start, window_end)
     soft_state["soft_events"] = [
         event
@@ -514,20 +516,31 @@ def replan_window(days: int = 14, note: Optional[str] = None):
     ]
     soft_state["objective_inputs"] = []
 
-    actions, trace_id = plan_soft_window(
+    session_plans, actions, trace_id, planner_summary = TwoWeekPlannerService.plan(
+        objectives=relevant,
         hard_events=hard_events,
         soft_state=soft_state,
         window_start=window_start,
         window_end=window_end,
         planner_note=note,
     )
-    created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
+    with transaction.atomic():
+        objective_sync = ObjectiveService._apply_objective_window_plan(
+            objectives=objectives,
+            relevant=relevant,
+            session_plans=session_plans,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        created, updated = SoftEventService.apply_planner_actions(actions, planner_trace_id=trace_id)
     coverage = ObjectiveService.coverage_snapshot(window_start, window_end)
     return {
         "actions": len(actions),
         "created": created,
         "updated": updated,
         "trace_id": trace_id,
+        "planner_summary": planner_summary,
+        "model_calls": 1,
         "objective_sync": objective_sync,
         "coverage": coverage,
     }

@@ -13,6 +13,7 @@ class SshMachineIn(Schema):
     private_key: str = ""
     passphrase: str = ""
     allow_ai_commands: bool = False
+    is_default: bool = False
     connect_timeout_seconds: int = 15
     command_timeout_seconds: int = 120
     keepalive_seconds: int = 30
@@ -29,6 +30,7 @@ class SshMachineUpdate(Schema):
     private_key: Optional[str] = None
     passphrase: Optional[str] = None
     allow_ai_commands: Optional[bool] = None
+    is_default: Optional[bool] = None
     connect_timeout_seconds: Optional[int] = None
     command_timeout_seconds: Optional[int] = None
     keepalive_seconds: Optional[int] = None

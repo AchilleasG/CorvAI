@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -20,6 +22,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 MAX_STEPS = 40
 ALLOWED_KEYS = {name: getattr(Keys, name) for name in ("ENTER", "TAB", "ESCAPE", "ARROW_UP", "ARROW_DOWN", "SPACE")}
+INTERACTIVE_ACTIONS = {
+    "start", "goto", "click", "fill", "press", "select", "wait_for",
+    "assert_visible", "assert_text", "assert_url_contains", "screenshot",
+    "scroll", "back", "refresh", "sleep",
+}
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -33,7 +40,7 @@ def _element(driver, selector: str, timeout: float):
     )
 
 
-def _start_tunnel(spec: dict, timeout: float):
+def _start_tunnel(spec: dict, timeout: float, *, workspace_dir: Path | None = None):
     tunnel = spec.get("ssh_tunnel")
     if not tunnel:
         return None
@@ -46,15 +53,19 @@ def _start_tunnel(spec: dict, timeout: float):
         raise ValueError("ssh_tunnel ports are invalid")
     if not re.fullmatch(r"[a-zA-Z0-9.:-]+", remote_host):
         raise ValueError("ssh_tunnel remote_host is invalid")
-    wrapper = (Path.cwd() / "ssh-tunnel").resolve()
+    workspace = Path(workspace_dir).resolve() if workspace_dir else Path.cwd().resolve()
+    wrapper = (workspace / "ssh-tunnel").resolve()
     if not wrapper.is_file():
-        raise ValueError("The SSH tunnel wrapper is unavailable")
+        raise ValueError(f"The SSH tunnel wrapper is unavailable in {workspace}")
+    if not os.access(wrapper, os.X_OK):
+        raise ValueError(f"The SSH tunnel wrapper is not executable: {wrapper}")
     forward = f"127.0.0.1:{local_port}:{remote_host}:{remote_port}"
     process = subprocess.Popen(
         [str(wrapper), forward],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
+        cwd=workspace,
     )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -68,6 +79,205 @@ def _start_tunnel(spec: dict, timeout: float):
             time.sleep(0.15)
     process.terminate()
     raise RuntimeError("Timed out waiting for the SSH browser tunnel")
+
+
+class InteractiveBrowserSession:
+    """A browser that remains alive while the QA agent observes and acts turn-by-turn."""
+
+    def __init__(
+        self,
+        output_dir: Path,
+        driver_factory: Callable[..., Any] | None = None,
+        workspace_dir: Path | None = None,
+    ):
+        self.output_dir = Path(output_dir).resolve()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.driver_factory = driver_factory or webdriver.Chrome
+        self.workspace_dir = Path(workspace_dir).resolve() if workspace_dir else Path.cwd().resolve()
+        self.driver = None
+        self.tunnel_process = None
+        self.timeout = 15.0
+        self.step = 0
+
+    def start(self, action: dict) -> None:
+        if self.driver is not None:
+            return
+        self.timeout = min(max(float(action.get("timeout_seconds") or 15), 1), 45)
+        width = min(max(int(action.get("viewport_width") or 1440), 320), 1920)
+        height = min(max(int(action.get("viewport_height") or 900), 320), 1080)
+        local_port = int(action.get("tunnel_local_port") or 0)
+        remote_port = int(action.get("tunnel_remote_port") or 0)
+        tunnel = None
+        if local_port or remote_port:
+            tunnel = {
+                "local_port": local_port,
+                "remote_port": remote_port,
+                "remote_host": str(action.get("tunnel_remote_host") or "127.0.0.1"),
+            }
+        self.tunnel_process = _start_tunnel(
+            {"ssh_tunnel": tunnel},
+            self.timeout,
+            workspace_dir=self.workspace_dir,
+        )
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-background-networking")
+        options.add_argument(f"--window-size={width},{height}")
+        options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+        self.driver = self.driver_factory(options=options)
+        self.driver.set_page_load_timeout(self.timeout)
+        if str(action.get("url") or "").strip():
+            self.driver.get(str(action["url"]).strip())
+
+    def _require_driver(self):
+        if self.driver is None:
+            raise RuntimeError("Start the browser before requesting another browser action")
+        return self.driver
+
+    def _act(self, action: dict) -> None:
+        operation = str(action.get("type") or "").strip().lower()
+        if operation not in INTERACTIVE_ACTIONS:
+            raise ValueError(f"Unsupported interactive browser action: {operation}")
+        if operation == "start":
+            self.start(action)
+            return
+        driver = self._require_driver()
+        selector = str(action.get("selector") or "")
+        if operation == "goto":
+            driver.get(str(action.get("url") or ""))
+        elif operation == "click":
+            WebDriverWait(driver, self.timeout).until(
+                conditions.element_to_be_clickable((By.CSS_SELECTOR, selector))
+            ).click()
+        elif operation == "fill":
+            element = _element(driver, selector, self.timeout)
+            element.clear()
+            element.send_keys(str(action.get("value") or ""))
+        elif operation == "press":
+            key = str(action.get("key") or "ENTER").upper()
+            if key not in ALLOWED_KEYS:
+                raise ValueError(f"Unsupported key: {key}")
+            _element(driver, selector, self.timeout).send_keys(ALLOWED_KEYS[key])
+        elif operation == "select":
+            Select(_element(driver, selector, self.timeout)).select_by_value(str(action.get("value") or ""))
+        elif operation == "wait_for":
+            WebDriverWait(driver, self.timeout).until(
+                conditions.visibility_of_element_located((By.CSS_SELECTOR, selector))
+            )
+        elif operation == "assert_visible":
+            if not _element(driver, selector, self.timeout).is_displayed():
+                raise AssertionError(f"Element is not visible: {selector}")
+        elif operation == "assert_text":
+            scope = _element(driver, selector, self.timeout) if selector else driver.find_element(By.TAG_NAME, "body")
+            expected = str(action.get("text") or "")
+            if expected not in scope.text:
+                raise AssertionError(f"Expected text was not found: {expected}")
+        elif operation == "assert_url_contains":
+            expected = str(action.get("text") or action.get("value") or "")
+            if expected not in driver.current_url:
+                raise AssertionError(f"URL does not contain: {expected}")
+        elif operation == "scroll":
+            amount = min(max(int(float(action.get("value") or 650)), -5000), 5000)
+            driver.execute_script("window.scrollBy(0, arguments[0]);", amount)
+        elif operation == "back":
+            driver.back()
+        elif operation == "refresh":
+            driver.refresh()
+        elif operation == "sleep":
+            time.sleep(min(max(float(action.get("seconds") or 1), 0), 5))
+        # screenshot needs no mutation; every action receives an observation screenshot below.
+
+    def _interactive_elements(self) -> list[dict]:
+        driver = self._require_driver()
+        script = r"""
+const nodes = [...document.querySelectorAll('a,button,input,textarea,select,[role="button"],[tabindex]')];
+function selectorFor(el) {
+  if (el.id) return '#' + CSS.escape(el.id);
+  const test = el.getAttribute('data-testid');
+  if (test) return `[data-testid="${CSS.escape(test)}"]`;
+  const name = el.getAttribute('name');
+  if (name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+  const parts = [];
+  let node = el;
+  while (node && node.nodeType === 1 && node !== document.documentElement) {
+    let part = node.tagName.toLowerCase();
+    const siblings = node.parentElement ? [...node.parentElement.children].filter(x => x.tagName === node.tagName) : [];
+    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+    parts.unshift(part);
+    node = node.parentElement;
+  }
+  return parts.join(' > ');
+}
+return nodes.filter(el => {
+  const r = el.getBoundingClientRect();
+  const s = getComputedStyle(el);
+  return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+}).slice(0, 120).map(el => ({
+  selector: selectorFor(el),
+  tag: el.tagName.toLowerCase(),
+  type: el.getAttribute('type') || '',
+  text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 180),
+  disabled: !!el.disabled,
+  checked: !!el.checked
+}));
+"""
+        return list(driver.execute_script(script) or [])
+
+    def observe(self, action_type: str, action_ok: bool = True, error: str = "") -> dict:
+        driver = self._require_driver()
+        self.step += 1
+        screenshot = self.output_dir / f"step-{self.step:03d}-{_safe_name(action_type, 'observe')}.png"
+        driver.save_screenshot(str(screenshot))
+        body = driver.find_element(By.TAG_NAME, "body").text
+        console = driver.get_log("browser")
+        return {
+            "success": action_ok,
+            "error": error,
+            "step": self.step,
+            "url": driver.current_url,
+            "title": driver.title,
+            "screenshot": str(screenshot),
+            "visible_text": body[:12000],
+            "interactive_elements": self._interactive_elements(),
+            "console": console[-100:],
+        }
+
+    def perform(self, action: dict) -> dict:
+        operation = str(action.get("type") or "").strip().lower()
+        try:
+            self._act(action)
+            return self.observe(operation)
+        except Exception as exc:
+            if self.driver is None:
+                return {
+                    "success": False,
+                    "error": str(exc),
+                    "step": self.step,
+                    "url": "",
+                    "title": "",
+                    "screenshot": "",
+                    "visible_text": "",
+                    "interactive_elements": [],
+                    "console": [],
+                }
+            return self.observe(operation, action_ok=False, error=str(exc))
+
+    def close(self) -> None:
+        try:
+            if self.driver is not None:
+                self.driver.quit()
+        finally:
+            self.driver = None
+            if self.tunnel_process is not None and self.tunnel_process.poll() is None:
+                self.tunnel_process.terminate()
+                try:
+                    self.tunnel_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.tunnel_process.kill()
+            self.tunnel_process = None
 
 
 def run_spec(spec: dict, output_dir: Path) -> dict:

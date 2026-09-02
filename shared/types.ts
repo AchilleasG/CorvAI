@@ -1,3 +1,30 @@
+export type UserNote = {
+  id: string;
+  content: string;
+  source: string;
+  tags: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+  expires_at?: string | null;
+  is_timed?: boolean;
+};
+
+export type KnowledgeEntityType = "location" | "person";
+export type KnowledgeEntity = {
+  id: string;
+  knowledge_type: KnowledgeEntityType;
+  name: string;
+  description: string;
+  data: Record<string, unknown> & { latitude?: number; longitude?: number; relationship?: string; facts?: string[] };
+  source: string;
+  tags: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+  distance?: number;
+};
+export type KnowledgeSearchResult = KnowledgeEntity | (UserNote & { knowledge_type: "note"; distance?: number });
+export type LocationSearchResult = { display_name:string; name:string; latitude:number; longitude:number; category:string; place_type:string; importance:number };
+
 export type ChatListItem = {
   chat_id: string;
   chat_nickname?: string | null;
@@ -15,6 +42,20 @@ export type Message = {
   trace_id?: string | null;
   call_id?: string | null;
   job_id?: string | null;
+  metadata?: {
+    attachments?: ManagedFile[];
+    sources?: MessageSource[];
+    [key: string]: unknown;
+  };
+};
+
+export type MessageSource = { title: string; url: string; site_name?: string };
+
+export type ManagedFile = {
+  id: string; filename: string; content_type: string; size: number; checksum_sha256: string;
+  metadata: Record<string, unknown>; tags: string[]; session_id?: string | null;
+  turn_id?: string | null; delegation_id?: string | null; assistant_message_id?: string | null; download_url: string;
+  created_at: string; updated_at: string;
 };
 
 export type SendTextResponse = {
@@ -87,6 +128,12 @@ export type SettingsPayload = {
   study_model?: string;
   cache_mode?: string;
   max_function_result_chars?: number;
+  call_voice?: string;
+  call_voice_options?: string[];
+  codex_auth_mode?: "profile" | "api_key";
+  codex_api_key?: string;
+  codex_api_key_configured?: boolean;
+  codex_api_key_hint?: string;
 };
 
 export type StudyCourse = {
@@ -253,6 +300,8 @@ export type CalendarReplanResult = {
   created: number;
   updated: number;
   trace_id: string;
+  planner_summary?: string;
+  model_calls?: number;
   objective_sync?: {
     purged_soft_events?: number;
     canceled_slots?: number;
@@ -381,7 +430,7 @@ export type ScheduledTask = {
   start_at?: string | null;
   next_run_at?: string | null;
   last_run_at?: string | null;
-  status: "active" | "paused" | "completed" | "canceled";
+  status: "active" | "paused" | "completed" | "failed" | "canceled";
   is_running: boolean;
   created_at?: string | null;
   updated_at?: string | null;
@@ -469,6 +518,7 @@ export type SshMachine = {
   auth_type: "password" | "private_key" | "agent";
   has_credentials: boolean;
   allow_ai_commands: boolean;
+  is_default: boolean;
   connect_timeout_seconds: number;
   command_timeout_seconds: number;
   keepalive_seconds: number;
@@ -492,6 +542,7 @@ export type SshMachineInput = {
   private_key?: string;
   passphrase?: string;
   allow_ai_commands?: boolean;
+  is_default?: boolean;
   connect_timeout_seconds?: number;
   command_timeout_seconds?: number;
   keepalive_seconds?: number;
@@ -533,11 +584,30 @@ export type SshCommandRecord = {
   created_at: string;
 };
 
+export type CodexUsageWindow = {
+  used_percent: number;
+  remaining_percent: number;
+  resets_at?: number | null;
+  window_minutes?: number | null;
+};
+
+export type CodexProfileUsage = {
+  available: boolean;
+  reason?: string;
+  plan_type?: string | null;
+  limit_name?: string | null;
+  primary?: CodexUsageWindow | null;
+  secondary?: CodexUsageWindow | null;
+  credits?: { has_credits: boolean; unlimited: boolean; balance?: string | null } | null;
+};
+
 export type CodingCliStatus = {
   installed: boolean;
   authenticated: boolean;
   version: string;
   auth_message: string;
+  auth_mode: "profile" | "api_key";
+  usage?: CodexProfileUsage | null;
   tmux_available: boolean;
   ssh_available: boolean;
   password_ssh_available: boolean;
@@ -635,6 +705,8 @@ export type FeatureDelegation = {
   pending_question: string;
   pending_options: string[];
   last_error: string;
+  can_retry_qa: boolean;
+  artifact_upload_url: string;
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
@@ -642,3 +714,13 @@ export type FeatureDelegation = {
   coding_turns: CodingTurn[];
   qa_runs: FeatureQaRun[];
 };
+
+
+export type WorkoutExercise = { id:string; name:string; aliases:string[]; category:string; muscle_group:string; equipment:string; instructions:string; metadata:Record<string,unknown> };
+export type WorkoutExerciseSpec = { name:string; sets?:number|null; reps?:number|string|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rest_seconds?:number|null; rpe?:number|null; notes?:string; category?:string; muscle_group?:string; equipment?:string; metadata?:Record<string,unknown> };
+export type WorkoutPlanExercise = { id:string; exercise:WorkoutExercise; order_index:number; sets?:number|null; reps:string; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rest_seconds?:number|null; notes:string; metadata:Record<string,unknown> };
+export type WorkoutPlan = { id:string; title:string; description:string; goal:string; source:"manual"|"import"|"corv"; schedule:Record<string,unknown>; active:boolean; metadata:Record<string,unknown>; created_at:string; updated_at:string; exercises:WorkoutPlanExercise[]; created_exercises?:string[] };
+export type WorkoutExerciseLog = { id:string; exercise:WorkoutExercise; order_index:number; sets?:number|null; reps?:number|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rpe?:number|null; notes:string; metadata:Record<string,unknown>; completed:boolean; completed_at?:string|null };
+export type WorkoutSession = { id:string; plan_id?:string|null; plan_title?:string|null; title:string; status:"active"|"completed"; started_at:string; ended_at?:string|null; duration_seconds:number; notes:string; metadata:Record<string,unknown>; exercises:WorkoutExerciseLog[]; created_exercises?:string[] };
+export type WorkoutGoal = { id:string; title:string; metric:"sessions_per_week"|"minutes_per_week"|"exercise_weight_kg"; target_value:number; unit:string; exercise_id?:string|null; exercise_name?:string|null; start_date?:string|null; end_date?:string|null; active:boolean; metadata:Record<string,unknown>; current_value:number; progress_percent:number };
+export type WorkoutDashboard = { days:number; session_count:number; current_streak_days:number; trained_days:number; current_week_sessions:number; daily:Array<{date:string;sessions:number;duration_minutes:number;volume_kg:number}>; weekly:Array<{week_start:string;sessions:number}>; exercise_trend:Array<{date:string;exercise:string;weight_kg?:number|null;volume_kg:number;reps?:number|null;sets?:number|null}>; goals:WorkoutGoal[] };

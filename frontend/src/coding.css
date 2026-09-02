@@ -22,6 +22,14 @@
 .coding-status-chip.ready { color: #a7f3d0; }
 .coding-status-chip.ready i { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: #2ad1a3; box-shadow: 0 0 0 3px rgba(42, 209, 163, 0.1); }
 .coding-status-chip.access { color: #cbd5e1; }
+.codex-usage-card { display: grid; gap: 0.85rem; margin-bottom: 1rem; border-color: rgba(96, 165, 250, 0.26); background: linear-gradient(135deg, rgba(30, 64, 175, 0.1), rgba(15, 23, 42, 0.76)); }
+.codex-usage-heading, .codex-usage-window > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; }
+.codex-usage-heading h3 { margin: 0.15rem 0 0; }
+.codex-usage-windows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; }
+.codex-usage-window { display: grid; gap: 0.45rem; min-width: 0; padding: 0.75rem; border: 1px solid rgba(148, 163, 184, 0.14); border-radius: 0.75rem; background: rgba(2, 6, 23, 0.34); }
+.codex-usage-window span, .codex-usage-window small { color: var(--muted); font-size: 0.75rem; }
+.codex-usage-track { height: 0.42rem; overflow: hidden; border-radius: 999px; background: rgba(148, 163, 184, 0.16); }
+.codex-usage-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2ad1a3, #60a5fa); }
 .coding-auth-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.75fr); gap: 1.25rem; align-items: center; margin-bottom: 1rem; border-color: rgba(42, 209, 163, 0.3); background: linear-gradient(135deg, rgba(6, 78, 59, 0.16), rgba(15, 23, 42, 0.76)); }
 .coding-auth-card h3 { margin: 0.15rem 0 0.45rem; }
 .coding-auth-card p { margin: 0.25rem 0; }
@@ -40,9 +48,16 @@
 .coding-facts small { color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.68rem; }
 .coding-decision { border-color: rgba(245, 158, 11, 0.4); background: linear-gradient(135deg, rgba(120, 53, 15, 0.18), rgba(15, 23, 42, 0.72)); }
 .coding-options { display: flex; flex-wrap: wrap; gap: 0.55rem; margin: 0.8rem 0; }
+.coding-option { min-height: 2.75rem; border-color: rgba(245, 158, 11, 0.42); background: rgba(245, 158, 11, 0.08); color: #fde68a; text-align: left; }
 .coding-decision-input, .coding-terminal-input { display: flex; gap: 0.55rem; align-items: center; }
 .coding-task { display: grid; gap: 0.8rem; }
 .coding-task textarea { resize: vertical; min-height: 8rem; }
+.coding-task-dictation { position: relative; }
+.coding-task-dictation textarea { display: block; padding-right: 3.5rem; }
+.coding-task-mic { position: absolute; right: 0.7rem; bottom: 0.7rem; display: inline-grid; place-items: center; width: 38px; height: 38px; padding: 0; border: 1px solid rgba(42, 209, 163, 0.38); border-radius: 50%; background: rgba(15, 23, 42, 0.94); color: var(--accent); cursor: pointer; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25); }
+.coding-task-mic:hover { border-color: var(--accent); background: rgba(42, 209, 163, 0.15); }
+.coding-task-mic.recording { border-color: #fb7185; background: rgba(225, 29, 72, 0.2); color: #fda4af; box-shadow: 0 0 0 4px rgba(251, 113, 133, 0.12); }
+.coding-task-mic-stop { width: 11px; height: 11px; border-radius: 2px; background: currentColor; }
 .coding-terminal pre { height: min(55vh, 34rem); min-height: 20rem; overflow: auto; margin: 0.75rem 0; padding: 1rem; border: 1px solid rgba(148, 163, 184, 0.16); border-radius: 0.7rem; background: #030712; color: #d1fae5; font: 0.82rem/1.35 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .coding-terminal-input span { color: #2ad1a3; font: 700 1.2rem ui-monospace, monospace; }
 .coding-terminal-keys { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.65rem; }
@@ -88,6 +103,7 @@
 .coding-turn header strong { color: var(--text); }
 .coding-turn-prompt { color: var(--muted); white-space: pre-wrap; }
 .coding-turn-question { color: #fbbf24; }
+.coding-turn-options { margin-top: 0.45rem; color: #fde68a; font-size: 0.82rem; }
 .coding-turn-error { color: #fda4af; }
 .ghost.danger { color: #fda4af; border-color: rgba(251, 113, 133, 0.3); }
 .feature-delegations { display: grid; gap: 0.85rem; }
@@ -135,7 +151,7 @@
 @media (max-width: 900px) {
   .coding-layout { grid-template-columns: 1fr; }
   .coding-session-list { position: static; max-height: 14rem; overflow-y: auto; }
-  .coding-facts { grid-template-columns: 1fr; }
+  .coding-facts, .codex-usage-windows { grid-template-columns: 1fr; }
   .coding-terminal pre { height: 45vh; min-height: 16rem; }
   .coding-turn header { flex-direction: column; gap: 0.2rem; }
   .coding-auth-card { grid-template-columns: 1fr; }
@@ -150,3 +166,51 @@
   .feature-flow { grid-template-columns: 1fr; gap: 0.6rem; }
   .feature-flow b { display: none; }
 }
+
+/* Keep unpredictable session output from defining the application's width. */
+.coding-panel { min-width: 0; max-width: 100%; overflow-x: clip; }
+.coding-panel *, .coding-panel *::before, .coding-panel *::after { box-sizing: border-box; }
+.coding-layout { width: 100%; min-width: 0; max-width: 100%; }
+.coding-layout > *,
+.coding-workspace > *,
+.coding-session-detail,
+.coding-session-files,
+.coding-live-logs,
+.coding-history,
+.feature-delegations,
+.feature-detail,
+.feature-report { min-width: 0; max-width: 100%; }
+.coding-session-list { min-width: 0; max-width: 100%; overflow-x: hidden; }
+.coding-turn { min-width: 0; max-width: 100%; overflow: hidden; }
+.coding-turn p,
+.coding-turn-options,
+.feature-detail p,
+.feature-detail li,
+.feature-report p,
+.feature-report li,
+.coding-log-entry p,
+.coding-log-section > h4,
+.coding-device-code span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.feature-tabs button { max-width: min(20rem, 85vw); overflow: hidden; }
+.feature-tabs strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.coding-panel .card-head,
+.coding-log-controls,
+.coding-decision-input,
+.coding-terminal-input { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.coding-panel .card-head > div,
+.coding-decision-input input,
+.coding-terminal-input input { min-width: 0; }
+
+@media (max-width: 900px) {
+  .coding-session-list {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+.coding-file-picker { display:inline-flex; width:max-content; margin-top:10px; padding:8px 12px; border:1px solid var(--border); border-radius:9px; cursor:pointer; font-size:12px; font-weight:600; }

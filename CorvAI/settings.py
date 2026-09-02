@@ -20,6 +20,8 @@ load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+CORV_PUBLIC_BASE_URL = os.getenv("CORV_PUBLIC_BASE_URL", "").rstrip("/")
+
 
 def _resolve_log_file(filename: str) -> str:
     """Return a writable log path, falling back to /tmp when project root isn't writable."""
@@ -95,12 +97,14 @@ INSTALLED_APPS = [
     'chat',
     'orchestration.apps.OrchestrationConfig',
     'study.apps.StudyConfig',
+    'workout.apps.WorkoutConfig',
     'ssh_connections.apps.SshConnectionsConfig',
     'coding.apps.CodingConfig',
     'openai_integration',
 ]
 
 CORV_CODING_DIR = os.getenv("CORV_CODING_DIR", "/var/lib/corv-coding")
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("CORV_MAX_UPLOAD_SIZE", str(100 * 1024 * 1024)))
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -278,6 +282,10 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = os.getenv("TIME_ZONE", TIME_ZONE)
 CELERY_BEAT_SCHEDULE = {
+    "cleanup-expired-notes": {
+        "task": "orchestration.tasks.cleanup_expired_notes",
+        "schedule": 300.0,  # every 5 minutes
+    },
     "poll-soft-events": {
         "task": "orchestration.tasks.poll_soft_events_task",
         "schedule": 300.0,  # every 5 minutes
@@ -295,3 +303,6 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 15.0,  # every 15 seconds
     },
 }
+
+# User-triggered location-note geocoding; override to switch providers/self-host.
+NOMINATIM_BASE_URL = os.getenv("NOMINATIM_BASE_URL", "https://nominatim.openstreetmap.org")

@@ -3,24 +3,30 @@ import corvLogo from "./assets/corv-logo.png";
 
 export type WorkspaceSection =
   | "chat"
+  | "notes"
   | "calendar"
   | "scheduler"
   | "messages"
   | "calls"
   | "study"
+  | "workout"
   | "ssh"
   | "coding"
+  | "files"
   | "settings";
 
 const WORKSPACE_SECTIONS: ReadonlyArray<{ key: WorkspaceSection; label: string }> = [
   { key: "chat", label: "Chat" },
+  { key: "notes", label: "Notes" },
   { key: "calendar", label: "Calendar" },
   { key: "scheduler", label: "Scheduler" },
   { key: "messages", label: "Messages" },
   { key: "calls", label: "Calls" },
   { key: "study", label: "Study" },
+  { key: "workout", label: "Workout" },
   { key: "ssh", label: "SSH" },
   { key: "coding", label: "Coding" },
+  { key: "files", label: "Files" },
   { key: "settings", label: "Settings" },
 ];
 

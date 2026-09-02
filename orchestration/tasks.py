@@ -13,6 +13,15 @@ from orchestration.tools.soft_events import SoftPlannerJobService
 logger = logging.getLogger(__name__)
 
 
+@shared_task(name="orchestration.tasks.cleanup_expired_notes")
+def cleanup_expired_notes_task():
+    from orchestration.services import UserInfoService
+    deleted = UserInfoService.cleanup_expired_notes()
+    if deleted:
+        logger.info("Soft-deleted %s expired timed note(s)", deleted)
+    return {"deleted": deleted}
+
+
 @shared_task(name="orchestration.tasks.poll_soft_events_task")
 def poll_soft_events_task():
     """

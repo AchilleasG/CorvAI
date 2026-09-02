@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import uuid
@@ -11,8 +12,10 @@ from ninja.files import UploadedFile
 from openai import BadRequestError
 
 from chat.services import ChatService
+from coding.files import file_payload, resolve_files
 from input.schemas import TextInputIn, TextInputOut
 from openai_integration.services import ChatAIService
+from orchestration.presence import PresenceService
 
 router = Router(tags=["Interaction"])
 
@@ -43,7 +46,10 @@ def receive_text(request, payload: TextInputIn):
     # Example: reject empty input
     if not user_text:
         return {"success": False, "message": "No text provided"}
-    response = ChatService.handle_user_input(payload.chat_id, user_text)
+    metadata = PresenceService.message_metadata(payload.metadata)
+    metadata["attachment_file_ids"] = payload.file_ids
+    metadata["attachments"] = [file_payload(request, item) for item in resolve_files(payload.file_ids)]
+    response = ChatService.handle_user_input(payload.chat_id, user_text, metadata=metadata)
     return response
 
 
@@ -54,6 +60,7 @@ def input_voice(
     request,
     chat_id: str = Form(...),
     language: str = Form(""),
+    metadata: str = Form(""),
     file: UploadedFile = File(...)
 ):
     chat_uuid = uuid.UUID(chat_id)
@@ -102,5 +109,11 @@ def input_voice(
             {"success": False, "message": "No speech was detected in the recording"},
             status=400,
         )
-    response = ChatService.handle_user_input(chat_uuid, transcription)
+    try:
+        client_metadata = json.loads(metadata) if metadata else {}
+    except (TypeError, ValueError):
+        client_metadata = {}
+    response = ChatService.handle_user_input(
+        chat_uuid, transcription, metadata=PresenceService.message_metadata(client_metadata)
+    )
     return JsonResponse(response, status=200)

@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from django.utils import timezone
@@ -158,6 +159,43 @@ class SshConnectionManager:
                 client.close()
                 SshMachine.objects.filter(pk=machine.pk).update(last_error=str(exc))
                 raise
+
+    @classmethod
+    def download_file(
+        cls,
+        machine: SshMachine,
+        remote_path: str,
+        destination: Path,
+        *,
+        max_bytes: int = 50 * 1024 * 1024,
+    ) -> dict:
+        remote_path = str(remote_path or "").strip()
+        if not remote_path:
+            raise ValueError("remote_path is required")
+        cls.connect(machine)
+        key = cls._session_key(machine)
+        with cls._lock:
+            session = cls._sessions[key]
+            sftp = session.client.open_sftp()
+            try:
+                attributes = sftp.stat(remote_path)
+                size = int(attributes.st_size)
+                if size < 0 or size > max_bytes:
+                    raise ValueError(
+                        f"Remote file is {size} bytes; the maximum fetch size is {max_bytes} bytes"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with destination.open("wb") as handle:
+                    sftp.getfo(remote_path, handle)
+                actual_size = destination.stat().st_size
+                if actual_size != size:
+                    raise IOError(
+                        f"Remote file changed during transfer (expected {size} bytes, received {actual_size})"
+                    )
+                session.last_used_at = time.monotonic()
+                return {"remote_path": remote_path, "size": actual_size}
+            finally:
+                sftp.close()
 
     @classmethod
     def disconnect(cls, machine: SshMachine) -> dict:
@@ -314,7 +352,12 @@ class SshConnectionManager:
                         raise RuntimeError("Remote shell closed before the command completed")
                     elif time.monotonic() >= deadline:
                         terminal.channel.send("\x03")
-                        raise TimeoutError(f"Command exceeded its {timeout}s timeout; interrupt was sent")
+                        raise TimeoutError(
+                            f"SSH command timed out after {timeout} seconds on '{machine.name}'. "
+                            "Corv interrupted the remote command, so it did not receive a completion "
+                            "status. Narrow the command, inspect a smaller path, or retry with a "
+                            "larger timeout_seconds value."
+                        )
                     else:
                         time.sleep(0.02)
 
@@ -368,3 +411,95 @@ class SshConnectionManager:
             source=source,
             timeout_seconds=timeout_seconds,
         )
+
+    @classmethod
+    def run_exec_command(
+        cls,
+        machine: SshMachine,
+        command: str,
+        *,
+        source: str = SshCommandRecord.SOURCE_API,
+        timeout_seconds: int | None = None,
+    ) -> dict:
+        """Run an isolated command channel over the persistent machine transport."""
+        command = (command or "").strip()
+        if not command:
+            raise ValueError("Command cannot be empty")
+        if source == SshCommandRecord.SOURCE_ASSISTANT and not machine.allow_ai_commands:
+            raise PermissionError(f"AI command execution is disabled for machine '{machine.name}'")
+        if not cls.is_connected(machine):
+            cls.connect(machine)
+        connection = cls._sessions[cls._session_key(machine)]
+        transport = connection.client.get_transport()
+        if not transport or not transport.is_active():
+            raise RuntimeError("The managed SSH transport is unavailable")
+
+        started = time.monotonic()
+        record = SshCommandRecord.objects.create(machine=machine, command=command, source=source)
+        channel = None
+        timeout = timeout_seconds or machine.command_timeout_seconds
+        stdout = bytearray()
+        stderr = bytearray()
+        truncated = False
+        try:
+            channel = transport.open_session(timeout=machine.connect_timeout_seconds)
+            channel.exec_command(command)
+            # Start the execution deadline only after this command owns a channel.
+            deadline = time.monotonic() + timeout
+            while True:
+                received = False
+                if channel.recv_ready():
+                    chunk = channel.recv(32768)
+                    received = True
+                    remaining = MAX_OUTPUT_BYTES - len(stdout) - len(stderr)
+                    if remaining > 0:
+                        stdout.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        truncated = True
+                if channel.recv_stderr_ready():
+                    chunk = channel.recv_stderr(32768)
+                    received = True
+                    remaining = MAX_OUTPUT_BYTES - len(stdout) - len(stderr)
+                    if remaining > 0:
+                        stderr.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        truncated = True
+                if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                    break
+                if time.monotonic() >= deadline:
+                    channel.close()
+                    raise TimeoutError(
+                        f"SSH command timed out after {timeout} seconds on '{machine.name}'. "
+                        "Corv closed only this command's SSH channel, so no completion status was "
+                        "received and the shared SSH connection remains usable. Narrow the command, "
+                        "inspect a smaller path, or retry with a larger timeout_seconds value."
+                    )
+                if not received:
+                    time.sleep(0.02)
+
+            exit_status = channel.recv_exit_status()
+            duration_ms = int((time.monotonic() - started) * 1000)
+            record.exit_status = exit_status
+            record.duration_ms = duration_ms
+            record.succeeded = exit_status == 0
+            record.save(update_fields=["exit_status", "duration_ms", "succeeded"])
+            return {
+                "machine_id": str(machine.pk),
+                "machine_name": machine.name,
+                "command": command,
+                "stdout": stdout.decode("utf-8", errors="replace"),
+                "stderr": stderr.decode("utf-8", errors="replace"),
+                "exit_status": exit_status,
+                "duration_ms": duration_ms,
+                "truncated": truncated,
+                "connected": True,
+            }
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - started) * 1000)
+            record.duration_ms = duration_ms
+            record.error_summary = str(exc)
+            record.save(update_fields=["duration_ms", "error_summary"])
+            raise
+        finally:
+            if channel is not None and not channel.closed:
+                channel.close()

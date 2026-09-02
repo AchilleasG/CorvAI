@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import glob
 import json
+import mimetypes
 import os
 import re
 import signal
@@ -10,15 +11,19 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from django.conf import settings
+from django.core.files import File
 from django.db import close_old_connections
 from django.utils import timezone
 
-from coding.models import CodingSession, CodingTurn, FeatureDelegation, FeatureQaRun
+from coding.models import CodingSession, CodingTurn, FeatureDelegation, FeatureQaRun, ManagedFile
+from coding.ssh_broker import CodingSshBroker
 from ssh_connections.models import SshMachine
 from ssh_connections.services import SshConnectionManager
 
@@ -47,6 +52,12 @@ class CodingSessionService:
             )
         except Exception:
             # Notification delivery must never change the coding result.
+            pass
+        try:
+            from coding.chat_waits import CodingChatWaitService
+            CodingChatWaitService.publish_for_session(session)
+        except Exception:
+            # Chat delivery must never change the coding result.
             pass
 
     @staticmethod
@@ -92,78 +103,32 @@ class CodingSessionService:
 
         if not re.fullmatch(r"[^\s]+", machine.host) or not re.fullmatch(r"[^\s]+", machine.username):
             raise ValueError("SSH host and username cannot contain whitespace")
-        known_hosts = workspace / "known_hosts"
-        cls._write_private(known_hosts, cls._host_key_line(machine))
-        credentials = machine.get_credentials()
+        # Establish one Corv-owned transport up front. Delegated Codex processes
+        # only talk to the local broker and never receive SSH credentials.
+        SshConnectionManager.connect(machine)
         environment = os.environ.copy()
-        ssh_options = [
-            "Host target",
-            f"  HostName {machine.host}",
-            f"  Port {machine.port}",
-            f"  User {machine.username}",
-            f'  UserKnownHostsFile "{known_hosts}"',
-            "  StrictHostKeyChecking yes",
-            f"  ConnectTimeout {machine.connect_timeout_seconds}",
-            f"  ServerAliveInterval {machine.keepalive_seconds}",
-            "  ServerAliveCountMax 3",
-        ]
-        use_sshpass = False
-        sshpass_prompt = ""
-        if machine.auth_type == SshMachine.AUTH_PRIVATE_KEY:
-            key_text = credentials.get("private_key", "")
-            if not key_text:
-                raise ValueError("The selected SSH machine has no saved private key")
-            identity_file = workspace / "identity"
-            cls._write_private(identity_file, key_text.rstrip() + "\n")
-            ssh_options.extend(
-                [
-                    f'  IdentityFile "{identity_file}"',
-                    "  IdentitiesOnly yes",
-                    "  PreferredAuthentications publickey",
-                ]
-            )
-            passphrase = credentials.get("passphrase", "")
-            if passphrase:
-                use_sshpass = True
-                sshpass_prompt = "Enter passphrase for key"
-                environment["SSHPASS"] = passphrase
-        elif machine.auth_type == SshMachine.AUTH_PASSWORD:
-            password = credentials.get("password", "")
-            if not password:
-                raise ValueError("The selected SSH machine has no saved password")
-            use_sshpass = True
-            environment["SSHPASS"] = password
-            ssh_options.extend(
-                [
-                    "  PreferredAuthentications password,keyboard-interactive",
-                    "  PubkeyAuthentication no",
-                ]
-            )
-        elif machine.auth_type == SshMachine.AUTH_AGENT:
-            agent_socket = environment.get("SSH_AUTH_SOCK", "")
-            if not agent_socket or not os.path.exists(agent_socket):
-                raise ValueError(
-                    "SSH-agent authentication is not available inside the Corv container; use a saved private key or password"
-                )
-
-        config_path = workspace / "ssh_config"
-        cls._write_private(config_path, "\n".join(ssh_options) + "\n")
-        if use_sshpass and sshpass_prompt:
-            ssh_prefix = f"sshpass -e -P {shlex.quote(sshpass_prompt)} "
-        else:
-            ssh_prefix = "sshpass -e " if use_sshpass else ""
+        environment.pop("SSHPASS", None)
+        for legacy_name in ("identity", "ssh_config", "known_hosts"):
+            legacy_path = workspace / legacy_name
+            if legacy_path.is_file() or legacy_path.is_symlink():
+                legacy_path.unlink()
+        socket_path = workspace / "ssh-broker.sock"
+        CodingSshBroker.ensure(session, socket_path)
+        bridge = Path(settings.BASE_DIR) / "coding" / "ssh_bridge.py"
         wrapper = workspace / "ssh-target"
         cls._write_private(
             wrapper,
             "#!/bin/sh\n"
-            f"exec {ssh_prefix}ssh -F {shlex.quote(str(config_path))} target \"$@\"\n",
+            f"exec {shlex.quote(sys.executable)} {shlex.quote(str(bridge))} "
+            f"--socket {shlex.quote(str(socket_path))} command -- \"$@\"\n",
             executable=True,
         )
         tunnel_wrapper = workspace / "ssh-tunnel"
         cls._write_private(
             tunnel_wrapper,
             "#!/bin/sh\n"
-            f"exec {ssh_prefix}ssh -F {shlex.quote(str(config_path))} -N -o ExitOnForwardFailure=yes -L \"$1\" target\n",
+            f"exec {shlex.quote(sys.executable)} {shlex.quote(str(bridge))} "
+            f"--socket {shlex.quote(str(socket_path))} tunnel -- \"$1\"\n",
             executable=True,
         )
         browser_wrapper = workspace / "qa-browser"
@@ -203,14 +168,50 @@ The local directory containing this file is only a control workspace; do not tre
         qa_schema = {
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["passed", "failed", "blocked"]},
+                "status": {"type": "string", "enum": ["action", "passed", "failed", "blocked"]},
                 "summary": {"type": "string"},
                 "failures": {"type": "array", "items": {"type": "string"}},
                 "evidence": {"type": "array", "items": {"type": "string"}},
                 "question": {"type": "string"},
                 "options": {"type": "array", "items": {"type": "string"}},
+                "browser_applicable": {"type": "boolean"},
+                "action": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "none", "start", "goto", "click", "fill", "press", "select",
+                                "wait_for", "assert_visible", "assert_text", "assert_url_contains",
+                                "screenshot", "scroll", "back", "refresh", "sleep",
+                            ],
+                        },
+                        "url": {"type": "string"},
+                        "selector": {"type": "string"},
+                        "value": {"type": "string"},
+                        "key": {"type": "string"},
+                        "text": {"type": "string"},
+                        "name": {"type": "string"},
+                        "seconds": {"type": "number"},
+                        "timeout_seconds": {"type": "number"},
+                        "viewport_width": {"type": "integer"},
+                        "viewport_height": {"type": "integer"},
+                        "tunnel_local_port": {"type": "integer"},
+                        "tunnel_remote_port": {"type": "integer"},
+                        "tunnel_remote_host": {"type": "string"},
+                    },
+                    "required": [
+                        "type", "url", "selector", "value", "key", "text", "name", "seconds",
+                        "timeout_seconds", "viewport_width", "viewport_height", "tunnel_local_port",
+                        "tunnel_remote_port", "tunnel_remote_host",
+                    ],
+                    "additionalProperties": False,
+                },
             },
-            "required": ["status", "summary", "failures", "evidence", "question", "options"],
+            "required": [
+                "status", "summary", "failures", "evidence", "question", "options",
+                "browser_applicable", "action",
+            ],
             "additionalProperties": False,
         }
         (workspace / "qa-result-schema.json").write_text(json.dumps(qa_schema, indent=2), encoding="utf-8")
@@ -220,6 +221,8 @@ The local directory containing this file is only a control workspace; do not tre
 
     @staticmethod
     def cli_status() -> dict:
+        from coding.auth import CodexAuthService
+
         codex_path = shutil.which("codex")
         tmux_path = shutil.which("tmux")
         ssh_path = shutil.which("ssh")
@@ -234,16 +237,14 @@ The local directory containing this file is only a control workspace; do not tre
                 [codex_path, "--version"], capture_output=True, text=True, timeout=10, check=False
             )
             version = (version_result.stdout or version_result.stderr).strip()
-            auth_result = subprocess.run(
-                [codex_path, "login", "status"], capture_output=True, text=True, timeout=15, check=False
-            )
-            authenticated = auth_result.returncode == 0
-            auth_message = (auth_result.stdout or auth_result.stderr).strip()
+            authenticated, auth_message = CodexAuthService.selected_status(codex_path)
         return {
             "installed": bool(codex_path),
             "authenticated": authenticated,
             "version": version,
             "auth_message": auth_message,
+            "auth_mode": CodexAuthService.mode(),
+            "usage": CodexAuthService.profile_usage(codex_path) if CodexAuthService.mode() == CodexAuthService.MODE_PROFILE and authenticated else None,
             "tmux_available": bool(tmux_path),
             "ssh_available": bool(ssh_path),
             "password_ssh_available": bool(sshpass_path),
@@ -292,7 +293,10 @@ The local directory containing this file is only a control workspace; do not tre
         if session.codex_thread_id:
             return session.codex_thread_id
         workspace = str(cls.workspace_dir(session).resolve())
-        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        from coding.auth import CodexAuthService
+
+        codex_environment = CodexAuthService.process_environment(os.environ.copy())
+        codex_home = Path(codex_environment.get("CODEX_HOME", str(Path.home() / ".codex")))
         candidates = sorted(
             glob.glob(str(codex_home / "sessions" / "**" / "*.jsonl"), recursive=True),
             key=lambda item: os.path.getmtime(item),
@@ -320,27 +324,18 @@ The local directory containing this file is only a control workspace; do not tre
             cls.discover_thread_id(session)
             session.status = CodingSession.STATUS_NEEDS_INPUT if session.pending_question else CodingSession.STATUS_READY
             CodingSession.objects.filter(pk=session.pk).update(status=session.status)
-        if session.status == CodingSession.STATUS_RUNNING:
-            active_turn = session.turns.filter(
-                status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING]
-            ).first()
-            with cls._lock:
-                active_in_process = bool(active_turn and str(active_turn.pk) in cls._active_turns)
-            if active_turn and not active_in_process:
-                interruption = "Codex was interrupted by a Corv process restart; this session can be continued."
-                active_turn.status = CodingTurn.STATUS_FAILED
-                active_turn.error = interruption
-                active_turn.completed_at = timezone.now()
-                active_turn.save(update_fields=["status", "error", "completed_at"])
-                session.status = CodingSession.STATUS_FAILED
-                session.last_error = interruption
-                CodingSession.objects.filter(pk=session.pk).update(
-                    status=session.status,
-                    last_error=interruption,
-                )
         if direct_running and not session.codex_thread_id:
             cls.discover_thread_id(session)
         turns = session.turns.all()[:30] if include_turns else []
+        pending_question = session.pending_question
+        pending_options = session.pending_options
+        if session.status == CodingSession.STATUS_NEEDS_INPUT and (not pending_question or not pending_options):
+            waiting_turn = session.turns.filter(status=CodingTurn.STATUS_NEEDS_INPUT).first()
+            if waiting_turn:
+                pending_question = pending_question or waiting_turn.question
+                pending_options = pending_options or waiting_turn.options
+        if session.status == CodingSession.STATUS_NEEDS_INPUT and not pending_question:
+            pending_question = "Choose how Codex should continue."
         return {
             "id": str(session.pk),
             "name": session.name,
@@ -353,14 +348,48 @@ The local directory containing this file is only a control workspace; do not tre
             "codex_thread_id": session.codex_thread_id or None,
             "direct_terminal_running": direct_running,
             "last_summary": session.last_summary,
-            "pending_question": session.pending_question,
-            "pending_options": session.pending_options,
+            "pending_question": pending_question,
+            "pending_options": pending_options,
             "last_error": session.last_error,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
             "stopped_at": session.stopped_at.isoformat() if session.stopped_at else None,
             "turns": [cls.turn_payload(turn) for turn in turns],
         }
+
+    @classmethod
+    def recover_interrupted_turns(cls) -> int:
+        """Claim and resume managed turns left alive by a Corv process restart."""
+        candidates = list(CodingTurn.objects.filter(
+            session__status=CodingSession.STATUS_RUNNING,
+            status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING],
+        ).exclude(source=CodingTurn.SOURCE_FEATURE).select_related("session__machine"))
+        resumed = 0
+        for interrupted in candidates:
+            with cls._lock:
+                if str(interrupted.pk) in cls._active_turns:
+                    continue
+            claimed = CodingTurn.objects.filter(
+                pk=interrupted.pk,
+                status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING],
+                session__status=CodingSession.STATUS_RUNNING,
+            ).update(
+                status=CodingTurn.STATUS_CANCELLED,
+                error="Coding turn interrupted by a Corv process restart; automatically resumed on startup",
+                completed_at=timezone.now(),
+            )
+            if not claimed:
+                continue
+            interrupted.session.refresh_from_db()
+            try:
+                cls.start_turn(interrupted.session, interrupted.prompt, source=interrupted.source)
+                resumed += 1
+            except Exception as exc:
+                CodingSession.objects.filter(pk=interrupted.session_id).update(
+                    status=CodingSession.STATUS_FAILED,
+                    last_error=f"Could not automatically resume after restart: {exc}",
+                )
+        return resumed
 
     @classmethod
     def live_logs_payload(cls, session: CodingSession) -> dict:
@@ -405,16 +434,76 @@ The local directory containing this file is only a control workspace; do not tre
         }
 
     @classmethod
-    def start_turn(cls, session: CodingSession, prompt: str, source: str = CodingTurn.SOURCE_UI) -> CodingTurn:
-        from coding.auth import CodexDeviceAuthService
+    def capture_turn_artifacts(
+        cls,
+        turn: CodingTurn,
+        summary: str,
+        declared_paths: list | None = None,
+    ) -> list[ManagedFile]:
+        """Import files returned by Codex from its private workspace into ManagedFile."""
+        from coding.files import _store
+
+        workspace = cls.workspace_dir(turn.session).resolve()
+        candidates = [str(value) for value in (declared_paths or []) if isinstance(value, str)]
+        candidates.extend(re.findall(r"\[[^\]]*\]\(([^)]+)\)", summary or ""))
+        delegation = None
+        if turn.source == CodingTurn.SOURCE_FEATURE:
+            delegation = next(
+                (
+                    item for item in turn.session.delegations.all()
+                    if str(turn.pk) in item.coding_turn_ids
+                ),
+                None,
+            )
+        imported = []
+        seen = set()
+        for raw_path in candidates:
+            value = unquote(raw_path.strip()).removeprefix("file://")
+            if not value or "://" in value:
+                continue
+            path = Path(value)
+            if not path.is_absolute():
+                path = workspace / path
+            try:
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(workspace)
+            except (OSError, ValueError):
+                continue
+            if not resolved.is_file() or resolved in seen:
+                continue
+            seen.add(resolved)
+            existing = ManagedFile.objects.filter(
+                turn=turn,
+                filename=resolved.name,
+                size=resolved.stat().st_size,
+            ).first()
+            if existing:
+                imported.append(existing)
+                continue
+            with resolved.open("rb") as handle:
+                imported.append(_store(
+                    File(handle, name=resolved.name),
+                    resolved.name,
+                    mimetypes.guess_type(resolved.name)[0] or "application/octet-stream",
+                    turn.session,
+                    turn,
+                    {"source": "coding_turn", "workspace_path": str(resolved.relative_to(workspace))},
+                    ["artifact"],
+                    delegation,
+                ))
+        return imported
+
+    @classmethod
+    def start_turn(cls, session: CodingSession, prompt: str, source: str = CodingTurn.SOURCE_UI, file_ids=None) -> CodingTurn:
+        from coding.auth import CodexAuthService
 
         prompt = (prompt or "").strip()
         if not prompt:
             raise ValueError("Coding task cannot be empty")
         if session.status == CodingSession.STATUS_STOPPED:
             raise ValueError("This coding session has been stopped")
-        if not CodexDeviceAuthService._is_authenticated():
-            raise ValueError("Sign in to Codex from the Coding module before delegating a task")
+        if not CodexAuthService.is_authenticated():
+            raise ValueError("Configure the selected Codex authentication method in Settings")
         if cls.tmux_alive(session):
             raise ValueError("Close the direct Codex CLI before delegating a Corv-managed task")
         if source != CodingTurn.SOURCE_FEATURE and session.delegations.filter(
@@ -429,6 +518,11 @@ The local directory containing this file is only a control workspace; do not tre
             raise ValueError("This coding session already has an active feature delegation")
         if session.turns.filter(status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING]).exists():
             raise ValueError("This coding session already has a task running")
+        if file_ids:
+            from coding.files import materialize_inputs
+            cls.prepare_workspace(session)
+            paths = materialize_inputs(session, file_ids)
+            prompt += "\n\nAttached input files (read these as part of the request):\n" + "\n".join(f"- {path}" for path in paths)
         turn = CodingTurn.objects.create(session=session, prompt=prompt, source=source)
         CodingSession.objects.filter(pk=session.pk).update(
             status=CodingSession.STATUS_RUNNING,
@@ -455,6 +549,9 @@ The local directory containing this file is only a control workspace; do not tre
         final_message = ""
         try:
             workspace, environment = cls.prepare_workspace(session)
+            from coding.auth import CodexAuthService
+
+            environment = CodexAuthService.process_environment(environment)
             codex = shutil.which("codex")
             if not codex:
                 raise RuntimeError("Codex CLI is not installed in the Corv web container")
@@ -463,7 +560,10 @@ The local directory containing this file is only a control workspace; do not tre
                 "machine. Work autonomously and verify the result. If a material decision is truly "
                 "required, stop safely and return status needs_input with one concise question and "
                 "clear options. Otherwise return status completed with a concise summary and verification.\n\n"
-                f"Request:\n{turn.prompt}"
+                f"Request:\n{turn.prompt}\n\n"
+                "If the request produces files for the user, copy each finished artifact into the "
+                f"Corv workspace {cls.workspace_dir(session)} and return its workspace path in an "
+                "artifacts JSON array as well as linking it in the summary."
             )
             thread_id = session.codex_thread_id or cls.discover_thread_id(session)
             command = cls.managed_codex_command(codex, workspace, thread_id)
@@ -524,6 +624,8 @@ The local directory containing this file is only a control workspace; do not tre
             question = str(result.get("question") or "").strip()
             options = [str(item) for item in (result.get("options") or [])][:10]
             needs_input = result.get("status") == "needs_input"
+            if needs_input and not question:
+                question = summary or "Choose how Codex should continue."
             turn.status = CodingTurn.STATUS_NEEDS_INPUT if needs_input else CodingTurn.STATUS_COMPLETED
             turn.summary = summary
             turn.question = question
@@ -531,6 +633,11 @@ The local directory containing this file is only a control workspace; do not tre
             turn.completed_at = timezone.now()
             turn.event_log = live_log
             turn.save(update_fields=["status", "summary", "question", "options", "completed_at", "event_log", "codex_thread_id"])
+            if not needs_input:
+                declared_artifacts = result.get("artifacts", [])
+                if not isinstance(declared_artifacts, list):
+                    declared_artifacts = []
+                cls.capture_turn_artifacts(turn, summary, declared_artifacts)
             CodingSession.objects.filter(pk=session.pk).update(
                 status=CodingSession.STATUS_NEEDS_INPUT if needs_input else CodingSession.STATUS_READY,
                 last_summary=summary,
@@ -573,12 +680,12 @@ The local directory containing this file is only a control workspace; do not tre
 
     @classmethod
     def start_terminal(cls, session: CodingSession) -> dict:
-        from coding.auth import CodexDeviceAuthService
+        from coding.auth import CodexAuthService
 
         if session.status == CodingSession.STATUS_STOPPED:
             raise ValueError("This coding session has been stopped")
-        if not CodexDeviceAuthService._is_authenticated():
-            raise ValueError("Sign in to Codex from the Coding module before opening the CLI")
+        if not CodexAuthService.is_authenticated():
+            raise ValueError("Configure the selected Codex authentication method in Settings")
         if session.turns.filter(status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING]).exists():
             raise ValueError("Wait for the managed Codex task to finish before opening the direct CLI")
         if session.delegations.filter(
@@ -592,6 +699,7 @@ The local directory containing this file is only a control workspace; do not tre
         ).exists():
             raise ValueError("Stop or finish the active feature delegation before opening the direct CLI")
         workspace, environment = cls.prepare_workspace(session)
+        environment = CodexAuthService.process_environment(environment)
         if cls.tmux_alive(session):
             return cls.terminal_payload(session)
         codex = shutil.which("codex")
@@ -606,7 +714,13 @@ The local directory containing this file is only a control workspace; do not tre
         ]
         if environment.get("SSHPASS"):
             tmux_command.extend(["-e", f"SSHPASS={environment['SSHPASS']}"])
-        result = subprocess.run(tmux_command + command, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            tmux_command + command,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "Could not start Codex CLI")
         CodingSession.objects.filter(pk=session.pk).update(
@@ -697,6 +811,72 @@ The local directory containing this file is only a control workspace; do not tre
         session.status = CodingSession.STATUS_STOPPED
         session.stopped_at = timezone.now()
         session.save(update_fields=["status", "stopped_at", "updated_at"])
+        CodingSshBroker.stop(session)
+        return cls.session_payload(session)
+
+    @classmethod
+    def abort_delegation(cls, session: CodingSession) -> dict:
+        """Cancel current delegated work while keeping its coding session reusable."""
+        from coding.delegations import FeatureDelegationService
+
+        aborted = False
+        for delegation in session.delegations.filter(
+            status__in=[
+                FeatureDelegation.STATUS_QUEUED,
+                FeatureDelegation.STATUS_CODING,
+                FeatureDelegation.STATUS_QA,
+                FeatureDelegation.STATUS_FIXING,
+                FeatureDelegation.STATUS_NEEDS_INPUT,
+            ]
+        ):
+            FeatureDelegationService.stop(delegation)
+            aborted = True
+        active_turns = list(
+            session.turns.filter(
+                status__in=[
+                    CodingTurn.STATUS_QUEUED,
+                    CodingTurn.STATUS_RUNNING,
+                    CodingTurn.STATUS_NEEDS_INPUT,
+                ]
+            )
+        )
+        for turn in active_turns:
+            cls.cancel_turn(turn)
+            aborted = True
+        if not aborted:
+            raise ValueError("This coding session has no active delegation to abort")
+        session.refresh_from_db()
+        if session.status != CodingSession.STATUS_STOPPED:
+            session.status = CodingSession.STATUS_READY
+            session.pending_question = ""
+            session.pending_options = []
+            session.last_error = ""
+            session.save(
+                update_fields=[
+                    "status", "pending_question", "pending_options", "last_error", "updated_at"
+                ]
+            )
+        return cls.session_payload(session)
+
+    @classmethod
+    def resume(cls, session: CodingSession) -> dict:
+        if session.status != CodingSession.STATUS_STOPPED:
+            raise ValueError("Only a stopped coding session can be resumed")
+        if not session.machine.allow_ai_commands:
+            raise PermissionError(
+                f"Enable Corv command access on SSH machine '{session.machine.name}' before resuming"
+            )
+        session.status = CodingSession.STATUS_READY
+        session.stopped_at = None
+        session.last_error = ""
+        session.pending_question = ""
+        session.pending_options = []
+        session.save(
+            update_fields=[
+                "status", "stopped_at", "last_error", "pending_question",
+                "pending_options", "updated_at",
+            ]
+        )
         return cls.session_payload(session)
 
     @classmethod
@@ -718,6 +898,7 @@ The local directory containing this file is only a control workspace; do not tre
         if session.status != CodingSession.STATUS_STOPPED:
             raise ValueError("Stop the coding session before deleting it")
         workspace = cls.workspace_dir(session)
+        CodingSshBroker.stop(session)
         session.delete()
         if workspace.exists() and workspace.parent.resolve() == cls.root_dir().resolve():
             shutil.rmtree(workspace)

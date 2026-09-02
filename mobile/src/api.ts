@@ -13,7 +13,9 @@ export const {
   createChat,
   renameChat,
   deleteChat,
+  updatePresence,
   fetchMessages,
+  uploadFile,
   fetchJobMessages,
   fetchJobMessagesDirect,
   sendText,
@@ -23,6 +25,7 @@ export const {
   fetchUsageSummary,
   fetchSettings,
   updateSettings,
+  previewCallVoice,
   fetchCalendarCombined,
   fetchObjectiveRoots,
   fetchObjectiveTree,
@@ -65,6 +68,7 @@ export const {
   updateCallSession,
   addCallTranscriptEntry,
   createRealtimeToken,
+  runCallAction,
   fetchSshMachines,
   createSshMachine,
   updateSshMachine,
@@ -91,6 +95,7 @@ export const {
   sendCodingTerminalInput,
   closeCodingTerminal,
   stopCodingSession,
+  resumeCodingSession,
   fetchCodingSessionLogs,
   fetchFeatureDelegations,
   fetchFeatureDelegation,
@@ -99,9 +104,10 @@ export const {
   stopFeatureDelegation,
 } = api;
 
-export async function sendVoice(chat_id: string, uri: string) {
+export async function sendVoice(chat_id: string, uri: string, metadata: Record<string, unknown> = {}) {
   const formData = new FormData();
   formData.append("chat_id", chat_id);
+  formData.append("metadata", JSON.stringify(metadata));
   formData.append("file", {
     uri,
     name: "voice.m4a",

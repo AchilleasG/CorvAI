@@ -1,4 +1,5 @@
 import { StatusBar } from "expo-status-bar";
+import Markdown from "react-native-markdown-display";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -23,6 +24,7 @@ import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-cont
 import * as DocumentPicker from "expo-document-picker";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
+import * as Location from "expo-location";
 import Constants from "expo-constants";
 import messaging from "@react-native-firebase/messaging";
 import notifee, { EventType } from "@notifee/react-native";
@@ -36,6 +38,7 @@ import {
   cancelJob,
   createChat,
   deleteChat,
+  updatePresence,
   fetchChats,
   fetchJobs,
   fetchMessages,
@@ -54,8 +57,10 @@ import {
   uploadStudyMaterial,
   renameChat,
   sendText,
+  uploadFile,
   sendVoice,
   updateSettings,
+  previewCallVoice,
   fetchScheduledTasks,
   createScheduledTask,
   updateScheduledTask,
@@ -69,6 +74,7 @@ import {
   updateCallSession,
   addCallTranscriptEntry,
   createRealtimeToken,
+  runCallAction,
 } from "./src/api";
 import { registerFcmPushToken } from "./src/push";
 import {
@@ -80,6 +86,7 @@ import {
 } from "./src/notifications";
 import SshScreen from "./src/SshScreen";
 import CodingScreen from "./src/CodingScreen";
+import ObjectiveManager from "./src/ObjectiveManager";
 import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
   ChatListItem,
@@ -168,13 +175,35 @@ type MessageBubbleProps = {
   onShowJobLog: (jobId: string) => void;
 };
 
+const assistantMarkdownStyles = StyleSheet.create({
+  body: { color: "#e5e7eb", fontSize: 14, lineHeight: 21, margin: 0, padding: 0 },
+  paragraph: { marginTop: 0, marginBottom: 8 },
+  heading1: { color: "#f8fafc", fontSize: 20, fontWeight: "700", marginTop: 8, marginBottom: 6 },
+  heading2: { color: "#f8fafc", fontSize: 18, fontWeight: "700", marginTop: 8, marginBottom: 6 },
+  heading3: { color: "#f8fafc", fontSize: 16, fontWeight: "700", marginTop: 6, marginBottom: 4 },
+  strong: { color: "#f8fafc", fontWeight: "700" },
+  em: { fontStyle: "italic" },
+  bullet_list: { marginVertical: 4 },
+  ordered_list: { marginVertical: 4 },
+  list_item: { marginVertical: 2 },
+  code_inline: { color: "#d1fae5", backgroundColor: "#080d18", borderRadius: 4, paddingHorizontal: 4 },
+  fence: { color: "#e2e8f0", backgroundColor: "#080d18", borderColor: "#334155", borderWidth: 1, borderRadius: 8, padding: 10, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+  code_block: { color: "#e2e8f0", backgroundColor: "#080d18", borderColor: "#334155", borderWidth: 1, borderRadius: 8, padding: 10, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+  blockquote: { backgroundColor: "#111827", borderLeftColor: "#2ad1a3", borderLeftWidth: 3, paddingHorizontal: 10 },
+  link: { color: "#2ad1a3" },
+});
+
 function MessageBubble({ msg, isLastJobMessage, onShowJobLog }: MessageBubbleProps) {
   const isUser = msg.role === "user";
   return (
     <View style={[styles.messageRow, isUser ? styles.messageRowUser : styles.messageRowAssistant]}>
       <RoleBadge role={msg.role} />
       <View style={[styles.messageBubble, isUser ? styles.messageBubbleUser : styles.messageBubbleAssistant]}>
-        <Text style={isUser ? styles.messageTextUser : styles.messageTextAssistant}>{msg.text}</Text>
+        {isUser ? (
+          <Text style={styles.messageTextUser}>{msg.text}</Text>
+        ) : (
+          <Markdown style={assistantMarkdownStyles}>{msg.text}</Markdown>
+        )}
         {!!msg.created_at && (
           <Text style={isUser ? styles.messageTimeUser : styles.messageTimeAssistant}>
             {formatTime(msg.created_at)}
@@ -212,6 +241,7 @@ function InnerApp() {
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [settingsDraft, setSettingsDraft] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [studyCourses, setStudyCourses] = useState<StudyCourse[]>([]);
   const [studyMaterials, setStudyMaterials] = useState<StudyMaterial[]>([]);
@@ -274,6 +304,7 @@ function InnerApp() {
   );
   const [datePickerValue, setDatePickerValue] = useState<Date>(new Date());
   const [input, setInput] = useState("");
+  const [chatFiles, setChatFiles] = useState<DocumentPicker.DocumentPickerAsset[]>([]);
   const [sending, setSending] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -289,6 +320,40 @@ function InnerApp() {
   const [jobLogAnchorId, setJobLogAnchorId] = useState<string | null>(null);
   const messagesListRef = useRef<FlatList<Message> | null>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const locationRef = useRef<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    let subscription: Location.LocationSubscription | null = null;
+    let mounted = true;
+    void (async () => {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (!mounted || permission.status !== Location.PermissionStatus.GRANTED) return;
+      subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.High,
+          timeInterval: 60000,
+          distanceInterval: 25,
+        },
+        (position) => {
+          const location = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy_m: position.coords.accuracy,
+            altitude_m: position.coords.altitude,
+            captured_at: new Date(position.timestamp).toISOString(),
+            timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+            source: "mobile",
+          };
+          locationRef.current = location;
+          void updatePresence(location).catch(() => undefined);
+        },
+      );
+    })().catch(() => undefined);
+    return () => {
+      mounted = false;
+      subscription?.remove();
+    };
+  }, []);
   const callSeqRef = useRef(0);
 
   const selectedStudyCourse = useMemo(
@@ -794,8 +859,18 @@ function InnerApp() {
       setSending(true);
       setError(null);
       const chatId = await ensureChat();
-      await sendText(chatId, input.trim());
+      const uploaded = await Promise.all(chatFiles.map(async (file) => {
+        const blob = await (await fetch(file.uri)).blob();
+        return uploadFile(blob, { filename: file.name, tags: ["chat-input"] });
+      }));
+      await sendText(chatId, input.trim(), {
+        client_sent_at: new Date().toISOString(),
+        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        source: "mobile",
+        location: locationRef.current,
+      }, uploaded.map((file) => file.id));
       setInput("");
+      setChatFiles([]);
       const [msgs, jobsData] = await Promise.all([
         fetchMessages(chatId, true),
         fetchJobs(chatId),
@@ -846,7 +921,12 @@ function InnerApp() {
         return;
       }
       const chatId = await ensureChat();
-      await sendVoice(chatId, uri);
+      await sendVoice(chatId, uri, {
+        client_sent_at: new Date().toISOString(),
+        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        source: "mobile",
+        location: locationRef.current,
+      });
       const [msgs, jobsData] = await Promise.all([
         fetchMessages(chatId, true),
         fetchJobs(chatId),
@@ -875,6 +955,9 @@ function InnerApp() {
         soft_planner_model: settingsDraft.soft_planner_model?.trim() || undefined,
         cache_mode: settingsDraft.cache_mode?.trim() || undefined,
         max_function_result_chars: settingsDraft.max_function_result_chars || undefined,
+        call_voice: settingsDraft.call_voice || "marin",
+        codex_auth_mode: settingsDraft.codex_auth_mode || "profile",
+        codex_api_key: settingsDraft.codex_api_key?.trim() || undefined,
       };
       const updated = await updateSettings(payload);
       setSettings(updated);
@@ -884,6 +967,25 @@ function InnerApp() {
       setSettingsError(err.message || "Failed to save settings");
     } finally {
       setSavingSettings(false);
+    }
+  }
+
+  async function handlePreviewCallVoice(voice: string) {
+    try {
+      setPreviewingVoice(voice);
+      setSettingsError(null);
+      const preview = await previewCallVoice(voice);
+      const sound = new Audio.Sound();
+      await sound.loadAsync({ uri: `data:${preview.content_type};base64,${preview.audio_base64}` });
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) void sound.unloadAsync();
+      });
+      await sound.playAsync();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSettingsError(err.message || "Failed to preview voice");
+    } finally {
+      setPreviewingVoice(null);
     }
   }
 
@@ -1235,7 +1337,7 @@ function InnerApp() {
   async function refreshCallSessions() {
     try {
       setCallsLoading(true);
-      const sessions = await fetchCallSessions();
+      const sessions = await fetchCallSessions({ platform: "mobile" });
       setCallSessions(sessions);
       const ringing = sessions.find((s) => s.status === "ringing");
       if (ringing) {
@@ -1257,7 +1359,7 @@ function InnerApp() {
 
   async function answerCallSession(sessionId: string) {
     await updateCallSession(sessionId, { status: "in_call" });
-    const sessions = await fetchCallSessions();
+    const sessions = await fetchCallSessions({ platform: "mobile" });
     const target = sessions.find((s) => s.id === sessionId);
     if (target) {
       setActiveCall(target);
@@ -1342,6 +1444,29 @@ function InnerApp() {
         evt?.output_text ||
         evt?.text ||
         evt?.delta;
+      if (type === "response.function_call_arguments.done" && evt?.name === "perform_corv_action") {
+        let instruction = "";
+        try { instruction = JSON.parse(evt.arguments || "{}").instruction || ""; } catch {}
+        appendLiveTranscript(`system: Running ${instruction}`);
+        runCallAction(sessionId, instruction)
+          .then(({ result }) => {
+            appendLiveTranscript(`system: ${result}`);
+            dataChannelRef.current?.send?.(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "function_call_output", call_id: evt.call_id, output: result },
+            }));
+            dataChannelRef.current?.send?.(JSON.stringify({ type: "response.create" }));
+          })
+          .catch((error: any) => {
+            const result = `The action failed. ${error?.message || "Please try again."}`;
+            dataChannelRef.current?.send?.(JSON.stringify({
+              type: "conversation.item.create",
+              item: { type: "function_call_output", call_id: evt.call_id, output: result },
+            }));
+            dataChannelRef.current?.send?.(JSON.stringify({ type: "response.create" }));
+          });
+        return;
+      }
       const endSignal = (() => {
         const candidates: string[] = [];
         if (typeof outputText === "string") candidates.push(outputText);
@@ -1457,6 +1582,7 @@ function InnerApp() {
       const tokenResp = await createRealtimeToken(session.id);
       if (callSeq !== callSeqRef.current) return;
       const clientSecret =
+        tokenResp?.value ||
         tokenResp?.client_secret?.value ||
         tokenResp?.client_secret ||
         tokenResp?.client_secret?.client_secret ||
@@ -1499,7 +1625,7 @@ function InnerApp() {
       await pc.setLocalDescription(offer);
 
       const sdpResp = await fetch(
-        `https://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17`,
+        `https://api.openai.com/v1/realtime/calls`,
         {
           method: "POST",
           headers: {
@@ -1527,7 +1653,8 @@ function InnerApp() {
             response: {
               modalities: ["audio", "text"],
               instructions:
-                `Call goal: ${session.goal}. Be concise and helpful.` +
+                `Call goal: ${session.goal}. Reply in one crisp sentence when possible, without formatting. Be specific and dry-witty. ` +
+                "Use perform_corv_action whenever the user asks you to act. Try relevant actions and useful fallbacks before claiming you don't know, can't do it, or lack access; report results briefly. " +
                 " When the goal is achieved and it sounds like the conversation can end, " +
                 "you must send a final message that includes [END_CALL].",
             },
@@ -1536,7 +1663,10 @@ function InnerApp() {
       };
     } catch (err: any) {
       setError(err.message || "Failed to start call");
+      await updateCallSession(session.id, { status: "canceled" }).catch(() => undefined);
+      setActiveCall(null);
       await stopRealtimeCall();
+      await refreshCallSessions();
     } finally {
       setCallConnecting(false);
     }
@@ -1852,7 +1982,9 @@ function InnerApp() {
                 />
               )}
 
+              {!!chatFiles.length && <ScrollView horizontal contentContainerStyle={styles.attachmentRow}>{chatFiles.map((file, index) => <TouchableOpacity key={`${file.name}-${index}`} style={styles.attachmentChip} onPress={() => setChatFiles((items) => items.filter((_, i) => i !== index))}><Text style={styles.attachmentText} numberOfLines={1}>{file.name} ×</Text></TouchableOpacity>)}</ScrollView>}
               <View style={[styles.inputRow, { paddingBottom: Math.max(12, insets.bottom) }]}>
+                <TouchableOpacity style={styles.micButton} onPress={async () => { const result = await DocumentPicker.getDocumentAsync({ multiple: true, copyToCacheDirectory: true }); if (!result.canceled) setChatFiles((items) => [...items, ...result.assets]); }} accessibilityLabel="Attach files"><Ionicons name="attach" size={18} color="#e5e7eb" /></TouchableOpacity>
                 <TouchableOpacity
                   style={[
                     styles.micButton,
@@ -1941,6 +2073,26 @@ function InnerApp() {
               </TouchableOpacity>
             ))}
           </View>
+          <Text style={styles.label}>Corv call voice</Text>
+          <View style={styles.cacheRow}>
+            {(settingsDraft.call_voice_options || ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]).map((voice) => (
+              <TouchableOpacity
+                key={voice}
+                style={[styles.cachePill, settingsDraft.call_voice === voice && styles.cachePillActive]}
+                onPress={() => setSettingsDraft((prev) => ({ ...prev, call_voice: voice }))}
+                onLongPress={() => void handlePreviewCallVoice(voice)}
+              >
+                <Text style={[styles.cachePillText, settingsDraft.call_voice === voice && styles.cachePillTextActive]}>{voice}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <TouchableOpacity
+            style={[styles.secondaryButton, previewingVoice !== null && styles.buttonDisabled]}
+            onPress={() => void handlePreviewCallVoice(settingsDraft.call_voice || "marin")}
+            disabled={previewingVoice !== null}
+          >
+            <Text style={styles.secondaryButtonText}>{previewingVoice ? "Playing voice…" : "Preview selected voice"}</Text>
+          </TouchableOpacity>
           <Text style={styles.label}>Max function result chars</Text>
           <TextInput
             style={styles.input}
@@ -1958,6 +2110,31 @@ function InnerApp() {
             keyboardType="number-pad"
             placeholder="6000"
           />
+          <Text style={styles.label}>Codex authentication</Text>
+          <View style={styles.cacheRow}>
+            {(["profile", "api_key"] as const).map((mode) => (
+              <TouchableOpacity
+                key={mode}
+                style={[styles.cachePill, settingsDraft.codex_auth_mode === mode && styles.cachePillActive]}
+                onPress={() => setSettingsDraft((prev) => ({ ...prev, codex_auth_mode: mode }))}
+              >
+                <Text style={[styles.cachePillText, settingsDraft.codex_auth_mode === mode && styles.cachePillTextActive]}>
+                  {mode === "profile" ? "ChatGPT profile" : "API key"}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          <Text style={styles.label}>Codex API key</Text>
+          <TextInput
+            style={styles.input}
+            value={settingsDraft.codex_api_key || ""}
+            onChangeText={(value) => setSettingsDraft((prev) => ({ ...prev, codex_api_key: value }))}
+            placeholder={settingsDraft.codex_api_key_configured ? `Saved ${settingsDraft.codex_api_key_hint || "API key"} · leave blank to keep it` : "sk-..."}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+          <Text style={styles.muted}>The key is encrypted. API-key mode uses usage-based OpenAI Platform billing.</Text>
           <TouchableOpacity
             style={[styles.primaryButton, savingSettings && styles.buttonDisabled]}
             onPress={handleSaveSettings}
@@ -2362,7 +2539,7 @@ function InnerApp() {
                 style={styles.primaryButton}
                 onPress={async () => {
                   try {
-                    await createCallSession({ goal: "Quick check-in call" });
+                    await createCallSession({ goal: "Quick check-in call", origin: "mobile" });
                     await refreshCallSessions();
                   } catch (error: any) {
                     Alert.alert("Call failed", error?.message || "Unable to create call session.");
@@ -2394,7 +2571,7 @@ function InnerApp() {
                   disabled={replanLoading}
                 >
                   <Text style={styles.secondaryButtonText}>
-                    {replanLoading ? "Replanning…" : "Replan next 2 weeks"}
+                    {replanLoading ? "Planning…" : "Plan next 2 weeks"}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -2572,6 +2749,7 @@ function InnerApp() {
               ) : (
                 <Text style={styles.muted}>No unscheduled soft events.</Text>
               )}
+              <ObjectiveManager onChanged={() => { refreshCalendar(); }} />
             </>
           ) : (
             !calendarLoading && <Text style={styles.muted}>No calendar data.</Text>
@@ -2847,7 +3025,12 @@ function InnerApp() {
       <Modal visible={replanNoteVisible} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.sectionTitle}>Replan notes</Text>
+            <Text style={styles.sectionTitle}>Plan the next two weeks</Text>
+            <Text style={styles.muted}>
+              Corv will consider fixed events, deadline-bound objective tasks, remaining effort,
+              priorities, and flexible events together in one planning call. It validates conflicts
+              and deadline coverage before replacing the current plan.
+            </Text>
             <TextInput
               style={[styles.input, styles.textarea]}
               value={replanNote}
@@ -2875,7 +3058,7 @@ function InnerApp() {
                 disabled={replanLoading}
               >
                 <Text style={styles.primaryButtonText}>
-                  {replanLoading ? "Replanning…" : "Replan"}
+                  {replanLoading ? "Planning…" : "Create plan"}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -3261,6 +3444,9 @@ const styles = StyleSheet.create({
     borderTopColor: "#1f2937",
     backgroundColor: "#0f172a",
   },
+  attachmentRow: { paddingHorizontal: 14, paddingVertical: 6, gap: 7 },
+  attachmentChip: { maxWidth: 220, borderWidth: 1, borderColor: "#334155", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: "#111827" },
+  attachmentText: { color: "#e5e7eb", fontSize: 11 },
   input: {
     flex: 1,
     backgroundColor: "#0c1829",

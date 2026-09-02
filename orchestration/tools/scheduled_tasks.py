@@ -50,6 +50,7 @@ def create_task(
     start_at: Optional[str] = None,
     recurrence: str = ScheduledTask.RECURRENCE_ONCE,
 ):
+    recurrence = recurrence or ScheduledTask.RECURRENCE_ONCE
     if recurrence not in dict(ScheduledTask.RECURRENCE_CHOICES):
         raise ValueError("Invalid recurrence value")
     start_dt = _parse_dt(start_at) or timezone.now()
@@ -75,7 +76,7 @@ def create_task(
     params_schema={
         "type": "object",
         "properties": {
-            "status": {"type": "string", "description": "active|paused|completed"},
+            "status": {"type": "string", "description": "active|paused|completed|failed"},
         },
     },
 )
@@ -112,7 +113,7 @@ def list_tasks(status: Optional[str] = None):
             "prompt": {"type": "string"},
             "start_at": {"type": "string", "description": "ISO datetime"},
             "recurrence": {"type": "string", "description": "once|daily|weekly|monthly"},
-            "status": {"type": "string", "description": "active|paused|completed"},
+            "status": {"type": "string", "description": "active|paused|completed|failed"},
         },
         "required": ["task_id"],
     },

@@ -30,6 +30,54 @@ class ChatAIService:
     }
 
     @staticmethod
+    def generate_chat_title(user_text: str, model: str | None = None) -> str:
+        """Generate a short title derived solely from a user's opening message."""
+        instructions = (
+            "Create a concise title for a chat from the user's opening message. "
+            "Use 3-7 words, preserve the message's language, and describe its main topic or request. "
+            "Return only the title, with no quotes, label, markdown, or ending punctuation."
+        )
+        model_name = model or ModelConfigService.get_frontman_model()
+        provider = resolve_provider(model_name)
+        usage_obj = None
+
+        if provider == "openai":
+            response = get_client("openai").responses.create(
+                model=model_name,
+                input=[
+                    {"role": "developer", "content": [{"type": "input_text", "text": instructions}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": user_text}]},
+                ],
+                text={"format": {"type": "text"}, "verbosity": "low"},
+                reasoning={"effort": "low"},
+                tools=[],
+                store=False,
+                timeout=30,
+            )
+            title = getattr(response, "output_text", None) or ""
+            usage_obj = getattr(response, "usage", None)
+        else:
+            response = get_client("xai").chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": user_text},
+                ],
+                timeout=30,
+            )
+            title = ""
+            if getattr(response, "choices", None):
+                title = response.choices[0].message.content or ""
+            usage_obj = getattr(response, "usage", None)
+
+        if usage_obj:
+            UsageService.log_usage(
+                source="chat_title", model=model_name, cache_mode="off", usage=usage_obj,
+                prompt_cache_key="", job=None,
+            )
+        return title.strip()
+
+    @staticmethod
     def _messages_to_chat_messages(messages, *, system_text: str = ""):
         out = []
         if system_text:
@@ -108,7 +156,7 @@ class ChatAIService:
             resp_kwargs = {
                 "model": model_name,
                 "input": input_seq,
-                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "text": {"format": {"type": "text"}, "verbosity": "low"},
                 "reasoning": {"effort": "low"},
                 "tools": ModuleDirectory.function_tool_specs(),
                 "store": True,
@@ -117,7 +165,7 @@ class ChatAIService:
                 persona_key = getattr(PersonaService.get_persona(), "slug", "default") or "default"
                 module_key = "-".join(sorted(m["slug"] for m in module_lines)) if module_lines else "none"
                 key_hash = hashlib.md5(f"{persona_key}|{module_key}".encode("utf-8")).hexdigest()
-                prompt_cache_key = f"fmv1-{key_hash}"
+                prompt_cache_key = f"fmv2-{key_hash}"
                 resp_kwargs["prompt_cache_key"] = prompt_cache_key
             resp = get_client("openai").responses.create(**resp_kwargs)
             assistant_text = getattr(resp, "output_text", None)
@@ -187,7 +235,9 @@ class ChatAIService:
             "Handoff JSON shape:\n"
             '{\"handoff\":true,\"reason\":\"why\",\"module_hint\":\"optional\"}\n'
             "If not handing off, return {\"handoff\":false,\"reply\":\"your message\"}.\n"
-            "Keep JSON terse. No extra prose outside the JSON."
+            "Keep JSON terse. No extra prose outside the JSON. When replying directly in this text chat, "
+            "the reply value may contain polished GitHub-flavored Markdown: use compact headings, bullets, and "
+            "clickable Markdown links when they improve readability. Do not over-format a simple answer."
         )
 
         if module_text:
@@ -205,7 +255,7 @@ class ChatAIService:
             resp_kwargs = {
                 "model": model_name,
                 "input": input_seq,
-                "text": {"format": {"type": "text"}, "verbosity": "medium"},
+                "text": {"format": {"type": "text"}, "verbosity": "low"},
                 "reasoning": {"effort": "low"},
                 "tools": [],
                 "store": True,
@@ -253,6 +303,69 @@ class ChatAIService:
             )
 
         return assistant_text
+
+    @staticmethod
+    def summarize_chat_history(
+        previous_summary: str,
+        messages,
+        *,
+        max_output_tokens: int = 6000,
+        model: str | None = None,
+    ) -> str:
+        """Incrementally replace the durable summary for messages leaving the window."""
+        instructions = (
+            "Maintain Corv's durable memory of a conversation. Return a complete replacement "
+            "summary, not commentary. Preserve user facts and preferences, decisions, promises, "
+            "unresolved requests, identifiers needed later, and action outcomes including errors. "
+            "Distinguish facts from uncertainty. Drop greetings, repetition, and obsolete transient "
+            "detail. Never invent information. Use compact plain text with short labeled sections."
+        )
+        transcript = []
+        for message in messages:
+            ts = message.created_at.isoformat() if getattr(message, "created_at", None) else ""
+            transcript.append(f"{ts} {message.role}: {message.text}")
+        payload = (
+            f"PREVIOUS SUMMARY:\n{previous_summary or '(none)'}\n\n"
+            f"NEWLY ROTATED MESSAGES:\n" + "\n".join(transcript)
+        )
+        model_name = model or ModelConfigService.get_frontman_model()
+        provider = resolve_provider(model_name)
+        usage_obj = None
+        if provider == "openai":
+            response = get_client("openai").responses.create(
+                model=model_name,
+                input=[
+                    {"role": "developer", "content": [{"type": "input_text", "text": instructions}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": payload}]},
+                ],
+                text={"format": {"type": "text"}, "verbosity": "low"},
+                reasoning={"effort": "low"},
+                max_output_tokens=max_output_tokens,
+                store=False,
+            )
+            result = getattr(response, "output_text", None) or ""
+            usage_obj = getattr(response, "usage", None)
+        else:
+            response = get_client("xai").chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": payload},
+                ],
+                max_tokens=max_output_tokens,
+            )
+            result = response.choices[0].message.content if getattr(response, "choices", None) else ""
+            usage_obj = getattr(response, "usage", None)
+        if usage_obj:
+            UsageService.log_usage(
+                source="frontman_generate",
+                model=model_name,
+                cache_mode="off",
+                usage=usage_obj,
+                prompt_cache_key="",
+                job=None,
+            )
+        return (result or "").strip()
 
     @staticmethod
     def summarize_scheduled_task(context_text: str, model: str | None = None) -> str:

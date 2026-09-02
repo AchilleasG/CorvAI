@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional, List, Iterable, Tuple
 from datetime import datetime, timedelta
 
 from openai import OpenAI
 from django.db import transaction, models
+from django.conf import settings as django_settings
+from django.core.cache import cache
 from django.utils import timezone
 
 from orchestration.models import (
@@ -19,6 +23,7 @@ from orchestration.models import (
     UsageEvent,
     UserProfile,
     UserNote,
+    KnowledgeEntity,
 )
 from orchestration.registry import FunctionRegistry
 from orchestration.schemas import (
@@ -148,6 +153,7 @@ class FunctionRunnerService:
         payload: FunctionCallPayload,
         *,
         job: Optional[Job] = None,
+        call_session=None,
     ) -> FunctionResultPayload:
         try:
             func = FunctionRegistry.resolve_callable(payload.function_id)
@@ -195,6 +201,39 @@ class FunctionRunnerService:
             result = None
             status = "error"
             error_summary = str(exc)
+
+        if status == "ok" and isinstance(result, dict):
+            origin = {"chat": job.chat} if job and job.chat_id else ({"call_session": call_session} if call_session else {})
+            if origin:
+                from coding.chat_waits import CodingChatWaitService
+                from coding.models import CodingTurn, FeatureDelegation
+                if payload.function_id == "coding_sessions.delegate_task":
+                    turn = CodingTurn.objects.filter(pk=result.get("delegated_turn_id")).select_related("session").first()
+                    if turn: CodingChatWaitService.watch_turn(turn=turn, waiting=bool(result.get("wait_for_completion")), **origin)
+                elif payload.function_id == "coding_sessions.delegate_feature":
+                    delegation = FeatureDelegation.objects.filter(pk=result.get("id")).select_related("session").first()
+                    if delegation: CodingChatWaitService.watch_delegation(delegation=delegation, waiting=bool(result.get("wait_for_completion")), **origin)
+                elif payload.function_id == "coding_sessions.answer_decision":
+                    turn = CodingTurn.objects.filter(pk=result.get("delegated_turn_id")).select_related("session").first()
+                    if turn: CodingChatWaitService.advance_turn(turn=turn, **origin)
+                elif payload.function_id == "coding_sessions.resume_feature_delegation":
+                    delegation = FeatureDelegation.objects.filter(pk=result.get("id")).first()
+                    if delegation: CodingChatWaitService.publish_for_delegation(delegation)
+                elif payload.function_id == "coding_sessions.list_conversation_delegations":
+                    result = CodingChatWaitService.list_for_origin(include_finished=bool(result.get("include_finished", True)), **origin)
+                elif payload.function_id == "coding_sessions.set_conversation_delegation_wait":
+                    result = CodingChatWaitService.set_wait(selector=result.get("delegation", ""), waiting=bool(result.get("waiting")), **origin)
+            if job:
+                file_ids = []
+                if result.get("managed_file_id"): file_ids.append(str(result["managed_file_id"]))
+                for file_payload in result.get("files", []) if isinstance(result.get("files"), list) else []:
+                    if isinstance(file_payload, dict) and file_payload.get("managed_file_id"): file_ids.append(str(file_payload["managed_file_id"]))
+                if file_ids:
+                    metadata = job.metadata if isinstance(job.metadata, dict) else {}
+                    pending = [str(value) for value in metadata.get("pending_file_ids", [])]
+                    metadata["pending_file_ids"] = list(dict.fromkeys(pending + file_ids))
+                    job.metadata = metadata
+                    job.save(update_fields=["metadata", "updated_at"])
 
         if job:
             JobService.append_event(
@@ -406,6 +445,7 @@ class UserInfoService:
         tags: Optional[list] = None,
         canonicalize: bool = True,
         model: Optional[str] = None,
+        expires_at=None,
     ) -> UserNote:
         uid = UserInfoService._normalize_user_id(user_id)
         canonical = UserInfoService._canonicalize(content) if canonicalize else content
@@ -417,8 +457,39 @@ class UserInfoService:
             embedding=embedding,
             source=source or "",
             tags=tags or [],
+            expires_at=UserInfoService.normalize_note_expiry(expires_at),
         )
         return note
+
+    @staticmethod
+    def normalize_note_expiry(value):
+        if value in (None, ""):
+            return None
+        if isinstance(value, str):
+            from django.utils.dateparse import parse_datetime
+            value = parse_datetime(value.strip())
+            if value is None:
+                raise ValueError("expires_at must be an ISO 8601 date/time")
+        if not isinstance(value, datetime):
+            raise ValueError("expires_at must be a date/time")
+        if timezone.is_naive(value):
+            value = timezone.make_aware(value, timezone.get_current_timezone())
+        return value
+
+    @staticmethod
+    def active_notes(user_id: Optional[str] = None):
+        uid = UserInfoService._normalize_user_id(user_id)
+        now = timezone.now()
+        return UserNote.objects.filter(user_id=uid, deleted_at__isnull=True).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now)
+        )
+
+    @staticmethod
+    def cleanup_expired_notes(*, now=None) -> int:
+        cutoff = now or timezone.now()
+        return UserNote.objects.filter(
+            deleted_at__isnull=True, expires_at__isnull=False, expires_at__lte=cutoff
+        ).update(deleted_at=cutoff, updated_at=cutoff)
 
     @staticmethod
     def update_note(
@@ -430,11 +501,10 @@ class UserInfoService:
         tags: Optional[list] = None,
         canonicalize: bool = True,
         model: Optional[str] = None,
+        expires_at=...,
     ) -> UserNote:
         uid = UserInfoService._normalize_user_id(user_id)
-        note = UserNote.objects.filter(
-            id=note_id, user_id=uid, deleted_at__isnull=True
-        ).first()
+        note = UserInfoService.active_notes(uid).filter(id=note_id).first()
         if not note:
             raise ValueError("Note not found")
         canonical = UserInfoService._canonicalize(content) if canonicalize else content
@@ -446,6 +516,8 @@ class UserInfoService:
             note.source = source
         if tags is not None:
             note.tags = tags
+        if expires_at is not ...:
+            note.expires_at = UserInfoService.normalize_note_expiry(expires_at)
         note.save(
             update_fields=[
                 "content_raw",
@@ -453,6 +525,7 @@ class UserInfoService:
                 "embedding",
                 "source",
                 "tags",
+                "expires_at",
                 "updated_at",
             ]
         )
@@ -461,9 +534,7 @@ class UserInfoService:
     @staticmethod
     def delete_note(note_id: str, *, user_id: Optional[str] = None):
         uid = UserInfoService._normalize_user_id(user_id)
-        note = UserNote.objects.filter(
-            id=note_id, user_id=uid, deleted_at__isnull=True
-        ).first()
+        note = UserInfoService.active_notes(uid).filter(id=note_id).first()
         if not note:
             return
         note.deleted_at = timezone.now()
@@ -488,9 +559,7 @@ class UserInfoService:
             CosineDistance,
         )  # local import to avoid module load issues
 
-        qs = UserNote.objects.filter(
-            user_id=uid, deleted_at__isnull=True, embedding__isnull=False
-        )
+        qs = UserInfoService.active_notes(uid).filter(embedding__isnull=False)
         if source:
             qs = qs.filter(source=source)
         if tag:
@@ -509,16 +578,229 @@ class UserInfoService:
                     "source": n.source,
                     "tags": n.tags,
                     "created_at": n.created_at,
+                    "expires_at": n.expires_at,
                     "distance": getattr(n, "distance", None),
                 }
             )
         return out
 
 
+class LocationSearchService:
+    """Bounded, cached proxy for user-triggered place lookup."""
+
+    _lock = threading.Lock()
+    _last_request_at = 0.0
+    CACHE_SECONDS = 60 * 60 * 24 * 7
+
+    @classmethod
+    def search(cls, query: str, *, limit: int = 6) -> list[dict]:
+        clean = " ".join(str(query or "").split()).strip()
+        if len(clean) < 2: raise ValueError("Enter at least two characters to search places")
+        limit = max(1, min(int(limit), 10)); key = f"location-search:v1:{clean.casefold()}:{limit}"
+        cached = cache.get(key)
+        if cached is not None: return cached
+        with cls._lock:
+            delay = 1.0 - (time.monotonic() - cls._last_request_at)
+            if delay > 0: time.sleep(delay)
+            import httpx
+            base = str(getattr(django_settings, "NOMINATIM_BASE_URL", "https://nominatim.openstreetmap.org")).rstrip("/")
+            response = httpx.get(f"{base}/search", params={"q": clean, "format": "jsonv2", "addressdetails": 1, "limit": limit}, headers={"User-Agent": "CorvAI/1.0 location-note-picker", "Accept-Language": "en"}, timeout=10.0)
+            cls._last_request_at = time.monotonic(); response.raise_for_status()
+        results=[]
+        for row in response.json():
+            try: latitude=float(row["lat"]); longitude=float(row["lon"])
+            except (KeyError,TypeError,ValueError): continue
+            results.append({"display_name":str(row.get("display_name") or ""),"name":str(row.get("name") or row.get("display_name") or ""),"latitude":latitude,"longitude":longitude,"category":str(row.get("category") or ""),"place_type":str(row.get("type") or ""),"importance":float(row.get("importance") or 0)})
+        cache.set(key,results,cls.CACHE_SECONDS); return results
+
+
+class KnowledgeBaseService:
+    """Typed knowledge CRUD and unified note/entity semantic retrieval."""
+
+    TYPE_FIELDS = {
+        "location": {"required": ("latitude", "longitude"), "array": ()},
+        "person": {"required": (), "array": ("facts",)},
+    }
+    TYPE_HINTS = {
+        "location": {"home", "house", "address", "location", "place", "where", "coordinates", "latitude", "longitude", "office", "restaurant", "hotel"},
+        "person": {"person", "people", "who", "friend", "family", "mother", "father", "brother", "sister", "partner", "colleague", "relationship"},
+    }
+
+    @staticmethod
+    def _uid(user_id=None): return UserInfoService._normalize_user_id(user_id)
+
+    @staticmethod
+    def _tags(tags):
+        clean=[]
+        for value in tags or []:
+            tag=str(value).strip()[:64]
+            if tag and tag not in clean: clean.append(tag)
+        return clean[:20]
+
+    @classmethod
+    def _validate(cls, entity_type, name, description, data):
+        kind=str(entity_type or "").strip().lower()
+        if kind not in cls.TYPE_FIELDS: raise ValueError(f"Unsupported knowledge entity type: {kind}")
+        clean_name=" ".join(str(name or "").split())
+        if not clean_name: raise ValueError("Entity name is required")
+        payload=dict(data or {})
+        if kind=="location":
+            try: latitude=float(payload["latitude"]); longitude=float(payload["longitude"])
+            except (KeyError,TypeError,ValueError): raise ValueError("Locations require numeric latitude and longitude")
+            if not -90<=latitude<=90 or not -180<=longitude<=180: raise ValueError("Location coordinates are out of range")
+            payload.update(latitude=latitude,longitude=longitude)
+        if kind=="person":
+            relationship=str(payload.get("relationship") or "").strip()
+            facts=payload.get("facts") or []
+            if not isinstance(facts,list): raise ValueError("Person facts must be an array")
+            payload.update(relationship=relationship,facts=[str(f).strip() for f in facts if str(f).strip()])
+        return kind,clean_name,str(description or "").strip(),payload
+
+    @staticmethod
+    def _document(entity_type,name,description,data,tags):
+        parts=[entity_type,name,description]
+        if entity_type=="location": parts += [f"latitude {data.get('latitude')}",f"longitude {data.get('longitude')}"]
+        elif entity_type=="person": parts += [data.get("relationship","")] + list(data.get("facts") or [])
+        parts += list(tags or [])
+        return " ".join(str(x) for x in parts if x).strip()
+
+    @staticmethod
+    def payload(item, distance=None):
+        result={"id":str(item.id),"knowledge_type":item.entity_type,"name":item.name,"description":item.description,"data":item.data or {},"source":item.source,"tags":item.tags or [],"created_at":item.created_at.isoformat() if item.created_at else None,"updated_at":item.updated_at.isoformat() if item.updated_at else None}
+        if distance is not None: result["distance"]=float(distance)
+        return result
+
+    @classmethod
+    def create(cls,entity_type,*,name,description="",data=None,tags=None,user_id=None,source="corv_action"):
+        kind,name,description,data=cls._validate(entity_type,name,description,data)
+        tags=cls._tags(tags); document=cls._document(kind,name,description,data,tags)
+        return KnowledgeEntity.objects.create(user_id=cls._uid(user_id),entity_type=kind,name=name,description=description,data=data,search_text=UserInfoService._canonicalize(document),embedding=UserInfoService._embed_text(document),source=source,tags=tags)
+
+    @classmethod
+    def get(cls,entity_id,*,entity_type=None,user_id=None):
+        qs=KnowledgeEntity.objects.filter(id=entity_id,user_id=cls._uid(user_id),deleted_at__isnull=True)
+        if entity_type: qs=qs.filter(entity_type=entity_type)
+        item=qs.first()
+        if not item: raise ValueError("Knowledge entity not found")
+        return item
+
+    @classmethod
+    def update(cls,entity_id,*,entity_type=None,name=None,description=None,data=None,tags=None,user_id=None,source=None):
+        item=cls.get(entity_id,entity_type=entity_type,user_id=user_id)
+        merged={**(item.data or {}),**(data or {})}
+        kind,name,description,merged=cls._validate(item.entity_type,name if name is not None else item.name,description if description is not None else item.description,merged)
+        clean_tags=cls._tags(tags if tags is not None else item.tags); document=cls._document(kind,name,description,merged,clean_tags)
+        item.name=name; item.description=description; item.data=merged; item.tags=clean_tags; item.search_text=UserInfoService._canonicalize(document); item.embedding=UserInfoService._embed_text(document)
+        if source is not None: item.source=source
+        item.save(update_fields=["name","description","data","tags","search_text","embedding","source","updated_at"]); return item
+
+    @classmethod
+    def delete(cls,entity_id,*,entity_type=None,user_id=None):
+        item=cls.get(entity_id,entity_type=entity_type,user_id=user_id); item.deleted_at=timezone.now(); item.save(update_fields=["deleted_at","updated_at"]); return item
+
+    @classmethod
+    def preferred_types(cls,query):
+        words=set(UserInfoService._canonicalize(query).split()); scored=[]
+        for kind,hints in cls.TYPE_HINTS.items():
+            score=len(words & hints)
+            if score: scored.append((kind,score))
+        return [kind for kind,_ in sorted(scored,key=lambda row:-row[1])]
+
+    @classmethod
+    def list_type(cls,entity_type,*,query="",tags=None,limit=100,user_id=None):
+        if entity_type not in cls.TYPE_FIELDS: raise ValueError("Unsupported knowledge entity type")
+        qs=KnowledgeEntity.objects.filter(user_id=cls._uid(user_id),entity_type=entity_type,deleted_at__isnull=True)
+        for tag in cls._tags(tags): qs=qs.filter(tags__contains=[tag])
+        query=str(query or "").strip()
+        if query:
+            embedding=UserInfoService._embed_text(UserInfoService._canonicalize(query))
+            if embedding:
+                from pgvector.django import CosineDistance
+                qs=qs.filter(embedding__isnull=False).annotate(distance=CosineDistance("embedding",embedding)).order_by("distance","name")
+            else: qs=qs.filter(models.Q(name__icontains=query)|models.Q(description__icontains=query)|models.Q(search_text__icontains=query.lower())).order_by("name")
+        else: qs=qs.order_by("name")
+        return [cls.payload(item,getattr(item,"distance",None)) for item in qs[:max(1,min(int(limit),500))]]
+
+    @classmethod
+    def search(cls,query,*,tags=None,limit=10,user_id=None,entity_types=None):
+        query=str(query or "").strip()
+        if not query: raise ValueError("Search query is required")
+        uid=cls._uid(user_id); clean_tags=cls._tags(tags); embedding=UserInfoService._embed_text(UserInfoService._canonicalize(query)); results=[]
+        allowed=set(entity_types or ["note",*cls.TYPE_FIELDS.keys()]); per_limit=max(limit*3,20)
+        if "note" in allowed:
+            notes=UserInfoService.active_notes(uid)
+            for tag in clean_tags: notes=notes.filter(tags__contains=[tag])
+            if embedding:
+                from pgvector.django import CosineDistance
+                notes=notes.filter(embedding__isnull=False).annotate(distance=CosineDistance("embedding",embedding)).order_by("distance")[:per_limit]
+            else: notes=notes.filter(models.Q(content_raw__icontains=query)|models.Q(content_canonical__icontains=query.lower()))[:per_limit]
+            for note in notes:
+                results.append({"id":str(note.id),"knowledge_type":"note","content":note.content_raw,"source":note.source,"tags":note.tags or [],"created_at":note.created_at.isoformat() if note.created_at else None,"updated_at":note.updated_at.isoformat() if note.updated_at else None,"expires_at":note.expires_at.isoformat() if note.expires_at else None,"distance":float(getattr(note,"distance",1.0))})
+        entities=KnowledgeEntity.objects.filter(user_id=uid,deleted_at__isnull=True,entity_type__in=[x for x in allowed if x!="note"])
+        for tag in clean_tags: entities=entities.filter(tags__contains=[tag])
+        if embedding:
+            from pgvector.django import CosineDistance
+            entities=entities.filter(embedding__isnull=False).annotate(distance=CosineDistance("embedding",embedding)).order_by("distance")[:per_limit]
+        else: entities=entities.filter(models.Q(name__icontains=query)|models.Q(description__icontains=query)|models.Q(search_text__icontains=query.lower()))[:per_limit]
+        results += [cls.payload(item,getattr(item,"distance",1.0)) for item in entities]
+        preferred=cls.preferred_types(query); type_order={kind:index for index,kind in enumerate(preferred)}
+        results.sort(key=lambda item:(type_order.get(item["knowledge_type"],len(preferred)),item.get("distance",1.0)))
+        return {"query":query,"preferred_types":preferred,"results":results[:max(1,min(int(limit),100))]}
+
+
 class PersonaService:
     """
     Accessor for Front Man persona instructions.
     """
+
+    VOICE_GUIDE = (
+        "Corv voice: sound like a sharp, familiar collaborator, not a customer-support bot. "
+        "Default to one or two compact sentences and lead with the useful bit. Be dry-witty and "
+        "playful when the moment offers an opening, but never force a joke, repeat a catchphrase, "
+        "or turn every reply into banter. Use contractions and natural conversational phrasing. "
+        "Be specific to what the user just said; avoid generic filler, canned reassurance, long "
+        "preambles, summaries of the obvious, and phrases like 'Certainly', 'Absolutely', 'Great "
+        "question', or 'I'd be happy to'. Ask only necessary questions. For errors, decisions, and "
+        "safety-critical information, stay crisp and candid; wit must never obscure the facts."
+    )
+    RETRIEVAL_GUIDE = (
+        "Search-before-unknown rule: never say or imply that you do not know, cannot recall, or lack "
+        "information before attempting the appropriate available retrieval. For personal facts, preferences, "
+        "people, places, history, and other user-specific context, search user_info.search_knowledge first; "
+        "the notes system contains extensive personal information. For general, public, uncertain, or current "
+        "knowledge, use internet_search.search. If the request could be either personal or general, search personal "
+        "knowledge first and then the internet if needed. For personal-knowledge retrieval, prefer broad semantic "
+        "search and do not invent tag, source, type, or other deterministic filters; apply one only when the user "
+        "explicitly requested that constraint. Fetch a useful set of the most relevant results into context. If a "
+        "requested filtered search is empty, retry semantically without filters before concluding nothing exists. "
+        "Only state that an answer is unknown after the relevant broad search returned no answer or failed, and "
+        "briefly name that concrete outcome."
+    )
+
+    NOTE_WRITING_GUIDE = (
+        "Note-writing rule: before creating or updating any note, first run a broad semantic "
+        "user_info.search_knowledge search for the subject and closely related facts. Review all relevant "
+        "results in context so the new note is consistent, avoids duplication, and reuses the user's existing "
+        "tag vocabulary; do not add deterministic filters unless the user explicitly requested them. Store "
+        "facts in a time-stable form whenever possible. Every temporal reference stored in note content must "
+        "be objective and absolute, never relative. Replace words and phrases such as today, tonight, tomorrow, "
+        "yesterday, now, currently, this morning, next week, ago, and 'in X days' with the exact calendar date "
+        "and, when relevant and known, clock time plus timezone. Express durations as explicit start/end dates. "
+        "Attach an exact date to morning/night status when no clock time was supplied; never invent a clock time. "
+        "Store a person's birth date or birth year rather than a current age. Never save a value that becomes "
+        "false merely because time passes when the invariant fact can be saved instead. If a changing status is "
+        "genuinely the fact of interest, include an explicit as-of date/time or use expires_at. Before writing, "
+        "scan the proposed note and rewrite every remaining relative temporal expression."
+    )
+
+    TEXT_PRESENTATION_GUIDE = (
+        "Presentation by channel: in text chat, use polished GitHub-flavored Markdown when it materially "
+        "improves scanning. Prefer a short descriptive heading for multi-part answers, compact paragraphs, "
+        "bullets for distinct items, bold only for useful labels, and inline Markdown links for sources. "
+        "Keep simple answers simple; do not over-format, nest deeply, or add decorative filler. In calls or "
+        "other spoken output, never speak Markdown syntax, headings, link notation, or visual-only structure; "
+        "use short natural sentences instead."
+    )
 
     @staticmethod
     def get_persona(slug: Optional[str] = None) -> Optional[FrontmanPersona]:
@@ -547,9 +829,14 @@ class PersonaService:
             base = persona.instructions
             if persona.postamble:
                 base = f"{base}\n\n{persona.postamble}"
+        base = f"{base}\n\n{PersonaService.VOICE_GUIDE}\n\n{PersonaService.RETRIEVAL_GUIDE}\n\n{PersonaService.NOTE_WRITING_GUIDE}\n\n{PersonaService.TEXT_PRESENTATION_GUIDE}"
         profile_block = UserInfoService.format_core_profile_block()
         if profile_block:
             base = f"{base}\n\n{profile_block}"
+        from orchestration.presence import PresenceService
+        presence_block = PresenceService.prompt_block()
+        if presence_block:
+            base = f"{base}\n\n{presence_block}"
         return base
 
 
@@ -566,6 +853,12 @@ class ModelConfigService:
     DEFAULT_PRICING_JSON = "{}"
     DEFAULT_USER_INFO_EMBED_MODEL = "text-embedding-3-small"
     DEFAULT_MAX_FUNCTION_RESULT_CHARS = 6000
+    # gpt-5.4-mini supports a 400k context window. Keep ample headroom for
+    # persona/tool definitions, reasoning, and the response itself.
+    DEFAULT_CHAT_CONTEXT_TOKENS = 160000
+    DEFAULT_CHAT_SUMMARY_TOKENS = 6000
+    DEFAULT_CALL_VOICE = "marin"
+    CALL_VOICES = ("marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
 
     @staticmethod
     def get_setting(key: str, default: str) -> str:
@@ -652,6 +945,41 @@ class ModelConfigService:
             return int(raw)
         except Exception:
             return ModelConfigService.DEFAULT_MAX_FUNCTION_RESULT_CHARS
+
+    @staticmethod
+    def get_call_voice() -> str:
+        voice = ModelConfigService.get_setting(
+            "call_voice", ModelConfigService.DEFAULT_CALL_VOICE
+        ).lower()
+        return voice if voice in ModelConfigService.CALL_VOICES else ModelConfigService.DEFAULT_CALL_VOICE
+
+    @staticmethod
+    def get_call_voice_options() -> list[str]:
+        return list(ModelConfigService.CALL_VOICES)
+
+    @staticmethod
+    def get_chat_context_tokens() -> int:
+        """Token budget for persisted chat history (excluding prompts and tools)."""
+        try:
+            raw = ModelConfigService.get_setting(
+                "chat_context_tokens",
+                str(ModelConfigService.DEFAULT_CHAT_CONTEXT_TOKENS),
+            )
+            return min(max(int(raw), 8000), 300000)
+        except (TypeError, ValueError):
+            return ModelConfigService.DEFAULT_CHAT_CONTEXT_TOKENS
+
+    @staticmethod
+    def get_chat_summary_tokens() -> int:
+        """Maximum size requested for the rolling long-term memory summary."""
+        try:
+            raw = ModelConfigService.get_setting(
+                "chat_summary_tokens",
+                str(ModelConfigService.DEFAULT_CHAT_SUMMARY_TOKENS),
+            )
+            return min(max(int(raw), 1000), 16000)
+        except (TypeError, ValueError):
+            return ModelConfigService.DEFAULT_CHAT_SUMMARY_TOKENS
 
 
 def _rate_per_token(pricing_row: dict, base_key: str) -> float:

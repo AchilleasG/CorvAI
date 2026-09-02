@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Callable
 
 from django.conf import settings
@@ -8,6 +9,9 @@ from django.http import JsonResponse, HttpResponse
 _SKIP_PATH_PREFIXES = (
     "/static/",
     "/favicon.ico",
+)
+_PUBLIC_DELEGATION_UPLOAD = re.compile(
+    r"^/api/files/delegations/[0-9a-fA-F-]{36}/upload/?$"
 )
 
 
@@ -27,6 +31,10 @@ class AccessTokenMiddleware:
 
         path = request.path or ""
         if any(path.startswith(p) for p in _SKIP_PATH_PREFIXES):
+            return self.get_response(request)
+        # A delegation UUID is a capability token for artifact upload only.
+        # Listing, reading, changing, and deleting files remain protected.
+        if request.method == "POST" and _PUBLIC_DELEGATION_UPLOAD.fullmatch(path):
             return self.get_response(request)
 
         header_token = request.headers.get("X-App-Token") or ""

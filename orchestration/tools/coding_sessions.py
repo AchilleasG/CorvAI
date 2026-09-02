@@ -28,10 +28,13 @@ def _session(value: str) -> CodingSession:
     return matches[0]
 
 
-def _machine(value: str) -> SshMachine:
+def _machine(value: str = "") -> SshMachine:
     value = (value or "").strip()
     if not value:
-        raise ValueError("SSH machine name or id is required")
+        default = SshMachine.objects.filter(is_default=True, allow_ai_commands=True).first()
+        if default:
+            return default
+        raise ValueError("SSH machine name or id is required because no default is configured")
     query = Q(name__iexact=value)
     try:
         query |= Q(pk=UUID(value))
@@ -93,20 +96,106 @@ def list_sessions():
 
 
 @register_function(
+    manifest_id="coding_sessions.get_activity",
+    module="coding_sessions",
+    description="Show currently running coding sessions and feature delegations with bounded recent coder and QA logs.",
+    params_schema={
+        "type": "object",
+        "properties": {
+            "include_inactive": {"type": "boolean", "default": False},
+            "recent_log_chars": {"type": "integer", "minimum": 500, "maximum": 20000, "default": 6000},
+        },
+    },
+)
+def get_activity(include_inactive: bool = False, recent_log_chars: int = 6000):
+    """Return an at-a-glance coding status suitable for Corv and voice calls."""
+    active_session_statuses = [
+        CodingSession.STATUS_RUNNING,
+        CodingSession.STATUS_NEEDS_INPUT,
+        CodingSession.STATUS_DIRECT,
+    ]
+    active_delegation_statuses = [
+        FeatureDelegation.STATUS_QUEUED,
+        FeatureDelegation.STATUS_CODING,
+        FeatureDelegation.STATUS_QA,
+        FeatureDelegation.STATUS_FIXING,
+        FeatureDelegation.STATUS_NEEDS_INPUT,
+    ]
+    sessions = CodingSession.objects.select_related("machine").all()
+    delegations = FeatureDelegation.objects.select_related("session__machine").all()
+    if not include_inactive:
+        sessions = sessions.filter(status__in=active_session_statuses)
+        delegations = delegations.filter(status__in=active_delegation_statuses)
+    limit = max(500, min(int(recent_log_chars), 20000))
+    session_items = []
+    for session in sessions[:50]:
+        latest_turn = session.turns.first()
+        payload = {
+            "id": str(session.pk),
+            "name": session.name,
+            "machine_name": session.machine.name,
+            "remote_working_directory": session.remote_working_directory,
+            "status": session.status,
+            "last_summary": session.last_summary,
+            "pending_question": session.pending_question,
+            "pending_options": session.pending_options,
+            "last_error": session.last_error,
+            "updated_at": session.updated_at.isoformat(),
+            "latest_turn": CodingSessionService.turn_payload(latest_turn) if latest_turn else None,
+        }
+        logs = CodingSessionService.live_logs_payload(session)
+        payload["recent_logs"] = (logs.get("content") or "")[-limit:]
+        session_items.append(payload)
+    delegation_items = []
+    for item in delegations[:50]:
+        latest_qa = item.qa_runs.first()
+        delegation_items.append({
+            "id": str(item.pk),
+            "session_id": str(item.session_id),
+            "session_name": item.session.name,
+            "machine_name": item.session.machine.name,
+            "title": item.title,
+            "status": item.status,
+            "current_iteration": item.current_iteration,
+            "max_iterations": item.max_iterations,
+            "implementation_summary": item.implementation_summary,
+            "qa_summary": item.qa_summary,
+            "pending_question": item.pending_question,
+            "pending_options": item.pending_options,
+            "last_error": item.last_error,
+            "updated_at": item.updated_at.isoformat(),
+            "latest_qa": {
+                "status": latest_qa.status,
+                "iteration": latest_qa.iteration,
+                "summary": latest_qa.summary,
+                "failures": latest_qa.failures,
+                "recent_logs": (latest_qa.event_log or "")[-limit:],
+            } if latest_qa else None,
+        })
+    return {
+        "has_running_work": bool(session_items or delegation_items),
+        "active_session_count": len(session_items),
+        "active_delegation_count": len(delegation_items),
+        "sessions": session_items,
+        "delegations": delegation_items,
+    }
+
+
+@register_function(
     manifest_id="coding_sessions.create_session",
     module="coding_sessions",
-    description="Create a persistent full-access Codex session for a saved SSH machine.",
+    description="Create a persistent full-access Codex session. Omit machine to use the user's default SSH machine.",
     params_schema={
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "machine": {"type": "string", "description": "Saved SSH machine name or id"},
+            "machine": {"type": "string", "description": "Saved SSH machine name/id; omit to use the default"},
             "remote_working_directory": {"type": "string"},
         },
-        "required": ["name", "machine", "remote_working_directory"],
+        "required": ["name", "remote_working_directory"],
     },
 )
-def create_session(name: str, machine: str, remote_working_directory: str = "~"):
+def create_session(name: str, machine: str = "", remote_working_directory: str = "~"):
     target = _machine(machine)
     if not target.allow_ai_commands:
         raise PermissionError(f"Corv command access is disabled for machine '{target.name}'")
@@ -126,21 +215,25 @@ def create_session(name: str, machine: str, remote_working_directory: str = "~")
 @register_function(
     manifest_id="coding_sessions.delegate_task",
     module="coding_sessions",
-    description="Delegate coding work to Codex through a persistent session. Returns immediately; use get_session to check completion or a pending decision.",
+    description="Send a specific instruction to an existing persistent Codex session for a small one-turn task. The saved Codex thread, repository context, and working directory are retained. Use get_session to check completion or a pending decision.",
     params_schema={
         "type": "object",
         "properties": {
             "session": {"type": "string", "description": "Coding session display name or UUID; names returned by list_sessions are accepted directly"},
-            "task": {"type": "string"},
-            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900},
+            "task": {"type": "string", "description": "The exact task or command-like instruction for Codex to carry out in this session"},
+            "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 900, "default": 0},
+            "wait_for_completion": {"type": "boolean", "default": True, "description": "Defaults to true so Corv reports back; set false only when the user asks not to wait"},
         },
         "required": ["session", "task"],
     },
 )
-def delegate_task(session: str, task: str, wait_seconds: int = 600):
+def delegate_task(session: str, task: str, wait_seconds: int = 0, wait_for_completion: bool = True):
     target = _session(session)
     turn = CodingSessionService.start_turn(target, task, source=CodingTurn.SOURCE_CORV)
-    return _wait_for_turn(target, turn, wait_seconds)
+    payload = _wait_for_turn(target, turn, wait_seconds)
+    payload["delegated_turn_id"] = str(turn.pk)
+    payload["wait_for_completion"] = bool(wait_for_completion)
+    return payload
 
 
 @register_function(
@@ -171,7 +264,7 @@ def get_session(session: str):
         "required": ["session", "decision"],
     },
 )
-def answer_decision(session: str, decision: str, wait_seconds: int = 600):
+def answer_decision(session: str, decision: str, wait_seconds: int = 0):
     target = _session(session)
     if target.status != CodingSession.STATUS_NEEDS_INPUT:
         raise ValueError("This coding session is not waiting for a decision")
@@ -180,7 +273,9 @@ def answer_decision(session: str, decision: str, wait_seconds: int = 600):
         f"Decision from the user: {decision.strip()}",
         source=CodingTurn.SOURCE_DECISION,
     )
-    return _wait_for_turn(target, turn, wait_seconds)
+    payload = _wait_for_turn(target, turn, wait_seconds)
+    payload["delegated_turn_id"] = str(turn.pk)
+    return payload
 
 
 @register_function(
@@ -198,6 +293,20 @@ def stop_session(session: str):
 
 
 @register_function(
+    manifest_id="coding_sessions.resume_session",
+    module="coding_sessions",
+    description="Resume a stopped persistent Codex coding session with its saved thread and history.",
+    params_schema={
+        "type": "object",
+        "properties": {"session": {"type": "string", "description": "Coding session display name or UUID"}},
+        "required": ["session"],
+    },
+)
+def resume_session(session: str):
+    return CodingSessionService.resume(_session(session))
+
+
+@register_function(
     manifest_id="coding_sessions.delegate_feature",
     module="coding_sessions",
     description="Start a durable feature delegation that automatically resumes coding and optionally runs independent QA until it passes or needs a real user decision.",
@@ -210,6 +319,7 @@ def stop_session(session: str):
             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
             "qa_enabled": {"type": "boolean", "default": True},
             "max_iterations": {"type": "integer", "minimum": 1, "maximum": 12},
+            "wait_for_completion": {"type": "boolean", "default": True, "description": "Defaults to true so Corv reports back; set false only when the user asks not to wait"},
         },
         "required": ["session", "title", "description", "acceptance_criteria", "qa_enabled"],
     },
@@ -221,6 +331,7 @@ def delegate_feature(
     acceptance_criteria: list[str],
     qa_enabled: bool = True,
     max_iterations: int = 6,
+    wait_for_completion: bool = True,
 ):
     delegation = FeatureDelegationService.create(
         _session(session),
@@ -230,7 +341,9 @@ def delegate_feature(
         qa_enabled=qa_enabled,
         max_iterations=max_iterations,
     )
-    return FeatureDelegationService.payload(delegation)
+    payload = FeatureDelegationService.payload(delegation)
+    payload["wait_for_completion"] = bool(wait_for_completion)
+    return payload
 
 
 @register_function(
@@ -268,19 +381,20 @@ def get_feature_delegation(delegation: str):
 @register_function(
     manifest_id="coding_sessions.resume_feature_delegation",
     module="coding_sessions",
-    description="Resume a feature delegation after providing the user's decision or after an interruption.",
+    description="Resume a waiting, failed, or stopped feature delegation. Use mode='qa' to retry blocked QA without starting another coding cycle, or mode='coding' when application changes are required.",
     params_schema={
         "type": "object",
         "properties": {
             "delegation": {"type": "string"},
             "decision": {"type": "string"},
+            "mode": {"type": "string", "enum": ["auto", "qa", "coding"], "default": "auto"},
         },
         "required": ["delegation"],
     },
 )
-def resume_feature_delegation(delegation: str, decision: str = ""):
+def resume_feature_delegation(delegation: str, decision: str = "", mode: str = "auto"):
     item = _delegation(delegation)
-    FeatureDelegationService.resume(item, decision)
+    FeatureDelegationService.resume(item, decision, mode=mode)
     item.refresh_from_db()
     return FeatureDelegationService.payload(item)
 
@@ -300,3 +414,12 @@ def stop_feature_delegation(delegation: str):
     FeatureDelegationService.stop(item)
     item.refresh_from_db()
     return FeatureDelegationService.payload(item)
+
+
+@register_function(manifest_id="coding_sessions.list_conversation_delegations", module="coding_sessions", description="List all Codex delegations spawned from the current chat or call, including concurrent work, status, ids, questions, and wait state.", params_schema={"type":"object","properties":{"include_finished":{"type":"boolean","default":True}}})
+def list_conversation_delegations(include_finished: bool = True):
+    return {"conversation_context_required": True, "include_finished": bool(include_finished)}
+
+@register_function(manifest_id="coding_sessions.set_conversation_delegation_wait", module="coding_sessions", description="Start, interrupt, or resume waiting for one specific active delegation in the current chat or call.", params_schema={"type":"object","properties":{"delegation":{"type":"string"},"waiting":{"type":"boolean"}},"required":["delegation","waiting"]})
+def set_conversation_delegation_wait(delegation: str, waiting: bool):
+    return {"conversation_context_required": True, "delegation": delegation, "waiting": bool(waiting)}

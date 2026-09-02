@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from django.db import transaction
 from django.utils import timezone
 
-from orchestration.models import Objective, ObjectiveLog, ObjectiveTask
+from orchestration.models import Objective, ObjectiveLog, ObjectiveTask, SoftEvent
+from orchestration.objectives import ObjectiveService
 from orchestration.registry import register_function
 
 
@@ -143,7 +145,12 @@ def create_objective(
     notes: str = "",
     metadata: Optional[dict] = None,
 ):
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("title is required")
     parent = Objective.objects.filter(id=parent_id).first() if parent_id else None
+    if parent_id and parent is None:
+        raise ValueError("Parent objective not found")
     objective = Objective.objects.create(
         parent=parent,
         title=title,
@@ -186,7 +193,21 @@ def update_objective(objective_id: str, **kwargs):
     objective = Objective.objects.get(id=objective_id)
     parent_id = kwargs.pop("parent_id", None)
     if parent_id is not None:
-        objective.parent = Objective.objects.filter(id=parent_id).first() if parent_id else None
+        parent = Objective.objects.filter(id=parent_id).first() if parent_id else None
+        if parent_id and parent is None:
+            raise ValueError("Parent objective not found")
+        if parent and parent.id == objective.id:
+            raise ValueError("An objective cannot be its own parent")
+        cursor = parent
+        while cursor and cursor.parent_id:
+            if cursor.parent_id == objective.id:
+                raise ValueError("An objective cannot be moved below one of its descendants")
+            cursor = cursor.parent
+        objective.parent = parent
+    if "title" in kwargs and not str(kwargs.get("title") or "").strip():
+        raise ValueError("title is required")
+    if "status" in kwargs and kwargs.get("status") not in dict(Objective.STATUS_CHOICES):
+        raise ValueError("Invalid objective status")
     for key in ["title", "description", "status", "notes"]:
         if key in kwargs and kwargs[key] is not None:
             setattr(objective, key, kwargs[key])
@@ -197,6 +218,8 @@ def update_objective(objective_id: str, **kwargs):
         objective.deadline_at = _parse_dt(kwargs["deadline_at"]) if kwargs["deadline_at"] else None
     if "metadata" in kwargs and isinstance(kwargs["metadata"], dict):
         objective.metadata = kwargs["metadata"]
+    if "status" in kwargs:
+        objective.completed_at = timezone.now() if objective.status == Objective.STATUS_COMPLETED else None
     objective.save()
     return _objective_payload(objective)
 
@@ -205,7 +228,7 @@ def update_objective(objective_id: str, **kwargs):
     manifest_id="objectives.delete_objective",
     module="objectives",
     name="objectives.delete_objective",
-    description="Delete an objective.",
+    description="Delete an objective, including its descendants, tasks, and planner-generated calendar sessions. Root objectives can be deleted.",
     params_schema={
         "type": "object",
         "properties": {"objective_id": {"type": "string"}},
@@ -213,8 +236,28 @@ def update_objective(objective_id: str, **kwargs):
     },
 )
 def delete_objective(objective_id: str):
-    deleted, _ = Objective.objects.filter(id=objective_id).delete()
-    return {"deleted": bool(deleted)}
+    objective = Objective.objects.get(id=objective_id)
+    tree_ids = [objective.id]
+    frontier = [objective.id]
+    while frontier:
+        children = list(Objective.objects.filter(parent_id__in=frontier).values_list("id", flat=True))
+        tree_ids.extend(children)
+        frontier = children
+    generated = SoftEvent.objects.filter(
+        objective_links__objective_id__in=tree_ids,
+        metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
+    ).distinct()
+    generated_count = generated.count()
+    task_count = ObjectiveTask.objects.filter(objective_id__in=tree_ids).count()
+    with transaction.atomic():
+        generated.delete()
+        objective.delete()
+    return {
+        "deleted": True,
+        "deleted_objectives": len(tree_ids),
+        "deleted_tasks": task_count,
+        "deleted_generated_sessions": generated_count,
+    }
 
 
 @register_function(
@@ -249,6 +292,11 @@ def create_task(
     sort_order: int = 0,
     metadata: Optional[dict] = None,
 ):
+    title = str(title or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    if status not in dict(ObjectiveTask.STATUS_CHOICES):
+        raise ValueError("Invalid objective task status")
     task = ObjectiveTask.objects.create(
         objective_id=objective_id,
         title=title,
@@ -272,6 +320,7 @@ def create_task(
         "type": "object",
         "properties": {
             "task_id": {"type": "string"},
+            "objective_id": {"type": "string"},
             "title": {"type": "string"},
             "description": {"type": "string"},
             "status": {"type": "string"},
@@ -286,6 +335,16 @@ def create_task(
 )
 def update_task(task_id: str, **kwargs):
     task = ObjectiveTask.objects.get(id=task_id)
+    if "objective_id" in kwargs:
+        objective_id = kwargs.pop("objective_id")
+        objective = Objective.objects.filter(id=objective_id).first()
+        if objective is None:
+            raise ValueError("Destination objective not found")
+        task.objective = objective
+    if "title" in kwargs and not str(kwargs.get("title") or "").strip():
+        raise ValueError("title is required")
+    if "status" in kwargs and kwargs.get("status") not in dict(ObjectiveTask.STATUS_CHOICES):
+        raise ValueError("Invalid objective task status")
     for key in ["title", "description", "status"]:
         if key in kwargs and kwargs[key] is not None:
             setattr(task, key, kwargs[key])

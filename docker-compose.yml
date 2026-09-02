@@ -1,7 +1,7 @@
 services:
   web:
     build: .
-    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000 --noreload"
+    command: sh -c "python manage.py migrate && python manage.py run_coding_server 0.0.0.0:8000"
     restart: unless-stopped
     init: true
     mem_limit: 1536m
@@ -20,12 +20,14 @@ services:
       - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
       - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
       - CORV_CODING_DIR=/var/lib/corv-coding
+      - CORV_PUBLIC_BASE_URL=${CORV_PUBLIC_BASE_URL:-}
       - FCM_PROJECT_ID=${FCM_PROJECT_ID:-}
       - FCM_SERVICE_ACCOUNT_JSON=${FCM_SERVICE_ACCOUNT_JSON:-}
       - FCM_SERVICE_ACCOUNT_FILE=${FCM_SERVICE_ACCOUNT_FILE:-}
 
   frontend:
     build: ./frontend
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
     restart: unless-stopped
     init: true
     mem_limit: 512m

@@ -5,6 +5,7 @@ import uuid
 
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 
 from orchestration.crypto import decrypt_value, encrypt_value
 
@@ -31,6 +32,7 @@ class SshMachine(models.Model):
     credential_encrypted = models.TextField(blank=True, default="")
     host_key_fingerprint = models.CharField(max_length=128, blank=True, default="")
     allow_ai_commands = models.BooleanField(default=False)
+    is_default = models.BooleanField(default=False)
     connect_timeout_seconds = models.PositiveIntegerField(default=15)
     command_timeout_seconds = models.PositiveIntegerField(default=120)
     keepalive_seconds = models.PositiveIntegerField(default=30)
@@ -43,6 +45,13 @@ class SshMachine(models.Model):
     class Meta:
         ordering = ["name"]
         indexes = [models.Index(fields=["name"]), models.Index(fields=["host", "port"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_default"],
+                condition=Q(is_default=True),
+                name="ssh_single_default_machine",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.username}@{self.host}:{self.port})"

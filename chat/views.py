@@ -74,6 +74,7 @@ def get_chat_messages(request, chat_id: UUID, visible_only: bool = False, job_id
             "trace_id": m.trace_id or None,
             "call_id": m.call_id or None,
             "job_id": m.job_id if getattr(m, "job_id", None) else None,
+            "metadata": m.metadata,
         }
         for m in messages
     ]

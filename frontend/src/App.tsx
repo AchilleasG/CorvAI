@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import SshPanel from "./SshPanel";
 import CodingPanel from "./CodingPanel";
+import FilesPanel from "./FilesPanel";
+import NotesPanel from "./NotesPanel";
+import WorkoutPanel from "./WorkoutPanel";
+import FileCard from "./FileCard";
+import RealtimeCall from "./RealtimeCall";
 import WorkspaceNavigation, { type WorkspaceSection } from "./WorkspaceNavigation";
 import {
   createChat,
@@ -14,9 +19,11 @@ import {
   fetchStudyMaterials,
   fetchStudyTopics,
   fetchMessages,
+  uploadFile,
   fetchJobs,
   sendText,
   sendVoice,
+  updatePresence,
   renameChat,
   deleteChat,
   fetchJob,
@@ -27,11 +34,18 @@ import {
   fetchUsageSummary,
   fetchSettings,
   updateSettings,
+  previewCallVoice,
   fetchCalendarCombined,
   fetchObjective,
   fetchObjectiveRoots,
   fetchObjectiveTasks,
   fetchObjectiveTree,
+  createObjective,
+  updateObjective,
+  deleteObjective,
+  createObjectiveTask,
+  updateObjectiveTask,
+  deleteObjectiveTask,
   createSoftEvent,
   createHardEventTaskLink,
   updateSoftEvent,
@@ -80,6 +94,7 @@ import {
   CombinedCalendar,
   HardEventTaskLink,
   Objective,
+  ObjectiveTask,
   ObjectiveTaskPicker,
   SoftEventDetail,
   ScheduledTask,
@@ -123,6 +138,29 @@ type SoftEventDraft = {
 
 type SoftEventMode = "create" | "edit";
 type SoftEventModalTab = "details" | "metadata";
+type ObjectiveDraft = {
+  id: string;
+  parent_id: string;
+  title: string;
+  description: string;
+  notes: string;
+  status: string;
+  deadline_at: string;
+  estimated_effort_minutes: string;
+  remaining_effort_minutes: string;
+  priority: string;
+};
+type ObjectiveTaskDraft = {
+  id: string;
+  objective_id: string;
+  title: string;
+  description: string;
+  status: string;
+  due_at: string;
+  estimated_effort_minutes: string;
+  remaining_effort_minutes: string;
+  sort_order: string;
+};
 type StudyOutputModalKind = "converted" | "solved" | "theory";
 type StudyLessonDetailTab = "overview" | "audiobooks";
 
@@ -464,6 +502,91 @@ function SendIcon() {
   );
 }
 
+type SafeMessageSource = { url: string; title: string; siteName: string; host: string; icon: string };
+
+function sourceCandidates(sources: unknown, fallbackText: string): unknown[] {
+  const candidates = Array.isArray(sources) ? [...sources] : [];
+  const markdownLink = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  for (const match of fallbackText.matchAll(markdownLink)) {
+    candidates.push({ title: match[1], url: match[2] });
+  }
+  return candidates;
+}
+
+function normalizeMessageSources(sources: unknown, fallbackText = ""): SafeMessageSource[] {
+  const seen = new Set<string>();
+  return sourceCandidates(sources, fallbackText).flatMap((source) => {
+    if (!source || typeof source !== "object") return [];
+    const value = source as Record<string, unknown>;
+    const url = typeof value.url === "string" ? value.url.trim() : "";
+    try {
+      const parsed = new URL(url);
+      if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || seen.has(parsed.href)) return [];
+      seen.add(parsed.href);
+      const host = parsed.hostname.replace(/^www\./, "");
+      return [{
+        url: parsed.href,
+        title: typeof value.title === "string" ? value.title : host,
+        siteName: typeof value.site_name === "string" ? value.site_name : host,
+        host,
+        icon: `${parsed.origin}/favicon.ico`,
+      }];
+    } catch { return []; }
+  }).slice(0, 12);
+}
+
+class MessageExtrasBoundary extends React.Component<React.PropsWithChildren, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() { return this.state.failed ? null : this.props.children; }
+}
+
+function MessageSources({ sources, fallbackText }: { sources: unknown; fallbackText: string }) {
+  const [failedIcons, setFailedIcons] = React.useState<Set<string>>(new Set());
+  const safe = normalizeMessageSources(sources, fallbackText);
+  if (!safe.length) return null;
+  return <div className="message-sources" aria-label="Sources"><span className="message-sources-label">Sources</span><div className="message-source-list">{safe.map((source) => <a className="message-source-badge" href={source.url} target="_blank" rel="noopener noreferrer" key={source.url} title={source.title}>{!failedIcons.has(source.url) ? <img src={source.icon} alt="" onError={() => setFailedIcons(current => current.has(source.url) ? current : new Set(current).add(source.url))} /> : <span className="source-icon-fallback" aria-hidden="true">↗</span>}<span>{source.siteName}</span></a>)}</div></div>;
+}
+
+function compactSourceName(value: string, limit = 26) {
+  const clean = value.trim().replace(/^www\./, "");
+  return clean.length > limit ? `${clean.slice(0, limit - 1).trimEnd()}…` : clean;
+}
+
+function metadataSourceName(href: string, sources: unknown, fallback: string) {
+  if (!Array.isArray(sources)) return compactSourceName(fallback);
+  try {
+    const target = new URL(href);
+    const match = sources.find((source) => {
+      if (!source || typeof source !== "object") return false;
+      const url = (source as Record<string, unknown>).url;
+      if (typeof url !== "string") return false;
+      try {
+        const candidate = new URL(url);
+        return candidate.origin === target.origin && candidate.pathname === target.pathname;
+      } catch { return false; }
+    }) as Record<string, unknown> | undefined;
+    const name = match && typeof match.site_name === "string" ? match.site_name : fallback;
+    return compactSourceName(name);
+  } catch { return compactSourceName(fallback); }
+}
+
+function MarkdownSourceLink({ href, children, sources, ...props }: React.ComponentPropsWithoutRef<"a"> & { sources?: unknown }) {
+  const [iconFailed, setIconFailed] = React.useState(false);
+  if (!href) return <span>{children}</span>;
+  try {
+    const parsed = new URL(href);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Not an external source");
+    const host = parsed.hostname.replace(/^www\./, "");
+    const childLabel = React.Children.toArray(children).filter((item) => typeof item === "string").join("").trim();
+    const isGenericLabel = !childLabel || /^(source|link|reference|read more)$/i.test(childLabel);
+    const label = isGenericLabel ? metadataSourceName(parsed.href, sources, host) : compactSourceName(childLabel);
+    return <a {...props} className="message-inline-source" href={parsed.href} target="_blank" rel="noopener noreferrer" title={host}>{iconFailed ? <span className="source-icon-fallback" aria-hidden="true">↗</span> : <img src={`${parsed.origin}/favicon.ico`} alt="" onError={() => setIconFailed(true)} />}<span>{label}</span></a>;
+  } catch {
+    return <a {...props} href={href}>{children}</a>;
+  }
+}
+
 function MessageBubble({
   msg,
   jobLogMessages,
@@ -480,7 +603,17 @@ function MessageBubble({
         <RoleBadge role={msg.role} />
         {msg.created_at && <span className="timestamp">{new Date(msg.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</span>}
       </div>
-      <div className="message-text">{msg.text}</div>
+      <div className={`message-text ${msg.role === "assistant" ? "message-markdown" : ""}`}>
+        {msg.role === "assistant" ? <ReactMarkdown components={{ a: (props) => <MarkdownSourceLink {...props} sources={msg.metadata?.sources} /> }}>{msg.text}</ReactMarkdown> : msg.text}
+      </div>
+      <MessageExtrasBoundary>
+        <MessageSources sources={msg.metadata?.sources} fallbackText={msg.text} />
+      </MessageExtrasBoundary>
+      {!!msg.metadata?.attachments?.length && (
+        <div className="chat-file-list" aria-label="Attached files">
+          {msg.metadata.attachments.map((file) => <FileCard key={file.id} file={file} compact />)}
+        </div>
+      )}
       {msg.job_id && isLastJobMessage && (
         <div className="job-log-inline">
           <button
@@ -537,17 +670,22 @@ export default function App() {
   const [usageRecent, setUsageRecent] = useState<UsageEvent[]>([]);
   const [usageSummary, setUsageSummary] = useState<UsageSummary | null>(null);
   const [input, setInput] = useState("");
+  const [chatFiles, setChatFiles] = useState<File[]>([]);
   const [currentSection, setCurrentSection] = useState<WorkspaceSection>("chat");
+  const showNotes = currentSection === "notes";
   const showSettings = currentSection === "settings";
   const showStudy = currentSection === "study";
+  const showWorkout = currentSection === "workout";
   const showCalendar = currentSection === "calendar";
   const showScheduler = currentSection === "scheduler";
   const showMessages = currentSection === "messages";
   const showCalls = currentSection === "calls";
   const showSsh = currentSection === "ssh";
   const showCoding = currentSection === "coding";
+  const showFiles = currentSection === "files";
   const [settings, setSettings] = useState<SettingsPayload>({});
   const [savingSettings, setSavingSettings] = useState(false);
+  const [previewingVoice, setPreviewingVoice] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
@@ -575,11 +713,34 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [showMicSettings, setShowMicSettings] = useState(false);
+  const locationRef = useRef<Record<string, unknown> | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recorderMimeTypeRef = useRef<string>("");
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioLevelFrameRef = useRef<number | null>(null);
   const audioLevelMonitoringAvailableRef = useRef(false);
+  useEffect(() => {
+    if (!("geolocation" in navigator)) return;
+    const timezone_name = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const location = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy_m: position.coords.accuracy,
+          altitude_m: position.coords.altitude,
+          captured_at: new Date(position.timestamp).toISOString(),
+          timezone_name,
+          source: "web",
+        };
+        locationRef.current = location;
+        void updatePresence(location).catch(() => undefined);
+      },
+      () => undefined,
+      { enableHighAccuracy: true, maximumAge: 30000, timeout: 15000 },
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
   const voicedAudioDurationRef = useRef(0);
   const lastAudioLevelTimeRef = useRef(0);
   const studyFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -594,6 +755,8 @@ export default function App() {
   const [calendarReplanEvents, setCalendarReplanEvents] = useState<JobEvent[]>([]);
   const [calendarReplanEventsLoading, setCalendarReplanEventsLoading] = useState(false);
   const [calendarReplanLogsOpen, setCalendarReplanLogsOpen] = useState(false);
+  const [calendarPlanModalOpen, setCalendarPlanModalOpen] = useState(false);
+  const [calendarPlanNote, setCalendarPlanNote] = useState("");
   const [hardEventTaskOptions, setHardEventTaskOptions] = useState<ObjectiveTaskPicker[]>([]);
   const [hardEventTaskOptionsLoading, setHardEventTaskOptionsLoading] = useState(false);
   const [selectedHardEventTaskId, setSelectedHardEventTaskId] = useState("");
@@ -606,6 +769,9 @@ export default function App() {
   const [selectedObjectiveDetail, setSelectedObjectiveDetail] = useState<Objective | null>(null);
   const [objectiveLoading, setObjectiveLoading] = useState(false);
   const [objectiveError, setObjectiveError] = useState<string | null>(null);
+  const [objectiveDraft, setObjectiveDraft] = useState<ObjectiveDraft | null>(null);
+  const [objectiveTaskDraft, setObjectiveTaskDraft] = useState<ObjectiveTaskDraft | null>(null);
+  const [objectiveSaving, setObjectiveSaving] = useState(false);
   const [replanLoading, setReplanLoading] = useState(false);
   const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
   const [calendarDetailEntry, setCalendarDetailEntry] = useState<null | {
@@ -1234,6 +1400,15 @@ export default function App() {
     );
   }
 
+  function flattenObjectiveTree(objective: Objective | null): Objective[] {
+    if (!objective) return [];
+    return [objective, ...objective.children.flatMap((child) => flattenObjectiveTree(child))];
+  }
+
+  function objectiveTreeContains(objective: Objective, objectiveId: string): boolean {
+    return objective.id === objectiveId || objective.children.some((child) => objectiveTreeContains(child, objectiveId));
+  }
+
   async function handleSaveSettings(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setSavingSettings(true);
@@ -1247,6 +1422,9 @@ export default function App() {
         study_model: formData.get("study_model") as string,
         cache_mode: formData.get("cache_mode") as string,
         max_function_result_chars: Number(formData.get("max_function_result_chars") || 0) || undefined,
+        call_voice: formData.get("call_voice") as string,
+        codex_auth_mode: formData.get("codex_auth_mode") as "profile" | "api_key",
+        codex_api_key: formData.get("codex_api_key") as string,
       };
     const updated = await updateSettings(payload);
     setSettings(updated);
@@ -1257,6 +1435,21 @@ export default function App() {
     setSavingSettings(false);
   }
 }
+
+  async function handlePreviewCallVoice(voice: string) {
+    try {
+      setPreviewingVoice(voice);
+      setSettingsError(null);
+      const preview = await previewCallVoice(voice);
+      const audio = new Audio(`data:${preview.content_type};base64,${preview.audio_base64}`);
+      await audio.play();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setSettingsError(err.message || "Failed to preview voice");
+    } finally {
+      setPreviewingVoice(null);
+    }
+  }
 
   async function refreshScheduledTasks() {
     try {
@@ -1343,10 +1536,9 @@ export default function App() {
       setObjectiveError(null);
       const roots = await fetchObjectiveRoots();
       setObjectiveRoots(roots);
+      const requestedRootId = preferredRootId !== undefined ? preferredRootId : selectedObjectiveRootId;
       const nextRootId =
-        preferredRootId ||
-        selectedObjectiveRootId ||
-        roots.find((root) => root.id === selectedObjectiveRootId)?.id ||
+        (requestedRootId && roots.some((root) => root.id === requestedRootId) ? requestedRootId : null) ||
         roots[0]?.id ||
         null;
       setSelectedObjectiveRootId(nextRootId);
@@ -1358,13 +1550,178 @@ export default function App() {
       }
       const tree = await fetchObjectiveTree(nextRootId);
       setObjectiveTree(tree);
-      const nextObjectiveId = preferredObjectiveId || selectedObjectiveId || tree.id;
+      const requestedObjectiveId = preferredObjectiveId !== undefined
+        ? preferredObjectiveId || tree.id
+        : selectedObjectiveId || tree.id;
+      const nextObjectiveId = objectiveTreeContains(tree, requestedObjectiveId) ? requestedObjectiveId : tree.id;
       await loadObjectiveDetail(nextObjectiveId);
     } catch (err: any) {
       if (handleAuthError(err)) return;
       setObjectiveError(err.message || "Failed to load objectives");
     } finally {
       setObjectiveLoading(false);
+    }
+  }
+
+  function openObjectiveCreator(parentId = "") {
+    setObjectiveError(null);
+    setObjectiveDraft({
+      id: "",
+      parent_id: parentId,
+      title: "",
+      description: "",
+      notes: "",
+      status: "active",
+      deadline_at: "",
+      estimated_effort_minutes: "",
+      remaining_effort_minutes: "",
+      priority: "0",
+    });
+  }
+
+  function openObjectiveEditor(objective: Objective) {
+    setObjectiveError(null);
+    setObjectiveDraft({
+      id: objective.id,
+      parent_id: objective.parent_id || "",
+      title: objective.title,
+      description: objective.description || "",
+      notes: objective.notes || "",
+      status: objective.status,
+      deadline_at: toLocalInputValue(objective.deadline_at),
+      estimated_effort_minutes: objective.estimated_effort_minutes == null ? "" : String(objective.estimated_effort_minutes),
+      remaining_effort_minutes: objective.remaining_effort_minutes == null ? "" : String(objective.remaining_effort_minutes),
+      priority: String(objective.priority ?? 0),
+    });
+  }
+
+  async function saveObjectiveDraft(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!objectiveDraft?.title.trim()) return;
+    const optionalNumber = (value: string) => value.trim() ? Math.max(0, Number.parseInt(value, 10) || 0) : null;
+    const payload = {
+      parent_id: objectiveDraft.parent_id || null,
+      title: objectiveDraft.title.trim(),
+      description: objectiveDraft.description.trim(),
+      notes: objectiveDraft.notes.trim(),
+      status: objectiveDraft.status,
+      deadline_at: toIsoValue(objectiveDraft.deadline_at) || null,
+      estimated_effort_minutes: optionalNumber(objectiveDraft.estimated_effort_minutes),
+      remaining_effort_minutes: optionalNumber(objectiveDraft.remaining_effort_minutes),
+      priority: Number.parseInt(objectiveDraft.priority, 10) || 0,
+    };
+    try {
+      setObjectiveSaving(true);
+      const saved = objectiveDraft.id
+        ? await updateObjective(objectiveDraft.id, payload)
+        : await createObjective(payload);
+      setObjectiveDraft(null);
+      const rootId = saved.parent_id ? selectedObjectiveRootId : saved.id;
+      await refreshObjectives(rootId, saved.id);
+      await refreshCalendar();
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setObjectiveError(err.message || "Failed to save objective");
+    } finally {
+      setObjectiveSaving(false);
+    }
+  }
+
+  async function handleDeleteObjective(objective: Objective) {
+    const managedSource = String(objective.metadata?.source || "");
+    const warning = managedSource.startsWith("study_")
+      ? "\n\nThis objective is managed by the Study module. Deleting it can also remove its linked study record."
+      : "";
+    if (!window.confirm(`Delete “${objective.title}” and all of its sub-objectives, tasks, generated sessions, and logs?${warning}`)) return;
+    try {
+      setObjectiveSaving(true);
+      await deleteObjective(objective.id);
+      setSelectedObjectiveId(null);
+      setSelectedObjectiveDetail(null);
+      if (objective.id === selectedObjectiveRootId) setSelectedObjectiveRootId(null);
+      await Promise.all([refreshObjectives(null, null), refreshCalendar()]);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setObjectiveError(err.message || "Failed to delete objective");
+    } finally {
+      setObjectiveSaving(false);
+    }
+  }
+
+  function openObjectiveTaskCreator(objectiveId: string) {
+    setObjectiveTaskDraft({
+      id: "",
+      objective_id: objectiveId,
+      title: "",
+      description: "",
+      status: "todo",
+      due_at: "",
+      estimated_effort_minutes: "60",
+      remaining_effort_minutes: "60",
+      sort_order: "0",
+    });
+  }
+
+  function openObjectiveTaskEditor(task: ObjectiveTask) {
+    setObjectiveTaskDraft({
+      id: task.id,
+      objective_id: task.objective_id,
+      title: task.title,
+      description: task.description || "",
+      status: task.status,
+      due_at: toLocalInputValue(task.due_at),
+      estimated_effort_minutes: task.estimated_effort_minutes == null ? "" : String(task.estimated_effort_minutes),
+      remaining_effort_minutes: task.remaining_effort_minutes == null ? "" : String(task.remaining_effort_minutes),
+      sort_order: String(task.sort_order || 0),
+    });
+  }
+
+  async function saveObjectiveTaskDraft(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!objectiveTaskDraft?.title.trim()) return;
+    const optionalNumber = (value: string) => value.trim() ? Math.max(0, Number.parseInt(value, 10) || 0) : null;
+    const payload = {
+      objective_id: objectiveTaskDraft.objective_id,
+      title: objectiveTaskDraft.title.trim(),
+      description: objectiveTaskDraft.description.trim(),
+      status: objectiveTaskDraft.status,
+      due_at: toIsoValue(objectiveTaskDraft.due_at) || null,
+      estimated_effort_minutes: optionalNumber(objectiveTaskDraft.estimated_effort_minutes),
+      remaining_effort_minutes: optionalNumber(objectiveTaskDraft.remaining_effort_minutes),
+      sort_order: Math.max(0, Number.parseInt(objectiveTaskDraft.sort_order, 10) || 0),
+    };
+    try {
+      setObjectiveSaving(true);
+      if (objectiveTaskDraft.id) await updateObjectiveTask(objectiveTaskDraft.id, payload);
+      else await createObjectiveTask(objectiveTaskDraft.objective_id, payload);
+      const objectiveId = objectiveTaskDraft.objective_id;
+      setObjectiveTaskDraft(null);
+      await Promise.all([
+        refreshObjectives(selectedObjectiveRootId, objectiveId),
+        refreshCalendar(),
+      ]);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setObjectiveError(err.message || "Failed to save objective task");
+    } finally {
+      setObjectiveSaving(false);
+    }
+  }
+
+  async function handleDeleteObjectiveTask(task: ObjectiveTask) {
+    if (!window.confirm(`Delete task “${task.title}”? Its generated future sessions will be replaced on the next replan.`)) return;
+    try {
+      setObjectiveSaving(true);
+      await deleteObjectiveTask(task.id);
+      await Promise.all([
+        refreshObjectives(selectedObjectiveRootId, task.objective_id),
+        refreshCalendar(),
+      ]);
+    } catch (err: any) {
+      if (handleAuthError(err)) return;
+      setObjectiveError(err.message || "Failed to delete objective task");
+    } finally {
+      setObjectiveSaving(false);
     }
   }
 
@@ -2108,7 +2465,7 @@ export default function App() {
   }
 
   async function handleToggleScheduledTask(task: ScheduledTask) {
-    const nextStatus = task.status === "paused" ? "active" : "paused";
+    const nextStatus = task.status === "paused" || task.status === "failed" ? "active" : "paused";
     try {
       await updateScheduledTask(task.id, { status: nextStatus });
       await refreshScheduledTasks();
@@ -2329,14 +2686,15 @@ export default function App() {
   }
 
   async function handleReplanCalendar() {
-    const note = window.prompt("Optional note for replanning", "");
     try {
       setReplanLoading(true);
       setCalendarError(null);
-      const job = await replanCalendar({ days: 14, note: note?.trim() || undefined });
+      const job = await replanCalendar({ days: 14, note: calendarPlanNote.trim() || undefined });
       setCalendarReplanJob(job);
       setCalendarReplanEvents([]);
       setCalendarReplanLogsOpen(false);
+      setCalendarPlanModalOpen(false);
+      setCalendarPlanNote("");
       await refreshCalendarReplanJob(job.id);
     } catch (err: any) {
       if (handleAuthError(err)) return;
@@ -2475,8 +2833,16 @@ export default function App() {
 
       const chatId = await ensureChat();
 
-      await sendText(chatId, input.trim());
+      const uploaded = await Promise.all(chatFiles.map((file) => uploadFile(file, { tags: ["chat-input"] })));
+
+      await sendText(chatId, input.trim(), {
+        client_sent_at: new Date().toISOString(),
+        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        source: "web",
+        location: locationRef.current,
+      }, uploaded.map((file) => file.id));
       setInput("");
+      setChatFiles([]);
       const [msgs, jobsData] = await Promise.all([
         fetchMessages(chatId, true),
         fetchJobs(chatId),
@@ -2550,7 +2916,12 @@ export default function App() {
       setVoiceSending(true);
       setError(null);
       const chatId = await ensureChat();
-      await sendVoice(chatId, blob, voiceInputLanguage || undefined);
+      await sendVoice(chatId, blob, voiceInputLanguage || undefined, {
+        client_sent_at: new Date().toISOString(),
+        timezone_name: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+        source: "web",
+        location: locationRef.current,
+      });
       const [msgs, jobsData] = await Promise.all([
         fetchMessages(chatId, true),
         fetchJobs(chatId),
@@ -2948,6 +3319,27 @@ export default function App() {
                       </select>
                     </label>
                     <label className="field">
+                      <span>Corv call voice</span>
+                      <div className="voice-selector-row">
+                        <select name="call_voice" defaultValue={settings.call_voice || "marin"}>
+                          {(settings.call_voice_options || ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]).map((voice) => (
+                            <option key={voice} value={voice}>{voice}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={(event) => {
+                            const select = event.currentTarget.parentElement?.querySelector("select") as HTMLSelectElement | null;
+                            void handlePreviewCallVoice(select?.value || settings.call_voice || "marin");
+                          }}
+                          disabled={previewingVoice !== null}
+                        >
+                          {previewingVoice ? "Playing…" : "Preview"}
+                        </button>
+                      </div>
+                    </label>
+                    <label className="field">
                       <span>Max function result chars</span>
                       <input
                         name="max_function_result_chars"
@@ -2956,6 +3348,24 @@ export default function App() {
                         step={100}
                         defaultValue={settings.max_function_result_chars ?? 6000}
                       />
+                    </label>
+                    <label className="field">
+                      <span>Codex authentication</span>
+                      <select name="codex_auth_mode" defaultValue={settings.codex_auth_mode || "profile"}>
+                        <option value="profile">ChatGPT profile</option>
+                        <option value="api_key">OpenAI API key</option>
+                      </select>
+                      <small className="muted">Switches new Codex processes without removing your saved profile login.</small>
+                    </label>
+                    <label className="field full">
+                      <span>Codex API key</span>
+                      <input
+                        name="codex_api_key"
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder={settings.codex_api_key_configured ? `Saved ${settings.codex_api_key_hint || "API key"} · leave blank to keep it` : "sk-..."}
+                      />
+                      <small className="muted">Stored encrypted. API-key mode uses usage-based OpenAI Platform billing.</small>
                     </label>
                   </div>
                   <div className="actions-row">
@@ -3746,10 +4156,10 @@ export default function App() {
                 </button>
                 <button
                   className="ghost"
-                  onClick={handleReplanCalendar}
+                  onClick={() => setCalendarPlanModalOpen(true)}
                   disabled={replanLoading || isActiveJob(calendarReplanJob)}
                 >
-                  {replanLoading ? "Queueing…" : isActiveJob(calendarReplanJob) ? "Replan running…" : "Replan"}
+                  {replanLoading ? "Queueing…" : isActiveJob(calendarReplanJob) ? "Planning next 2 weeks…" : "Plan next 2 weeks"}
                 </button>
                 <button className="ghost" onClick={openSoftEventCreator}>
                   Add soft event
@@ -4191,6 +4601,9 @@ export default function App() {
                       <p className="muted small">Pick a root and inspect the full subtree that feeds the planner.</p>
                     </div>
                     <div className="card-head-actions">
+                      <button className="primary" onClick={() => openObjectiveCreator()}>
+                        New root objective
+                      </button>
                       <label className="field objective-root-field">
                         <span>Root objective</span>
                         <select
@@ -4245,6 +4658,18 @@ export default function App() {
                                 <span className="pill">{selectedObjectiveDetail.children.length} child node{selectedObjectiveDetail.children.length === 1 ? "" : "s"}</span>
                               </div>
                             </div>
+                            <div className="objective-actions">
+                              <button className="ghost" onClick={() => openObjectiveEditor(selectedObjectiveDetail)}>Edit objective</button>
+                              <button className="ghost" onClick={() => openObjectiveCreator(selectedObjectiveDetail.id)}>Add sub-objective</button>
+                              <button className="ghost" onClick={() => openObjectiveTaskCreator(selectedObjectiveDetail.id)}>Add task</button>
+                              <button
+                                className="ghost danger-action"
+                                onClick={() => handleDeleteObjective(selectedObjectiveDetail)}
+                                disabled={objectiveSaving}
+                              >
+                                Delete objective
+                              </button>
+                            </div>
                             {selectedObjectiveDetail.description && (
                               <p className="objective-copy">{selectedObjectiveDetail.description}</p>
                             )}
@@ -4256,7 +4681,10 @@ export default function App() {
                             )}
                             <div className="objective-detail-grid">
                               <div>
-                                <div className="objective-panel-title">Tasks</div>
+                                <div className="objective-section-heading">
+                                  <div className="objective-panel-title">Tasks</div>
+                                  <button className="ghost pill-action" onClick={() => openObjectiveTaskCreator(selectedObjectiveDetail.id)}>Add task</button>
+                                </div>
                                 {selectedObjectiveDetail.tasks.length ? (
                                   <div className="calendar-list">
                                     {selectedObjectiveDetail.tasks.map((task) => (
@@ -4272,6 +4700,10 @@ export default function App() {
                                               : typeof task.estimated_effort_minutes === "number"
                                                 ? ` · Estimate ${task.estimated_effort_minutes} min`
                                                 : ""}
+                                          </div>
+                                          <div className="objective-task-actions">
+                                            <button className="ghost pill-action" onClick={() => openObjectiveTaskEditor(task)}>Edit</button>
+                                            <button className="ghost pill-action danger-action" onClick={() => handleDeleteObjectiveTask(task)}>Delete</button>
                                           </div>
                                         </div>
                                       </div>
@@ -4358,7 +4790,7 @@ export default function App() {
                           {task.status !== "completed" && task.status !== "canceled" && (
                             <>
                               <button className="ghost pill-action" onClick={() => handleToggleScheduledTask(task)}>
-                                {task.status === "paused" ? "Resume" : "Pause"}
+                                {task.status === "paused" || task.status === "failed" ? "Resume" : "Pause"}
                               </button>
                               <button className="ghost pill-action" onClick={() => { setSelectedSchedulerTask(task); handleCancelSchedulerTask(); }} style={{ color: "var(--alert)" }}>
                                 Cancel
@@ -4491,6 +4923,7 @@ export default function App() {
               </div>
             </header>
             {callsError && <div className="alert">{callsError}</div>}
+            <RealtimeCall onSessionsChanged={refreshCallSessions} />
             {callsLoading && <div className="muted">Loading calls…</div>}
             {!callsLoading && (
               callSessions.length ? (
@@ -4555,7 +4988,7 @@ export default function App() {
                 className="primary"
                 onClick={async () => {
                   try {
-                    await createCallSession({ goal: "Quick check-in call" });
+                    await createCallSession({ goal: "Quick check-in call", origin: "web" });
                     await refreshCallSessions();
                   } catch (err: any) {
                     if (handleAuthError(err)) return;
@@ -4567,10 +5000,16 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : showWorkout ? (
+          <WorkoutPanel />
         ) : showSsh ? (
           <SshPanel />
         ) : showCoding ? (
           <CodingPanel />
+        ) : showFiles ? (
+          <FilesPanel />
+        ) : showNotes ? (
+          <NotesPanel />
         ) : (
           <>
             <header className="main-header">
@@ -4694,6 +5133,7 @@ export default function App() {
             </section>
 
             <form className="input-bar" onSubmit={handleSend}>
+              {!!chatFiles.length && <div className="input-attachments">{chatFiles.map((file, index) => <span key={`${file.name}-${index}`}>{file.name}<button type="button" onClick={() => setChatFiles((items) => items.filter((_, i) => i !== index))}>×</button></span>)}</div>}
               <textarea
                 placeholder="Send a message…"
                 value={input}
@@ -4707,6 +5147,7 @@ export default function App() {
                 disabled={sending}
               />
               <div className="input-actions">
+                <label className="icon-btn attachment-btn" title="Attach files" aria-label="Attach files">＋<input hidden type="file" multiple onChange={(event) => { setChatFiles((items) => [...items, ...Array.from(event.target.files || [])]); event.target.value = ""; }} /></label>
                 <button
                   type="button"
                   className={`icon-btn ${recording ? "recording" : ""}`}
@@ -6048,6 +6489,168 @@ export default function App() {
                   </div>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+        {calendarPlanModalOpen && (
+          <div className="modal-backdrop" onClick={() => !replanLoading && setCalendarPlanModalOpen(false)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">Unified planning pass</p>
+                  <h3>Plan the next two weeks</h3>
+                </div>
+                <button className="ghost" onClick={() => !replanLoading && setCalendarPlanModalOpen(false)}>Close</button>
+              </div>
+              <div className="modal-body">
+                <div className="calendar-plan-explainer">
+                  <strong>One decision across the whole fortnight</strong>
+                  <p className="muted small">Corv will send fixed calendar events, objective tasks due inside the window, remaining effort, deadlines, priorities, and flexible events in one model call. The returned slots are validated for conflicts and deadline coverage before replacing the current plan.</p>
+                </div>
+                <label className="field">
+                  <span>Optional planning instruction</span>
+                  <textarea
+                    rows={4}
+                    value={calendarPlanNote}
+                    onChange={(e) => setCalendarPlanNote(e.target.value)}
+                    placeholder="For example: keep Friday evening free, schedule difficult study work before lunch, and leave Tuesday light."
+                  />
+                </label>
+                <div className="modal-actions">
+                  <button className="ghost" onClick={() => !replanLoading && setCalendarPlanModalOpen(false)}>Cancel</button>
+                  <button className="primary" onClick={handleReplanCalendar} disabled={replanLoading}>
+                    {replanLoading ? "Starting planner…" : "Create two-week plan"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {objectiveDraft && (
+          <div className="modal-backdrop" onClick={() => !objectiveSaving && setObjectiveDraft(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">{objectiveDraft.id ? "Edit" : "Create"}</p>
+                  <h3>{objectiveDraft.parent_id ? "Sub-objective" : "Root objective"}</h3>
+                </div>
+                <button className="ghost" onClick={() => !objectiveSaving && setObjectiveDraft(null)}>Close</button>
+              </div>
+              <form className="modal-body" onSubmit={saveObjectiveDraft}>
+                <div className="form-grid">
+                  <label className="field full">
+                    <span>Title</span>
+                    <input required value={objectiveDraft.title} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, title: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Parent</span>
+                    <select value={objectiveDraft.parent_id} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, parent_id: e.target.value })}>
+                      <option value="">No parent — root objective</option>
+                      {[...new Map([...objectiveRoots, ...flattenObjectiveTree(objectiveTree)].map((item) => [item.id, item])).values()]
+                        .filter((item) => item.id !== objectiveDraft.id)
+                        .map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Status</span>
+                    <select value={objectiveDraft.status} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, status: e.target.value })}>
+                      <option value="active">Active</option>
+                      <option value="paused">Paused</option>
+                      <option value="completed">Completed</option>
+                      <option value="canceled">Canceled</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Deadline</span>
+                    <input type="datetime-local" value={objectiveDraft.deadline_at} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, deadline_at: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Priority</span>
+                    <input type="number" value={objectiveDraft.priority} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, priority: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Estimated effort (minutes)</span>
+                    <input type="number" min={0} step={5} value={objectiveDraft.estimated_effort_minutes} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, estimated_effort_minutes: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Remaining effort (minutes)</span>
+                    <input type="number" min={0} step={5} value={objectiveDraft.remaining_effort_minutes} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, remaining_effort_minutes: e.target.value })} />
+                  </label>
+                  <label className="field full">
+                    <span>Description</span>
+                    <textarea rows={3} value={objectiveDraft.description} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, description: e.target.value })} />
+                  </label>
+                  <label className="field full">
+                    <span>Planning notes</span>
+                    <textarea rows={3} value={objectiveDraft.notes} onChange={(e) => setObjectiveDraft({ ...objectiveDraft, notes: e.target.value })} placeholder="Constraints, preferred approach, or useful context for Corv" />
+                  </label>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !objectiveSaving && setObjectiveDraft(null)}>Cancel</button>
+                  <button type="submit" className="primary" disabled={objectiveSaving || !objectiveDraft.title.trim()}>{objectiveSaving ? "Saving…" : "Save objective"}</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+        {objectiveTaskDraft && (
+          <div className="modal-backdrop" onClick={() => !objectiveSaving && setObjectiveTaskDraft(null)}>
+            <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <p className="eyebrow">{objectiveTaskDraft.id ? "Edit" : "Create"}</p>
+                  <h3>Objective task</h3>
+                </div>
+                <button className="ghost" onClick={() => !objectiveSaving && setObjectiveTaskDraft(null)}>Close</button>
+              </div>
+              <form className="modal-body" onSubmit={saveObjectiveTaskDraft}>
+                <div className="form-grid">
+                  <label className="field full">
+                    <span>Task title</span>
+                    <input required value={objectiveTaskDraft.title} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, title: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Objective</span>
+                    <select value={objectiveTaskDraft.objective_id} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, objective_id: e.target.value })}>
+                      {flattenObjectiveTree(objectiveTree).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Status</span>
+                    <select value={objectiveTaskDraft.status} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, status: e.target.value })}>
+                      <option value="todo">To do</option>
+                      <option value="in_progress">In progress</option>
+                      <option value="blocked">Blocked</option>
+                      <option value="done">Done</option>
+                      <option value="canceled">Canceled</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Deadline</span>
+                    <input type="datetime-local" value={objectiveTaskDraft.due_at} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, due_at: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Sort order</span>
+                    <input type="number" min={0} value={objectiveTaskDraft.sort_order} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, sort_order: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Estimated effort (minutes)</span>
+                    <input type="number" min={0} step={5} value={objectiveTaskDraft.estimated_effort_minutes} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, estimated_effort_minutes: e.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>Remaining effort (minutes)</span>
+                    <input type="number" min={0} step={5} value={objectiveTaskDraft.remaining_effort_minutes} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, remaining_effort_minutes: e.target.value })} />
+                  </label>
+                  <label className="field full">
+                    <span>Description</span>
+                    <textarea rows={4} value={objectiveTaskDraft.description} onChange={(e) => setObjectiveTaskDraft({ ...objectiveTaskDraft, description: e.target.value })} />
+                  </label>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="ghost" onClick={() => !objectiveSaving && setObjectiveTaskDraft(null)}>Cancel</button>
+                  <button type="submit" className="primary" disabled={objectiveSaving || !objectiveTaskDraft.title.trim()}>{objectiveSaving ? "Saving…" : "Save task"}</button>
+                </div>
+              </form>
             </div>
           </div>
         )}

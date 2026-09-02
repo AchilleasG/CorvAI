@@ -6,10 +6,12 @@ from typing import Dict, Any, List, Optional
 import logging
 from django.utils import timezone
 from django.db import connection
+from django.db.models import Q
 
 from orchestration.function_caller import FunctionCallOrchestrator
 from orchestration.models import (
     CallSession,
+    CallTranscriptEntry,
     PushToken,
     UserMessage,
 )
@@ -19,6 +21,11 @@ from orchestration.services import FunctionRunnerService, ModuleDirectory
 from openai_integration.services import ChatAIService
 
 logger = logging.getLogger(__name__)
+
+# Temporarily freeze every automatic end/follow-up planning path. Calls remain
+# explicitly controlled by the user while realtime actions continue normally.
+AUTOMATIC_CALL_COMPLETION_ENABLED = False
+FOLLOW_UP_CALLS_ENABLED = False
 
 NO_CLARIFICATION_NOTE = (
     "No user clarifications are available. Do not ask the user; make reasonable "
@@ -34,7 +41,17 @@ def _format_transcript(session: CallSession) -> str:
     return "\n".join(lines)
 
 
-def create_call_session(goal: str, scheduled_for: Optional[datetime] = None) -> CallSession:
+def is_web_call(session: CallSession) -> bool:
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    return metadata.get("origin") == "web"
+
+
+def create_call_session(
+    goal: str,
+    scheduled_for: Optional[datetime] = None,
+    *,
+    origin: str = "corv",
+) -> CallSession:
     status = CallSession.STATUS_SCHEDULED
     if scheduled_for and scheduled_for <= timezone.now():
         status = CallSession.STATUS_RINGING
@@ -51,14 +68,18 @@ def create_call_session(goal: str, scheduled_for: Optional[datetime] = None) -> 
         status=status,
         scheduled_for=scheduled_for,
         ringing_started_at=timezone.now() if status == CallSession.STATUS_RINGING else None,
+        metadata={"origin": origin},
     )
     logger.info("call_session created id=%s status=%s", session.id, session.status)
-    if status == CallSession.STATUS_RINGING:
+    if status == CallSession.STATUS_RINGING and not is_web_call(session):
         notify_incoming_call(session)
     return session
 
 
 def notify_incoming_call(session: CallSession):
+    if is_web_call(session):
+        logger.info("call_session mobile notification suppressed for web session id=%s", session.id)
+        return
     token_count = PushToken.objects.filter(platform="android_fcm").count()
     logger.info(
         "call_session notify_incoming id=%s token_count=%s goal=%s",
@@ -89,6 +110,9 @@ def mark_call_missed(session: CallSession):
         session.status = CallSession.STATUS_MISSED
         session.ended_at = timezone.now()
         session.save(update_fields=["status", "ended_at", "updated_at"])
+        if is_web_call(session):
+            logger.info("call_session missed mobile follow-up suppressed for web session id=%s", session.id)
+            return
         title = "Corv"
         draft_body = f"Looks like we missed each other about: {session.goal}"
         phrased_body = ChatAIService.phrase_inbox_message(
@@ -129,7 +153,8 @@ def complete_call(session: CallSession):
     session.ended_at = timezone.now()
     session.save(update_fields=["status", "ended_at", "updated_at"])
     summarize_call(session)
-    process_call_actions(session)
+    if FOLLOW_UP_CALLS_ENABLED:
+        process_call_actions(session)
 
 
 def summarize_call(session: CallSession):
@@ -164,6 +189,7 @@ def _plan_with_no_clarifications(
     user_request: str,
     tool_catalog: List[Dict[str, Any]],
     prior_results: List[Dict[str, Any]],
+    call_session: CallSession | None = None,
 ) -> Dict[str, Any]:
     for attempt in range(2):
         decision = FunctionCallOrchestrator._plan_next_action(
@@ -172,6 +198,7 @@ def _plan_with_no_clarifications(
             prior_results=prior_results,
             job=None,
             chat_id=None,
+            call_session_id=str(call_session.id) if call_session else None,
         )
         if not decision.get("ask_user"):
             return decision
@@ -184,10 +211,14 @@ def _plan_with_no_clarifications(
 
 
 def process_call_actions(session: CallSession, max_steps: int = 6):
+    if not FOLLOW_UP_CALLS_ENABLED:
+        logger.info("call follow-up planner frozen session=%s", session.id)
+        return []
     transcript = _format_transcript(session)
     user_request = (
         f"Call goal: {session.goal}\n\nTranscript:\n{transcript}\n\n"
-        "Decide if follow-up actions are needed. You may create scheduled tasks or "
+        "Decide if follow-up actions are needed. Never repeat actions already recorded as Action result. "
+        "You may create scheduled tasks or "
         "schedule a follow-up call session when appropriate. "
         "If the user agreed to do something, schedule a confirmation call about 10 minutes "
         "after the estimated completion time if you can infer it." \
@@ -211,13 +242,93 @@ def process_call_actions(session: CallSession, max_steps: int = 6):
                 job_id=None,
             )
             result = FunctionRunnerService.run_function_call(payload, job=None)
-            coerced = FunctionCallOrchestrator._coerce_result_payload(result)
-            coerced["function_id"] = call["function_id"]
-            coerced["params"] = call.get("params") or {}
+            coerced = FunctionCallOrchestrator._coerce_result_payload(
+                result,
+                function_id=call["function_id"],
+                params=call.get("params") or {},
+            )
             prior_results.append(coerced)
             continue
         if decision.get("done"):
             break
+
+
+def _active_call_delegation_reply(session: CallSession) -> str:
+    """Return an audio-friendly status when this call has active delegated work."""
+    from coding.chat_waits import CodingChatWaitService
+
+    state = CodingChatWaitService.list_for_origin(
+        call_session=session,
+        include_finished=False,
+    )
+    active = [item for item in state["delegations"] if item["active"]]
+    if not active:
+        return ""
+    waiting = [item for item in active if item["waiting"]]
+    selected = waiting or active
+    labels = [str(item.get("label") or "delegated task") for item in selected[:3]]
+    if len(labels) == 1:
+        subject = f'the Codex task called {labels[0]}'
+    else:
+        subject = f'{len(selected)} Codex tasks, including {", ".join(labels)}'
+    if waiting:
+        return (
+            f"Codex is working on {subject} now. I am waiting for it to finish and will tell you "
+            "as soon as it completes. You can interrupt the wait at any time."
+        )
+    return f"Codex is working on {subject} now. The call can continue while it runs."
+
+
+def execute_call_action(session: CallSession, instruction: str, max_steps: int = 6) -> str:
+    """Run a user-requested Corv action while a realtime call is active."""
+    instruction = (instruction or "").strip()
+    if not instruction:
+        return "I could not run that because the action was empty."
+    user_request = (
+        f"Call goal: {session.goal}\n\nConversation so far:\n{_format_transcript(session)}\n\n"
+        f"Action requested now: {instruction}\n\n"
+        "Execute the requested action using the same Corv tools available in text mode. "
+        "Return a short plain language account of what happened."
+    )
+    tool_catalog = ModuleDirectory.function_catalog()
+    prior_results: List[Dict[str, Any]] = []
+    final_summary = "I could not complete that action."
+    for _ in range(max_steps):
+        decision = _plan_with_no_clarifications(
+            user_request=user_request, tool_catalog=tool_catalog, prior_results=prior_results,
+            call_session=session,
+        )
+        call = decision.get("call")
+        if call and call.get("function_id"):
+            payload = FunctionCallPayload(
+                trace_id=f"realtime-call-{session.id}",
+                function_id=call["function_id"], params=call.get("params") or {}, job_id=None,
+            )
+            result = FunctionRunnerService.run_function_call(payload, job=None, call_session=session)
+            coerced = FunctionCallOrchestrator._coerce_result_payload(
+                result,
+                function_id=call["function_id"],
+                params=call.get("params") or {},
+            )
+            prior_results.append(coerced)
+            if payload.function_id in {
+                "coding_sessions.delegate_task",
+                "coding_sessions.delegate_feature",
+            }:
+                delegation_reply = _active_call_delegation_reply(session)
+                if delegation_reply:
+                    final_summary = delegation_reply
+                    break
+            continue
+        if decision.get("done"):
+            final_summary = str(decision.get("summary") or decision.get("reply") or "Action completed.")
+            if final_summary == "Planner output could not be parsed.":
+                final_summary = _active_call_delegation_reply(session) or final_summary
+            break
+    CallTranscriptEntry.objects.create(
+        session=session, role="system", content=f"Action result: {final_summary}"
+    )
+    return final_summary
 
 
 def poll_call_sessions(ring_timeout_seconds: int = 45, limit: int = 25) -> int:
@@ -254,7 +365,9 @@ def poll_call_sessions(ring_timeout_seconds: int = 45, limit: int = 25) -> int:
 
     cutoff = now - timedelta(seconds=ring_timeout_seconds)
     ringing = CallSession.objects.filter(
-        status=CallSession.STATUS_RINGING, ringing_started_at__lte=cutoff
+        Q(metadata__origin__isnull=True) | ~Q(metadata__origin="web"),
+        status=CallSession.STATUS_RINGING,
+        ringing_started_at__lte=cutoff,
     )[:limit]
     logger.info("poll_call_sessions timeout_candidates=%s cutoff=%s", len(ringing), cutoff.isoformat())
     for session in ringing:

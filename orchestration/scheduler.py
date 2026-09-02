@@ -22,6 +22,13 @@ NO_CLARIFICATION_NOTE = (
     "No user clarifications are available. Do not ask the user; make reasonable "
     "assumptions and complete the task to the best of your ability."
 )
+DUE_EXECUTION_NOTE = (
+    "This scheduled task is executing NOW because its due time has arrived. Perform its requested "
+    "action now; do not schedule or postpone the same action again. For reminders, notifications, "
+    "or requests to tell the user something, call messages.send_message now. A planner summary or "
+    "scheduler log is not user delivery. Only call scheduled_tasks.create_task if the task explicitly "
+    "asks you to create a separate future schedule."
+)
 
 
 def _add_months(dt: datetime, months: int = 1) -> datetime:
@@ -115,7 +122,7 @@ def execute_task(task: ScheduledTask, *, max_steps: int = 5) -> ScheduledTaskRun
     log_run(run, f"Scheduled task started. Recurrence: {task.recurrence}")
     tool_catalog = ModuleDirectory.function_catalog()
     prior_results: List[Dict[str, Any]] = []
-    user_request = f"Scheduled task:\n{task.prompt}\n\n{NO_CLARIFICATION_NOTE}"
+    user_request = f"Scheduled task:\n{task.prompt}\n\n{DUE_EXECUTION_NOTE}\n\n{NO_CLARIFICATION_NOTE}"
 
     try:
         for step in range(max_steps):
@@ -139,7 +146,11 @@ def execute_task(task: ScheduledTask, *, max_steps: int = 5) -> ScheduledTaskRun
                 )
                 log_run(run, f"Calling {payload.function_id} with params: {payload.params}", role="caller")
                 result = FunctionRunnerService.run_function_call(payload, job=None)
-                coerced = FunctionCallOrchestrator._coerce_result_payload(result)
+                coerced = FunctionCallOrchestrator._coerce_result_payload(
+                    result,
+                    function_id=call["function_id"],
+                    params=call.get("params") or {},
+                )
                 coerced["function_id"] = call["function_id"]
                 coerced["params"] = call.get("params") or {}
                 prior_results.append(coerced)
@@ -166,8 +177,18 @@ def execute_task(task: ScheduledTask, *, max_steps: int = 5) -> ScheduledTaskRun
             run.summary = ChatAIService.summarize_scheduled_task(context)
         except Exception:
             pass
-        run.status = ScheduledTaskRun.STATUS_COMPLETED
-        log_run(run, f"TL;DR: {run.summary}", role="frontman")
+        failed_results = [result for result in prior_results if result.get("status") == "error"]
+        successful_results = [result for result in prior_results if result.get("status") == "ok"]
+        if failed_results and not successful_results:
+            run.status = ScheduledTaskRun.STATUS_FAILED
+            run.error_summary = "; ".join(
+                str(result.get("error") or f"{result.get('function_id')} failed")
+                for result in failed_results
+            )[:4000]
+            log_run(run, f"Run failed: {run.error_summary}", level="error")
+        else:
+            run.status = ScheduledTaskRun.STATUS_COMPLETED
+            log_run(run, f"TL;DR: {run.summary}", role="frontman")
     except Exception as exc:  # pragma: no cover
         run.status = ScheduledTaskRun.STATUS_FAILED
         run.error_summary = str(exc)
@@ -209,7 +230,12 @@ def poll_due_tasks(limit: int = 25) -> int:
         claimed.last_run_at = run.finished_at or timezone.now()
         next_run = compute_next_run(claimed, from_dt=claimed.next_run_at or claimed.last_run_at)
         if next_run is None:
-            claimed.status = ScheduledTask.STATUS_COMPLETED
+            claimed.next_run_at = None
+            claimed.status = (
+                ScheduledTask.STATUS_FAILED
+                if run.status == ScheduledTaskRun.STATUS_FAILED
+                else ScheduledTask.STATUS_COMPLETED
+            )
         else:
             while next_run <= now:
                 next_run = compute_next_run(claimed, from_dt=next_run)

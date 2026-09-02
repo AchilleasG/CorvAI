@@ -957,8 +957,8 @@ class ObjectiveService:
             for task_id in valid_task_ids:
                 task = task_map[task_id]
                 deadline = ObjectiveService._task_deadline(task, objective, window_end)
-                if plan.start_at > deadline:
-                    issues.append(f"Session {index} for {objective.title} starts after task deadline for {task.title}.")
+                if plan.end_at > deadline:
+                    issues.append(f"Session {index} for {objective.title} ends after task deadline for {task.title}.")
                     deadline_missed = True
                     break
             if deadline_missed:
@@ -1935,6 +1935,7 @@ class ObjectiveService:
         soft_events = list(
             SoftEvent.objects.filter(
                 objective_links__isnull=False,
+                metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE,
                 status=SoftEvent.STATUS_ACTIVE,
             ).distinct()
         )
@@ -1966,9 +1967,7 @@ class ObjectiveService:
         slots_qs = SoftEventSlot.objects.filter(
             end_at__gte=window_start,
             status__in=ObjectiveService.SLOT_UNASSIGN_STATUSES,
-        ).exclude(
-            soft_event__objective_links__isnull=False,
-        )
+        ).exclude(soft_event__metadata__source=ObjectiveService.OBJECTIVE_SOFT_EVENT_SOURCE)
         unassigned_slots = slots_qs.update(
             status=SoftEventSlot.STATUS_CANCELED,
             rationale="Canceled so the planner can reassign this soft event from scratch.",

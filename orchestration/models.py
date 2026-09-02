@@ -597,12 +597,14 @@ class ScheduledTask(models.Model):
     STATUS_ACTIVE = "active"
     STATUS_PAUSED = "paused"
     STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
     STATUS_CANCELED = "canceled"
 
     STATUS_CHOICES = [
         (STATUS_ACTIVE, "Active"),
         (STATUS_PAUSED, "Paused"),
         (STATUS_COMPLETED, "Completed"),
+        (STATUS_FAILED, "Failed"),
         (STATUS_CANCELED, "Canceled"),
     ]
 
@@ -767,6 +769,7 @@ class UserNote(models.Model):
     tags = ArrayField(models.CharField(max_length=64, blank=True), default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -778,6 +781,34 @@ class UserNote(models.Model):
 
     def __str__(self):
         return f"Note {self.id}"
+
+
+class KnowledgeEntity(models.Model):
+    """Extensible typed knowledge record sharing notes' tags and vector semantics."""
+
+    TYPE_LOCATION = "location"
+    TYPE_PERSON = "person"
+    TYPE_CHOICES = [(TYPE_LOCATION, "Location"), (TYPE_PERSON, "Person")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user_id = models.CharField(max_length=255, db_index=True, default="default")
+    entity_type = models.CharField(max_length=64, db_index=True)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, default="")
+    data = models.JSONField(default=dict, blank=True)
+    search_text = models.TextField(blank=True, default="")
+    embedding = VectorField(dimensions=1536, null=True, blank=True)
+    source = models.CharField(max_length=255, blank=True, default="")
+    tags = ArrayField(models.CharField(max_length=64, blank=True), default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["entity_type", "name"]
+        indexes = [models.Index(fields=["user_id", "entity_type", "name"]), models.Index(fields=["deleted_at"])]
+
+    def __str__(self): return f"{self.entity_type}: {self.name}"
 
 
 class PushToken(models.Model):
@@ -911,3 +942,19 @@ class CallTranscriptEntry(models.Model):
 
     def __str__(self):
         return f"{self.session_id} {self.role}"
+
+
+class UserPresence(models.Model):
+    """Latest device-reported user location for location-aware conversations."""
+    key = models.CharField(max_length=32, primary_key=True, default="default", editable=False)
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    accuracy_m = models.FloatField(null=True, blank=True)
+    altitude_m = models.FloatField(null=True, blank=True)
+    captured_at = models.DateTimeField()
+    timezone_name = models.CharField(max_length=64, blank=True, default="")
+    source = models.CharField(max_length=24, blank=True, default="device")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"User presence ({self.latitude:.5f}, {self.longitude:.5f})"

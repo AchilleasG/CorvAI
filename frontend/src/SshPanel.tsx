@@ -27,6 +27,7 @@ const emptyDraft: SshMachineInput = {
   private_key: "",
   passphrase: "",
   allow_ai_commands: false,
+  is_default: false,
   connect_timeout_seconds: 15,
   command_timeout_seconds: 120,
   keepalive_seconds: 30,
@@ -75,8 +76,8 @@ export default function SshPanel() {
     if (output) output.scrollTop = output.scrollHeight;
   }, [activeTerminalId, results.length]);
 
-  async function refresh(preferredId?: string | null) {
-    setLoading(true);
+  async function refresh(preferredId?: string | null, showLoading = true) {
+    if (showLoading) setLoading(true);
     try {
       const response = await fetchSshMachines();
       setMachines(response.machines);
@@ -90,13 +91,13 @@ export default function SshPanel() {
     } catch (err) {
       setError(errorText(err));
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   }
 
   useEffect(() => {
-    refresh();
-    const timer = window.setInterval(() => refresh(), 5000);
+    refresh(undefined, true);
+    const timer = window.setInterval(() => refresh(undefined, false), 5000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -138,6 +139,7 @@ export default function SshPanel() {
       username: machine.username,
       auth_type: machine.auth_type,
       allow_ai_commands: machine.allow_ai_commands,
+      is_default: machine.is_default,
       connect_timeout_seconds: machine.connect_timeout_seconds,
       command_timeout_seconds: machine.command_timeout_seconds,
       keepalive_seconds: machine.keepalive_seconds,
@@ -172,6 +174,20 @@ export default function SshPanel() {
       setError(errorText(err));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function makeDefault() {
+    if (!selected || selected.is_default || !selected.allow_ai_commands) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await updateSshMachine(selected.id, { is_default: true });
+      await refresh(selected.id);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -315,7 +331,7 @@ export default function SshPanel() {
               <span className={`ssh-status ${machine.connected ? "online" : "offline"}`} />
               <span>
                 <strong>{machine.name}</strong>
-                <small>{machine.username}@{machine.host}:{machine.port}</small>
+                <small>{machine.username}@{machine.host}:{machine.port}{machine.is_default ? " (default)" : ""}</small>
               </span>
             </button>
           ))}
@@ -337,18 +353,25 @@ export default function SshPanel() {
                 <label>Connect timeout (seconds)<input type="number" min="1" value={draft.connect_timeout_seconds} onChange={(e) => setDraft({ ...draft, connect_timeout_seconds: Number(e.target.value) })} /></label>
                 <label>Command timeout (seconds)<input type="number" min="1" value={draft.command_timeout_seconds} onChange={(e) => setDraft({ ...draft, command_timeout_seconds: Number(e.target.value) })} /></label>
                 <label>Keepalive interval (seconds)<input type="number" min="1" value={draft.keepalive_seconds} onChange={(e) => setDraft({ ...draft, keepalive_seconds: Number(e.target.value) })} /></label>
-                <label className="wide">Notes<textarea rows={3} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} /></label>
-                <label className="ssh-check wide"><input type="checkbox" checked={draft.allow_ai_commands} onChange={(e) => setDraft({ ...draft, allow_ai_commands: e.target.checked })} /><span>Allow Corv to execute commands on this machine</span></label>
+                <label className="wide">Machine notes for Corv<textarea rows={5} placeholder="Capabilities, important paths, package-manager behavior, machine role, and limitations. Do not store secrets." value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} /></label>
+                <label className="ssh-check wide"><input type="checkbox" checked={draft.allow_ai_commands} onChange={(e) => setDraft({ ...draft, allow_ai_commands: e.target.checked, is_default: e.target.checked ? draft.is_default : false })} /><span>Allow Corv to execute commands on this machine</span></label>
+                <label className="ssh-check wide"><input type="checkbox" checked={!!draft.is_default} disabled={!draft.allow_ai_commands} onChange={(e) => setDraft({ ...draft, is_default: e.target.checked })} /><span>Use as the default machine for Corv calculations, commands, and generated files</span></label>
               </div>
               <div className="actions-row"><button type="button" className="ghost" onClick={() => setEditing(false)}>Cancel</button><button className="primary" disabled={saving}>{saving ? "Saving…" : "Save machine"}</button></div>
             </form>
           ) : selected ? (
             <>
               <div className="card ssh-machine-detail">
-                <div className="card-head"><div><p className="eyebrow">{selected.connected ? "Connected" : "Disconnected"}</p><h3>{selected.name}</h3></div><div className="main-actions"><button className="ghost" onClick={() => beginEdit(selected)}>Edit</button><button className="ghost" onClick={removeMachine} disabled={busy}>Delete</button><button className={selected.connected ? "ghost" : "primary"} onClick={toggleConnection} disabled={busy}>{selected.connected ? "Disconnect" : "Connect"}</button></div></div>
-                <div className="ssh-facts"><span><small>Target</small>{selected.username}@{selected.host}:{selected.port}</span><span><small>Authentication</small>{selected.auth_type.replace("_", " ")}</span><span><small>Corv access</small>{selected.allow_ai_commands ? "Enabled" : "Disabled"}</span><span><small>Host key</small>{selected.host_key_fingerprint || "Captured on first connection"}</span></div>
+                <div className="card-head ssh-machine-heading"><div><p className="eyebrow">{selected.is_default ? "Default machine" : selected.connected ? "Connected" : "Disconnected"}</p><h3>{selected.name}</h3></div></div>
+                <div className="ssh-machine-actions" aria-label="Machine actions">
+                  {!selected.is_default && selected.allow_ai_commands && <button type="button" className="ghost" onClick={makeDefault} disabled={busy}>Make default</button>}
+                  <button type="button" className="ghost" onClick={() => beginEdit(selected)} disabled={busy}>Edit</button>
+                  <button type="button" className="ghost" onClick={removeMachine} disabled={busy}>Delete</button>
+                  <button type="button" className={selected.connected ? "ghost" : "primary"} onClick={toggleConnection} disabled={busy}>{selected.connected ? "Disconnect" : "Connect"}</button>
+                </div>
+                <div className="ssh-facts"><span><small>Target</small>{selected.username}@{selected.host}:{selected.port}</span><span><small>Authentication</small>{selected.auth_type.replace("_", " ")}</span><span><small>Corv access</small>{selected.allow_ai_commands ? "Enabled" : "Disabled"}</span><span><small>Default routing</small>{selected.is_default ? "Preferred" : "No"}</span><span><small>Host key</small>{selected.host_key_fingerprint || "Captured on first connection"}</span></div>
                 {selected.host_key_fingerprint && <button type="button" className="ghost pill-action" onClick={resetHostKey} disabled={busy}>Reset pinned host key</button>}
-                {selected.notes && <p className="muted">{selected.notes}</p>}
+                <div><p className="eyebrow">Machine notes used by Corv</p><p className="muted">{selected.notes || "No machine-specific guidance saved yet."}</p></div>
                 {selected.last_error && <div className="alert">Last error: {selected.last_error}</div>}
               </div>
               <form className="card ssh-terminal" onSubmit={executeCommand}>

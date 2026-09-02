@@ -1,4 +1,9 @@
 import {
+  UserNote,
+  KnowledgeEntity,
+  KnowledgeEntityType,
+  KnowledgeSearchResult,
+  LocationSearchResult,
   ChatListItem,
   Message,
   SendTextResponse,
@@ -38,6 +43,14 @@ import {
   CodingTerminal,
   CodingLiveLogs,
   FeatureDelegation,
+  ManagedFile,
+  WorkoutExercise,
+  WorkoutExerciseSpec,
+  WorkoutPlan,
+  WorkoutSession,
+  WorkoutExerciseLog,
+  WorkoutGoal,
+  WorkoutDashboard,
 } from "./types";
 
 type TokenGetter = () => string | null | Promise<string | null>;
@@ -109,6 +122,40 @@ async function requestBlob(config: ApiConfig, path: string): Promise<Blob> {
 
 export function createApi(config: ApiConfig) {
   return {
+    fetchNotes(filters: { query?: string; tags?: string[] } = {}) {
+      const params = new URLSearchParams();
+      if (filters.query?.trim()) params.set("query", filters.query.trim());
+      if (filters.tags?.length) params.set("tags", filters.tags.join(","));
+      const suffix = params.size ? `?${params.toString()}` : "";
+      return request<{ notes: UserNote[]; tags: string[]; count: number }>(config, `/orchestration/notes${suffix}`);
+    },
+    createNote(payload: { content: string; tags?: string[]; expires_at?: string | null }) {
+      return request<UserNote>(config, "/orchestration/notes", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    },
+    updateNote(note_id: string, payload: { content: string; tags?: string[]; expires_at?: string | null }) {
+      return request<UserNote>(config, `/orchestration/notes/${note_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+    },
+    deleteNote(note_id: string) {
+      return request<{ deleted: boolean; id: string }>(config, `/orchestration/notes/${note_id}`, {
+        method: "DELETE",
+      });
+    },
+    fetchKnowledgeEntities(entityType:KnowledgeEntityType, filters:{query?:string;tags?:string[]}={}) {
+      const params=new URLSearchParams(); if(filters.query?.trim())params.set("query",filters.query.trim()); if(filters.tags?.length)params.set("tags",filters.tags.join(","));
+      return request<{entity_type:string;entities:KnowledgeEntity[]}>(config,`/orchestration/knowledge/${entityType}${params.size?`?${params}`:""}`);
+    },
+    createKnowledgeEntity(entityType:KnowledgeEntityType,payload:Record<string,unknown>) { return request<KnowledgeEntity>(config,`/orchestration/knowledge/${entityType}`,{method:"POST",body:JSON.stringify(payload)}); },
+    updateKnowledgeEntity(entityType:KnowledgeEntityType,entityId:string,payload:Record<string,unknown>) { return request<KnowledgeEntity>(config,`/orchestration/knowledge/${entityType}/${entityId}`,{method:"PATCH",body:JSON.stringify(payload)}); },
+    deleteKnowledgeEntity(entityType:KnowledgeEntityType,entityId:string) { return request<{deleted:boolean;id:string}>(config,`/orchestration/knowledge/${entityType}/${entityId}`,{method:"DELETE"}); },
+    searchKnowledge(query:string,tags:string[]=[],limit=20) { const params=new URLSearchParams({query,limit:String(limit)});if(tags.length)params.set("tags",tags.join(","));return request<{query:string;preferred_types:KnowledgeEntityType[];results:KnowledgeSearchResult[]}>(config,`/orchestration/knowledge/search?${params}`); },
+    fetchKnowledgeTags() { return request<{tags:string[]}>(config,"/orchestration/knowledge/tags"); },
+    searchLocations(query:string,limit=6) { const params=new URLSearchParams({query,limit:String(limit)});return request<{query:string;results:LocationSearchResult[];attribution:string}>(config,`/orchestration/knowledge/location-search?${params}`); },
     fetchChats() {
       return request<ChatListItem[]>(config, "/chats/");
     },
@@ -137,6 +184,29 @@ export function createApi(config: ApiConfig) {
       const suffix = visible_only ? "?visible_only=true" : "";
       return request<Message[]>(config, `/chats/${chat_id}/messages${suffix}`);
     },
+    fetchFiles(filters?: { session_id?: string; turn_id?: string; delegation_id?: string; tag?: string }) {
+      const params = new URLSearchParams();
+      if (filters?.session_id) params.set("session_id", filters.session_id);
+      if (filters?.turn_id) params.set("turn_id", filters.turn_id);
+      if (filters?.delegation_id) params.set("delegation_id", filters.delegation_id);
+      if (filters?.tag) params.set("tag", filters.tag);
+      const query = params.toString();
+      return request<{ files: ManagedFile[] }>(config, `/files${query ? `?${query}` : ""}`);
+    },
+    uploadFile(file: Blob, options?: { filename?: string; metadata?: Record<string, unknown>; tags?: string[]; session_id?: string; turn_id?: string }) {
+      const formData = new FormData();
+      formData.append("file", file, options?.filename || (file as File).name || "file");
+      formData.append("metadata", JSON.stringify(options?.metadata || {}));
+      formData.append("tags", JSON.stringify(options?.tags || []));
+      if (options?.session_id) formData.append("session_id", options.session_id);
+      if (options?.turn_id) formData.append("turn_id", options.turn_id);
+      return request<ManagedFile>(config, "/files/upload", { method: "POST", body: formData });
+    },
+    updateFile(file_id: string, payload: { filename?: string; content_type?: string; metadata?: Record<string, unknown>; tags?: string[] }) {
+      return request<ManagedFile>(config, `/files/${file_id}`, { method: "PATCH", body: JSON.stringify(payload) });
+    },
+    deleteFile(file_id: string) { return request<{ ok: boolean }>(config, `/files/${file_id}`, { method: "DELETE" }); },
+    fetchFileContent(file_id: string, download = false) { return requestBlob(config, `/files/${file_id}/content${download ? "?download=true" : ""}`); },
     fetchJobMessages(chat_id: string, job_id: string) {
       const qs = `?visible_only=false&job_id=${encodeURIComponent(job_id)}`;
       return request<Message[]>(config, `/chats/${chat_id}/messages${qs}`);
@@ -144,13 +214,19 @@ export function createApi(config: ApiConfig) {
     fetchJobMessagesDirect(job_id: string) {
       return request<Message[]>(config, `/orchestration/jobs/${job_id}/messages`);
     },
-    sendText(chat_id: string, text: string) {
-      return request<SendTextResponse>(config, "/input/text/", {
+    updatePresence(payload: Record<string, unknown>) {
+      return request<Record<string, unknown>>(config, "/orchestration/presence", {
         method: "POST",
-        body: JSON.stringify({ chat_id, text }),
+        body: JSON.stringify(payload),
       });
     },
-    async sendVoice(chat_id: string, file: Blob, language?: string) {
+    sendText(chat_id: string, text: string, metadata: Record<string, unknown> = {}, file_ids: string[] = []) {
+      return request<SendTextResponse>(config, "/input/text/", {
+        method: "POST",
+        body: JSON.stringify({ chat_id, text, metadata, file_ids }),
+      });
+    },
+    async sendVoice(chat_id: string, file: Blob, language?: string, metadata: Record<string, unknown> = {}) {
       const formData = new FormData();
       formData.append("chat_id", chat_id);
       const mime = (file.type || "").toLowerCase();
@@ -165,6 +241,7 @@ export function createApi(config: ApiConfig) {
               : "webm";
       formData.append("file", file, `voice.${extension}`);
       if (language) formData.append("language", language);
+      formData.append("metadata", JSON.stringify(metadata));
 
       const token = await resolveToken(config.getToken);
       const res = await fetch(`${config.baseUrl}/input/voice/`, {
@@ -229,6 +306,11 @@ export function createApi(config: ApiConfig) {
         study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
+        call_voice: string;
+        call_voice_options: string[];
+        codex_auth_mode: "profile" | "api_key";
+        codex_api_key_configured: boolean;
+        codex_api_key_hint: string;
       }>(config, "/orchestration/settings");
     },
     updateSettings(payload: {
@@ -238,6 +320,9 @@ export function createApi(config: ApiConfig) {
       study_model?: string;
       cache_mode?: string;
       max_function_result_chars?: number;
+      call_voice?: string;
+      codex_auth_mode?: "profile" | "api_key";
+      codex_api_key?: string;
     }) {
       return request<{
         frontman_model: string;
@@ -246,10 +331,21 @@ export function createApi(config: ApiConfig) {
         study_model: string;
         cache_mode: string;
         max_function_result_chars: number;
+        call_voice: string;
+        call_voice_options: string[];
+        codex_auth_mode: "profile" | "api_key";
+        codex_api_key_configured: boolean;
+        codex_api_key_hint: string;
       }>(config, "/orchestration/settings", {
         method: "POST",
         body: JSON.stringify(payload),
       });
+    },
+    previewCallVoice(voice: string) {
+      return request<{ voice: string; content_type: string; audio_base64: string }>(
+        config,
+        `/orchestration/settings/call_voice_preview?voice=${encodeURIComponent(voice)}`,
+      );
     },
     fetchCalendarCombined(params: { days?: number } = {}) {
       const qs = params.days ? `?days=${params.days}` : "";
@@ -642,12 +738,16 @@ export function createApi(config: ApiConfig) {
         method: "PATCH",
       });
     },
-    fetchCallSessions(status?: string) {
-      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    fetchCallSessions(options: { status?: string; platform?: "web" | "mobile" } = {}) {
+      const params = new URLSearchParams();
+      if (options.status) params.set("status", options.status);
+      if (options.platform) params.set("platform", options.platform);
+      const qs = params.toString() ? `?${params.toString()}` : "";
       return request<CallSession[]>(config, `/orchestration/call_sessions${qs}`);
     },
-    createCallSession(payload: { goal: string; scheduled_for?: string }) {
+    createCallSession(payload: { goal: string; scheduled_for?: string; origin?: "web" | "mobile" | "corv" }) {
       const params = new URLSearchParams({ goal: payload.goal });
+      if (payload.origin) params.set("origin", payload.origin);
       if (payload.scheduled_for) {
         params.set("scheduled_for", payload.scheduled_for);
       }
@@ -678,8 +778,19 @@ export function createApi(config: ApiConfig) {
         },
       );
     },
-    createRealtimeToken(session_id: string) {
-      return request<any>(config, `/orchestration/call_sessions/${session_id}/realtime_token`, {
+    createRealtimeToken(session_id: string, manualTurnDetection = false) {
+      const suffix = manualTurnDetection ? "?manual_turn_detection=true" : "";
+      return request<any>(config, `/orchestration/call_sessions/${session_id}/realtime_token${suffix}`, {
+        method: "POST",
+      });
+    },
+    fetchCallDelegationState(session_id: string, after = "") {
+      const params = after ? `?${new URLSearchParams({ after })}` : "";
+      return request<{ waiting: boolean; active_count: number; delegations: any[]; updates: Array<{ id: string; content: string; created_at: string }>; cursor: string }>(config, `/orchestration/call_sessions/${session_id}/delegations${params}`);
+    },
+    runCallAction(session_id: string, instruction: string) {
+      const params = new URLSearchParams({ instruction });
+      return request<{ result: string }>(config, `/orchestration/call_sessions/${session_id}/action?${params}`, {
         method: "POST",
       });
     },
@@ -844,10 +955,10 @@ export function createApi(config: ApiConfig) {
     deleteCodingSession(session_id: string) {
       return request<{ ok: boolean }>(config, `/coding/sessions/${session_id}`, { method: "DELETE" });
     },
-    startCodingTask(session_id: string, prompt: string) {
+    startCodingTask(session_id: string, prompt: string, file_ids: string[] = []) {
       return request<CodingTurn>(config, `/coding/sessions/${session_id}/tasks`, {
         method: "POST",
-        body: JSON.stringify({ prompt, source: "ui" }),
+        body: JSON.stringify({ prompt, source: "ui", file_ids }),
       });
     },
     answerCodingDecision(session_id: string, prompt: string) {
@@ -878,6 +989,12 @@ export function createApi(config: ApiConfig) {
     stopCodingSession(session_id: string) {
       return request<CodingSession>(config, `/coding/sessions/${session_id}/stop`, { method: "POST" });
     },
+    abortCodingDelegation(session_id: string) {
+      return request<CodingSession>(config, `/coding/sessions/${session_id}/abort`, { method: "POST" });
+    },
+    resumeCodingSession(session_id: string) {
+      return request<CodingSession>(config, `/coding/sessions/${session_id}/resume`, { method: "POST" });
+    },
     fetchFeatureDelegations(session_id?: string) {
       const query = session_id ? `?session_id=${encodeURIComponent(session_id)}` : "";
       return request<{ delegations: FeatureDelegation[] }>(config, `/coding/delegations${query}`);
@@ -891,16 +1008,21 @@ export function createApi(config: ApiConfig) {
       acceptance_criteria: string[];
       qa_enabled: boolean;
       max_iterations?: number;
+      file_ids?: string[];
     }) {
       return request<FeatureDelegation>(config, `/coding/sessions/${session_id}/delegations`, {
         method: "POST",
         body: JSON.stringify(payload),
       });
     },
-    resumeFeatureDelegation(delegation_id: string, decision = "") {
+    resumeFeatureDelegation(
+      delegation_id: string,
+      decision = "",
+      mode: "auto" | "qa" | "coding" = "auto",
+    ) {
       return request<FeatureDelegation>(config, `/coding/delegations/${delegation_id}/resume`, {
         method: "POST",
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({ decision, mode }),
       });
     },
     stopFeatureDelegation(delegation_id: string) {
@@ -911,5 +1033,35 @@ export function createApi(config: ApiConfig) {
     fetchFeatureQaEvidence(qa_run_id: string, evidence_index: number) {
       return requestBlob(config, `/coding/qa-runs/${qa_run_id}/evidence/${evidence_index}`);
     },
+    fetchWorkoutExercises(query = "") {
+      return request<{ exercises: WorkoutExercise[] }>(config, `/workout/exercises${query ? `?query=${encodeURIComponent(query)}` : ""}`);
+    },
+    createWorkoutExercise(payload: Partial<WorkoutExercise> & { name: string }) {
+      return request<WorkoutExercise & { created: boolean }>(config, "/workout/exercises", { method: "POST", body: JSON.stringify(payload) });
+    },
+    deleteWorkoutExercise(exerciseId:string, force=false) { return request<{deleted:boolean;exercise:WorkoutExercise;deleted_plan_entries:number;deleted_log_entries:number}>(config, `/workout/exercises/${exerciseId}?force=${force}`, {method:"DELETE"}); },
+    fetchWorkoutPlans() { return request<{ plans: WorkoutPlan[] }>(config, "/workout/plans"); },
+    createWorkoutPlan(payload: { title:string; description?:string; goal?:string; source?:"manual"|"import"|"corv"; schedule?:Record<string,unknown>; exercises:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) {
+      return request<WorkoutPlan>(config, "/workout/plans", { method: "POST", body: JSON.stringify(payload) });
+    },
+    deleteWorkoutPlan(planId:string) { return request<{deleted:boolean;plan:WorkoutPlan;preserved_sessions:number}>(config, `/workout/plans/${planId}`, {method:"DELETE"}); },
+    fetchWorkoutSessions(params: { start_date?:string; end_date?:string; exercise?:string; limit?:number } = {}) {
+      const query = new URLSearchParams(Object.entries(params).filter(([,value]) => value !== undefined && value !== "").map(([key,value]) => [key,String(value)]));
+      return request<{ sessions: WorkoutSession[] }>(config, `/workout/sessions${query.size ? `?${query}` : ""}`);
+    },
+    createWorkoutSession(payload: { title?:string; plan?:string; started_at?:string; ended_at?:string; notes?:string; exercises:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) {
+      return request<WorkoutSession>(config, "/workout/sessions", { method: "POST", body: JSON.stringify(payload) });
+    },
+    deleteWorkoutSession(sessionId:string) { return request<{ deleted:boolean; session:WorkoutSession }>(config, `/workout/sessions/${sessionId}`, { method:"DELETE" }); },
+    fetchActiveWorkoutSessions() { return request<{ sessions:WorkoutSession[] }>(config, "/workout/sessions/active"); },
+    startWorkoutSession(payload: { title?:string; plan?:string; started_at?:string; notes?:string; exercises?:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) { return request<WorkoutSession>(config, "/workout/sessions/start", { method:"POST", body:JSON.stringify(payload) }); },
+    updateWorkoutSessionItem(logId:string, payload: { completed?:boolean; sets?:number; reps?:number; weight_kg?:number; duration_seconds?:number; distance_km?:number; rpe?:number; notes?:string; metadata?:Record<string,unknown> }) { return request<WorkoutExerciseLog>(config, `/workout/sessions/items/${logId}`, { method:"PATCH", body:JSON.stringify(payload) }); },
+    finishWorkoutSession(sessionId:string, payload: { ended_at?:string; notes?:string } = {}) { return request<WorkoutSession>(config, `/workout/sessions/${sessionId}/finish`, { method:"POST", body:JSON.stringify(payload) }); },
+    fetchWorkoutGoals() { return request<{ goals: WorkoutGoal[] }>(config, "/workout/goals"); },
+    createWorkoutGoal(payload: { title:string; metric:string; target_value:number; unit?:string; exercise?:string; start_date?:string; end_date?:string; active?:boolean; metadata?:Record<string,unknown> }) {
+      return request<WorkoutGoal>(config, "/workout/goals", { method: "POST", body: JSON.stringify(payload) });
+    },
+    updateWorkoutGoal(goal_id:string, active:boolean) { return request<WorkoutGoal>(config, `/workout/goals/${goal_id}?active=${active}`, { method:"PATCH" }); },
+    fetchWorkoutDashboard(days=90, exercise="") { return request<WorkoutDashboard>(config, `/workout/dashboard?days=${days}${exercise ? `&exercise=${encodeURIComponent(exercise)}` : ""}`); },
   };
 }

@@ -24,6 +24,7 @@ def machine_payload(machine: SshMachine) -> dict:
         "auth_type": machine.auth_type,
         "has_credentials": machine.has_credentials,
         "allow_ai_commands": machine.allow_ai_commands,
+        "is_default": machine.is_default,
         "connect_timeout_seconds": machine.connect_timeout_seconds,
         "command_timeout_seconds": machine.command_timeout_seconds,
         "keepalive_seconds": machine.keepalive_seconds,
@@ -40,7 +41,7 @@ def machine_payload(machine: SshMachine) -> dict:
 
 @router.get("/machines")
 def list_machines(request):
-    return {"machines": [machine_payload(machine) for machine in SshMachine.objects.all()]}
+    return {"machines": [machine_payload(machine) for machine in SshMachine.objects.order_by("-is_default", "name")]}
 
 
 @router.post("/machines")
@@ -55,11 +56,16 @@ def create_machine(request, payload: SshMachineIn):
         username=payload.username.strip(),
         auth_type=payload.auth_type,
         allow_ai_commands=payload.allow_ai_commands,
+        is_default=payload.is_default,
         connect_timeout_seconds=payload.connect_timeout_seconds,
         command_timeout_seconds=payload.command_timeout_seconds,
         keepalive_seconds=payload.keepalive_seconds,
         notes=payload.notes,
     )
+    if machine.is_default and not machine.allow_ai_commands:
+        raise HttpError(400, "The default machine must allow Corv command execution")
+    if machine.is_default:
+        SshMachine.objects.filter(is_default=True).update(is_default=False)
     machine.full_clean(exclude=["credential_encrypted"])
     machine.set_credentials(
         password=payload.password,
@@ -78,7 +84,7 @@ def update_machine(request, machine_id: UUID, payload: SshMachineUpdate):
     changed_connection = False
     auth_changed = False
     for field in (
-        "name", "host", "port", "username", "auth_type", "allow_ai_commands",
+        "name", "host", "port", "username", "auth_type", "allow_ai_commands", "is_default",
         "connect_timeout_seconds", "command_timeout_seconds", "keepalive_seconds", "notes",
     ):
         value = getattr(payload, field)
@@ -107,6 +113,10 @@ def update_machine(request, machine_id: UUID, payload: SshMachineUpdate):
     if payload.reset_host_key:
         machine.host_key_fingerprint = ""
         changed_connection = True
+    if not machine.allow_ai_commands:
+        machine.is_default = False
+    if machine.is_default:
+        SshMachine.objects.filter(is_default=True).exclude(pk=machine.pk).update(is_default=False)
     machine.full_clean(exclude=["credential_encrypted"])
     machine.save()
     if changed_connection:

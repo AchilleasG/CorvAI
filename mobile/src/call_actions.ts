@@ -30,6 +30,6 @@ export async function declineCallFromNotification(sessionId: string) {
 }
 
 export async function fetchCallById(sessionId: string) {
-  const sessions = await fetchCallSessions();
+  const sessions = await fetchCallSessions({ platform: "mobile" });
   return sessions.find((s) => s.id === sessionId) || null;
 }

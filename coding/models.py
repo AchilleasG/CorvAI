@@ -7,6 +7,35 @@ from django.db import models
 from ssh_connections.models import SshMachine
 
 
+def managed_file_upload_to(instance, filename):
+    safe_name = filename.replace("\\", "/").split("/")[-1] or "file"
+    return f"coding-files/{instance.id}/{safe_name}"
+
+
+class ManagedFile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    file = models.FileField(upload_to=managed_file_upload_to, max_length=1024)
+    filename = models.CharField(max_length=255)
+    content_type = models.CharField(max_length=255, blank=True, default="application/octet-stream")
+    size = models.PositiveBigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True, default="")
+    metadata = models.JSONField(default=dict, blank=True)
+    tags = models.JSONField(default=list, blank=True)
+    session = models.ForeignKey("CodingSession", null=True, blank=True, on_delete=models.SET_NULL, related_name="files")
+    turn = models.ForeignKey("CodingTurn", null=True, blank=True, on_delete=models.SET_NULL, related_name="files")
+    delegation = models.ForeignKey("FeatureDelegation", null=True, blank=True, on_delete=models.SET_NULL, related_name="files")
+    assistant_message = models.ForeignKey("chat.ChatMessage", null=True, blank=True, on_delete=models.SET_NULL, related_name="attached_files")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["session", "created_at"], name="coding_file_session_idx")]
+
+    def __str__(self):
+        return self.filename
+
+
 class CodingSession(models.Model):
     STATUS_READY = "ready"
     STATUS_RUNNING = "running"
@@ -179,3 +208,24 @@ class FeatureQaRun(models.Model):
 
     def __str__(self):
         return f"{self.delegation.title}: QA {self.iteration} ({self.status})"
+
+
+class CodingDelegationWatch(models.Model):
+    """Durable link between asynchronous Codex work and the chat awaiting it."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    chat = models.ForeignKey("chat.Chat", null=True, blank=True, on_delete=models.CASCADE, related_name="coding_watches")
+    call_session = models.ForeignKey("orchestration.CallSession", null=True, blank=True, on_delete=models.CASCADE, related_name="coding_watches")
+    session = models.ForeignKey(CodingSession, on_delete=models.CASCADE, related_name="chat_watches")
+    turn = models.ForeignKey(CodingTurn, null=True, blank=True, on_delete=models.SET_NULL, related_name="chat_watches")
+    delegation = models.ForeignKey(FeatureDelegation, null=True, blank=True, on_delete=models.SET_NULL, related_name="chat_watches")
+    active = models.BooleanField(default=True)
+    waiting = models.BooleanField(default=False)
+    last_event = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["active", "session"], name="coding_watch_active_session")]

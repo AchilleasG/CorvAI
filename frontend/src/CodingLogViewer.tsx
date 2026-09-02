@@ -24,7 +24,7 @@ function agentText(value: unknown): { title: string; text: string; status?: stri
   try {
     const parsed = JSON.parse(raw) as { status?: string; summary?: string; question?: string };
     return {
-      title: parsed.status === "needs_input" ? "Decision needed" : "Codex report",
+      title: parsed.status === "needs_input" ? "Decision needed" : parsed.status === "action" ? "Browser decision" : "Codex report",
       text: [parsed.summary, parsed.question].filter(Boolean).join("\n\n") || raw,
       status: parsed.status,
     };
@@ -98,6 +98,19 @@ function parseLogs(content: string): LogSection[] {
     if (item.type === "file_change") {
       const changes = Array.isArray(item.changes) ? item.changes.map((change: any) => `${change.kind || "changed"}: ${change.path || "file"}`).join("\n") : "Files updated";
       section.items.push({ key: indexedKey, kind: "note", title: "File changes", text: changes, status: item.status || "completed" });
+      continue;
+    }
+
+    if (eventType === "browser.action.completed") {
+      const action = String(event.action || "action").replaceAll("_", " ");
+      const details = [event.url, event.error].filter(Boolean).join("\n");
+      section.items.push({
+        key: indexedKey,
+        kind: "note",
+        title: `Browser · ${action}`,
+        text: details,
+        status: event.success ? "completed" : "failed",
+      });
       continue;
     }
 

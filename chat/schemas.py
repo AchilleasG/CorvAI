@@ -1,5 +1,5 @@
 from ninja import Schema
-from typing import Literal,Optional
+from typing import Any, Literal,Optional
 from uuid import UUID
 
 class ChatListItem(Schema):
@@ -37,3 +37,4 @@ class MessageOut(Schema):
     trace_id: Optional[str] = None
     call_id: Optional[str] = None
     job_id: Optional[UUID] = None
+    metadata: dict[str, Any] = {}
