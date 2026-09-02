@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deploys the latest main and runs docker compose (requires sudo for Docker).
+# Deploys the latest primary branch and runs docker compose (requires sudo for Docker).
 # Usage: ./scripts/deploy.sh
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
-BRANCH="main"
+BRANCH="master"
 
 echo "=== Updating repo to ${BRANCH} ==="
 git fetch origin "$BRANCH"
