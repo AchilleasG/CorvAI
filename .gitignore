@@ -17,3 +17,15 @@ media/study/
 .media/
 media/
 *.orig
+
+# Local databases and runtime state
+*.sqlite3
+celerybeat-schedule*
+
+# Editor, OS, test, and mobile bundler state
+.idea/
+.expo/
+.DS_Store
+.pytest_cache/
+.coverage
+htmlcov/
