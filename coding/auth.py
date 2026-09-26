@@ -15,6 +15,7 @@ from datetime import timedelta
 from urllib.parse import urlparse
 
 from django.conf import settings
+from django.db import close_old_connections
 from django.utils import timezone
 
 from orchestration.crypto import decrypt_value, encrypt_value
@@ -35,6 +36,8 @@ class CodexAuthService:
     MODES = {MODE_PROFILE, MODE_API_KEY}
     MODE_SETTING = "codex_auth_mode"
     API_KEY_SETTING = "codex_api_key_encrypted"
+    MODEL_SETTING_PREFIX = "codex_model_"
+    MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 
     @staticmethod
     def _setting(key: str, default: str = "") -> str:
@@ -163,10 +166,20 @@ class CodexAuthService:
         return cls.profile_status(codex)
 
     _usage_cache: tuple[float, dict] | None = None
+    _models_cache: dict[str, tuple[float, dict]] = {}
     _usage_lock = threading.RLock()
+    _models_lock = threading.RLock()
 
     @classmethod
-    def _app_server_rate_limits(cls, codex: str) -> dict:
+    def _app_server_request(
+        cls,
+        codex: str,
+        method: str,
+        *,
+        params: dict | None = None,
+        environment: dict[str, str] | None = None,
+        timeout: float = 8,
+    ) -> dict:
         process = subprocess.Popen(
             [codex, "app-server", "--stdio"],
             stdin=subprocess.PIPE,
@@ -174,7 +187,7 @@ class CodexAuthService:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            env=cls.profile_environment(),
+            env=environment or cls.profile_environment(),
         )
         selector = selectors.DefaultSelector()
         try:
@@ -194,7 +207,7 @@ class CodexAuthService:
                     "capabilities": {"experimentalApi": True},
                 },
             })
-            deadline = time.monotonic() + 8
+            deadline = time.monotonic() + timeout
             initialized = False
             while time.monotonic() < deadline:
                 if not selector.select(timeout=max(0.05, deadline - time.monotonic())):
@@ -209,10 +222,13 @@ class CodexAuthService:
                 if message.get("id") == 1 and not initialized:
                     initialized = True
                     send({"method": "initialized"})
-                    send({"id": 2, "method": "account/rateLimits/read"})
+                    request = {"id": 2, "method": method}
+                    if params is not None:
+                        request["params"] = params
+                    send(request)
                 elif message.get("id") == 2:
                     return message
-            raise RuntimeError("Codex did not return usage in time")
+            raise RuntimeError("Codex did not return app-server data in time")
         finally:
             selector.close()
             if process.poll() is None:
@@ -221,6 +237,10 @@ class CodexAuthService:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     process.kill()
+
+    @classmethod
+    def _app_server_rate_limits(cls, codex: str) -> dict:
+        return cls._app_server_request(codex, "account/rateLimits/read")
 
     @staticmethod
     def _usage_window(payload) -> dict | None:
@@ -278,6 +298,101 @@ class CodexAuthService:
             return payload
 
     @classmethod
+    def _model_setting(cls) -> str:
+        return f"{cls.MODEL_SETTING_PREFIX}{cls.mode()}"
+
+    @classmethod
+    def selected_model(cls) -> str:
+        value = cls._setting(cls._model_setting()).strip()
+        return value if cls.MODEL_ID.fullmatch(value) else ""
+
+    @staticmethod
+    def _normalize_model(item: object) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        model_id = str(item.get("id") or item.get("model") or "").strip()
+        if not CodexAuthService.MODEL_ID.fullmatch(model_id):
+            return None
+        efforts = []
+        for effort in item.get("supportedReasoningEfforts") or []:
+            if not isinstance(effort, dict):
+                continue
+            name = str(effort.get("reasoningEffort") or "").strip()
+            if name:
+                efforts.append({
+                    "reasoning_effort": name,
+                    "description": str(effort.get("description") or "").strip(),
+                })
+        return {
+            "id": model_id,
+            "display_name": str(item.get("displayName") or model_id).strip(),
+            "default_reasoning_effort": str(item.get("defaultReasoningEffort") or "").strip(),
+            "supported_reasoning_efforts": efforts,
+            "input_modalities": [str(value) for value in (item.get("inputModalities") or ["text", "image"])],
+            "supports_personality": bool(item.get("supportsPersonality", False)),
+            "is_default": bool(item.get("isDefault", False)),
+            "upgrade": str(item.get("upgrade") or "").strip(),
+        }
+
+    @classmethod
+    def available_models(cls, codex: str | None = None, *, refresh: bool = False) -> dict:
+        executable = codex or shutil.which("codex")
+        if not executable:
+            return {"available": False, "reason": "Codex CLI is not installed.", "models": []}
+        authenticated, message = cls.selected_status(executable)
+        if not authenticated:
+            return {"available": False, "reason": message or "Authenticate Codex to list models.", "models": []}
+        mode = cls.mode()
+        with cls._models_lock:
+            cached = cls._models_cache.get(mode)
+            if not refresh and cached and time.monotonic() - cached[0] < 60:
+                return cached[1]
+            try:
+                environment = cls.api_environment() if mode == cls.MODE_API_KEY else cls.profile_environment()
+                response = cls._app_server_request(
+                    executable,
+                    "model/list",
+                    params={"limit": 100, "includeHidden": False},
+                    environment=environment,
+                )
+                if response.get("error"):
+                    raise RuntimeError(str(response["error"].get("message") or "Model discovery failed."))
+                result = response.get("result") or {}
+                normalized = [cls._normalize_model(item) for item in (result.get("data") or [])]
+                models = [item for item in normalized if item]
+                payload = {
+                    "available": True,
+                    "reason": "",
+                    "models": models,
+                }
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                payload = {"available": False, "reason": str(exc) or "Models are temporarily unavailable.", "models": []}
+            cls._models_cache[mode] = (time.monotonic(), payload)
+            return payload
+
+    @classmethod
+    def update_selected_model(cls, model: str) -> dict:
+        candidate = (model or "").strip()
+        if not candidate:
+            cls._set_setting(cls._model_setting(), "")
+            return {"selected_model": ""}
+        if not cls.MODEL_ID.fullmatch(candidate):
+            raise ValueError("Invalid Codex model identifier")
+        catalog = cls.available_models(refresh=True)
+        if not catalog["available"]:
+            raise RuntimeError(catalog["reason"])
+        available = {item["id"] for item in catalog["models"]}
+        if candidate not in available:
+            raise ValueError("Choose a model available to the selected Codex login")
+        cls._set_setting(cls._model_setting(), candidate)
+        return {"selected_model": candidate}
+
+    @classmethod
+    def clear_runtime_caches(cls):
+        cls._usage_cache = None
+        cls._models_cache.clear()
+
+    @classmethod
     def is_authenticated(cls, codex: str | None = None) -> bool:
         return cls.selected_status(codex)[0]
 
@@ -312,6 +427,182 @@ class CodexAuthService:
             raise ValueError("Add an OpenAI API key before selecting API key authentication")
         cls._set_setting(cls.MODE_SETTING, normalized_mode)
         return cls.settings_payload()
+
+
+class CodexRuntimeService:
+    """Inspect and safely update the Codex CLI bundled with Corv."""
+
+    PACKAGE = "@openai/codex"
+    _release_cache: tuple[float, dict] | None = None
+    _release_lock = threading.RLock()
+    _update_lock = threading.Lock()
+
+    @staticmethod
+    def _update_payload(update) -> dict | None:
+        if not update:
+            return None
+        return {
+            "id": str(update.id),
+            "status": update.status,
+            "active": update.status in {update.STATUS_QUEUED, update.STATUS_RUNNING},
+            "previous_version": update.previous_version,
+            "version": update.version,
+            "log": update.log,
+            "error": update.error,
+            "created_at": update.created_at.isoformat() if update.created_at else None,
+            "started_at": update.started_at.isoformat() if update.started_at else None,
+            "completed_at": update.completed_at.isoformat() if update.completed_at else None,
+        }
+
+    @classmethod
+    def latest_update(cls) -> dict | None:
+        from coding.models import CodexRuntimeUpdate
+
+        return cls._update_payload(CodexRuntimeUpdate.objects.first())
+
+    @staticmethod
+    def _version_number(text: str) -> str:
+        match = re.search(r"\b(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?)\b", text or "")
+        return match.group(1) if match else ""
+
+    @staticmethod
+    def _version_tuple(version: str) -> tuple[int, int, int]:
+        match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version or "")
+        return tuple(int(value) for value in match.groups()) if match else (0, 0, 0)
+
+    @classmethod
+    def installed_version(cls, codex: str) -> str:
+        result = subprocess.run(
+            [codex, "--version"], capture_output=True, text=True, timeout=10, check=False
+        )
+        if result.returncode != 0:
+            return ""
+        return cls._version_number(result.stdout or result.stderr)
+
+    @classmethod
+    def release_status(cls, codex: str | None = None, *, refresh: bool = False) -> dict:
+        executable = codex or shutil.which("codex")
+        if not executable:
+            return {"current_version": "", "latest_version": "", "update_available": False, "update_error": "Codex CLI is not installed."}
+        current = cls.installed_version(executable)
+        with cls._release_lock:
+            cached = cls._release_cache
+            if not refresh and cached and time.monotonic() - cached[0] < 300:
+                latest_payload = cached[1]
+            else:
+                try:
+                    npm = shutil.which("npm")
+                    if not npm:
+                        raise RuntimeError("npm is not installed; Corv cannot check Codex releases.")
+                    result = subprocess.run(
+                        [npm, "view", cls.PACKAGE, "version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                        check=False,
+                    )
+                    latest = cls._version_number(result.stdout)
+                    if result.returncode != 0 or not latest:
+                        raise RuntimeError("Could not read the latest Codex release from npm.")
+                    latest_payload = {"latest_version": latest, "update_error": ""}
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    latest_payload = {"latest_version": "", "update_error": str(exc) or "Codex update check failed."}
+                cls._release_cache = (time.monotonic(), latest_payload)
+        latest = latest_payload["latest_version"]
+        return {
+            "current_version": current,
+            "latest_version": latest,
+            "update_available": bool(current and latest and cls._version_tuple(latest) > cls._version_tuple(current)),
+            "update_error": latest_payload["update_error"],
+        }
+
+    @classmethod
+    def _busy_reason(cls) -> str:
+        from coding.models import CodingSession, CodingTurn, FeatureDelegation
+        from coding.services import CodingSessionService
+
+        if CodingTurn.objects.filter(status__in=[CodingTurn.STATUS_QUEUED, CodingTurn.STATUS_RUNNING]).exists():
+            return "Wait for active Codex tasks to finish before updating the CLI."
+        if FeatureDelegation.objects.filter(status__in=["queued", "coding", "qa", "fixing"]).exists():
+            return "Wait for active feature delegations and QA to finish before updating the CLI."
+        if any(CodingSessionService.tmux_alive(session) for session in CodingSession.objects.exclude(tmux_session_name="")):
+            return "Close direct Codex CLI sessions before updating the CLI."
+        return ""
+
+    @classmethod
+    def start_update(cls) -> dict:
+        from coding.models import CodexRuntimeUpdate
+
+        if not cls._update_lock.acquire(blocking=False):
+            raise ValueError("A Codex CLI update is already running.")
+        try:
+            reason = cls._busy_reason()
+            if reason:
+                raise ValueError(reason)
+            codex = CodexAuthService._codex_path()
+            before = cls.installed_version(codex)
+            active = CodexRuntimeUpdate.objects.filter(
+                status__in=[CodexRuntimeUpdate.STATUS_QUEUED, CodexRuntimeUpdate.STATUS_RUNNING]
+            ).first()
+            if active:
+                raise ValueError("A Codex CLI update is already running.")
+            update = CodexRuntimeUpdate.objects.create(
+                status=CodexRuntimeUpdate.STATUS_QUEUED,
+                previous_version=before,
+                log=f"Queued Codex CLI update from {before or 'the installed version'}.\n",
+            )
+            threading.Thread(
+                target=cls._run_update,
+                args=(str(update.id), codex),
+                daemon=True,
+                name=f"codex-update-{update.id}",
+            ).start()
+            return cls._update_payload(update)
+        finally:
+            cls._update_lock.release()
+
+    @classmethod
+    def _run_update(cls, update_id: str, codex: str):
+        from coding.models import CodexRuntimeUpdate
+
+        close_old_connections()
+        update = CodexRuntimeUpdate.objects.get(pk=update_id)
+        try:
+            update.status = CodexRuntimeUpdate.STATUS_RUNNING
+            update.started_at = timezone.now()
+            update.log += "Starting Codex updater.\n"
+            update.save(update_fields=["status", "started_at", "log"])
+            process = subprocess.Popen(
+                [codex, "update"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=CodexAuthService.profile_environment(),
+            )
+            if process.stdout is not None:
+                for line in process.stdout:
+                    update.log = (update.log + line)[-20000:]
+                    update.save(update_fields=["log"])
+            return_code = process.wait(timeout=300)
+            if return_code != 0:
+                raise RuntimeError(update.log.strip()[-1000:] or "Codex CLI update failed.")
+            cls._release_cache = None
+            CodexAuthService.clear_runtime_caches()
+            executable = shutil.which("codex") or codex
+            update.version = cls.installed_version(executable)
+            update.status = CodexRuntimeUpdate.STATUS_SUCCEEDED
+            update.completed_at = timezone.now()
+            update.log = (update.log + f"Codex CLI {update.version or 'update'} is ready.\n")[-20000:]
+            update.save(update_fields=["version", "status", "completed_at", "log"])
+        except Exception as exc:
+            update.status = CodexRuntimeUpdate.STATUS_FAILED
+            update.error = str(exc) or "Codex CLI update failed."
+            update.completed_at = timezone.now()
+            update.log = (update.log + f"Update failed: {update.error}\n")[-20000:]
+            update.save(update_fields=["status", "error", "completed_at", "log"])
+        finally:
+            close_old_connections()
 
 
 @dataclass

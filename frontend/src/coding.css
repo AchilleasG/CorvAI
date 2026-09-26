@@ -1,6 +1,17 @@
 .coding-panel { min-width: 0; }
 .coding-layout { display: grid; grid-template-columns: minmax(230px, 0.28fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
 .coding-session-list { display: flex; flex-direction: column; gap: 0.45rem; position: sticky; top: 9.5rem; }
+
+@media (min-width: 901px) {
+  .coding-session-list {
+    position: static;
+    top: auto;
+    max-height: calc(100dvh - 10.5rem);
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-gutter: stable;
+  }
+}
 .coding-session-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0.7rem; align-items: center; width: 100%; padding: 0.75rem; border: 1px solid transparent; border-radius: 0.8rem; background: transparent; color: var(--text); text-align: left; }
 .coding-session-row:hover, .coding-session-row.active { border-color: rgba(42, 209, 163, 0.35); background: rgba(42, 209, 163, 0.08); }
 .coding-session-row span:last-child { display: grid; min-width: 0; gap: 0.15rem; }
@@ -22,6 +33,26 @@
 .coding-status-chip.ready { color: #a7f3d0; }
 .coding-status-chip.ready i { width: 0.42rem; height: 0.42rem; border-radius: 50%; background: #2ad1a3; box-shadow: 0 0 0 3px rgba(42, 209, 163, 0.1); }
 .coding-status-chip.access { color: #cbd5e1; }
+.coding-status-chip.update { color: #fde68a; border-color: rgba(245, 158, 11, 0.3); background: rgba(245, 158, 11, 0.1); }
+.codex-runtime-card { display: grid; gap: 0.9rem; margin-bottom: 1rem; border-color: rgba(167, 139, 250, 0.28); background: linear-gradient(135deg, rgba(76, 29, 149, 0.12), rgba(15, 23, 42, 0.76)); }
+.codex-runtime-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; }
+.codex-runtime-heading h3 { margin: 0.15rem 0 0; }
+.codex-runtime-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(16rem, 1.1fr); gap: 0.85rem; }
+.codex-runtime-version, .codex-model-picker { min-width: 0; padding: 0.8rem; border: 1px solid rgba(148, 163, 184, 0.14); border-radius: 0.75rem; background: rgba(2, 6, 23, 0.34); }
+.codex-runtime-version { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; }
+.codex-runtime-version > div, .codex-model-picker { display: grid; gap: 0.38rem; }
+.codex-runtime-version span, .codex-model-picker small, .codex-runtime-note { color: var(--muted); font-size: 0.76rem; }
+.codex-runtime-version .primary { flex: 0 0 auto; }
+.codex-model-picker > span { color: var(--text); font-weight: 650; }
+.codex-model-picker select { width: 100%; min-width: 0; }
+.codex-runtime-note, .codex-runtime-success { margin: 0; }
+.codex-runtime-success { color: #a7f3d0; font-size: 0.82rem; }
+.codex-update-state { color: #fde68a; font-size: 0.82rem; }
+.codex-update-progress { display: grid; gap: 0.6rem; padding: 0.8rem; border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 0.75rem; background: rgba(120, 53, 15, 0.12); }
+.codex-update-progress > div { display: grid; gap: 0.25rem; }
+.codex-update-progress span { color: var(--muted); font-size: 0.76rem; }
+.codex-update-progress pre { max-height: 12rem; overflow: auto; margin: 0; padding: 0.7rem; border-radius: 0.55rem; background: #030712; color: #d1fae5; font: 0.76rem/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.codex-update-progress.failed { border-color: rgba(251, 113, 133, 0.35); background: rgba(127, 29, 29, 0.15); }
 .codex-usage-card { display: grid; gap: 0.85rem; margin-bottom: 1rem; border-color: rgba(96, 165, 250, 0.26); background: linear-gradient(135deg, rgba(30, 64, 175, 0.1), rgba(15, 23, 42, 0.76)); }
 .codex-usage-heading, .codex-usage-window > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; }
 .codex-usage-heading h3 { margin: 0.15rem 0 0; }
@@ -104,6 +135,7 @@
 .coding-turn-prompt { color: var(--muted); white-space: pre-wrap; }
 .coding-turn-question { color: #fbbf24; }
 .coding-turn-options { margin-top: 0.45rem; color: #fde68a; font-size: 0.82rem; }
+.coding-history .coding-turn-question, .coding-history .coding-turn-options { display: none; }
 .coding-turn-error { color: #fda4af; }
 .ghost.danger { color: #fda4af; border-color: rgba(251, 113, 133, 0.3); }
 .feature-delegations { display: grid; gap: 0.85rem; }
@@ -151,7 +183,7 @@
 @media (max-width: 900px) {
   .coding-layout { grid-template-columns: 1fr; }
   .coding-session-list { position: static; max-height: 14rem; overflow-y: auto; }
-  .coding-facts, .codex-usage-windows { grid-template-columns: 1fr; }
+  .coding-facts, .codex-usage-windows, .codex-runtime-grid { grid-template-columns: 1fr; }
   .coding-terminal pre { height: 45vh; min-height: 16rem; }
   .coding-turn header { flex-direction: column; gap: 0.2rem; }
   .coding-auth-card { grid-template-columns: 1fr; }
@@ -163,6 +195,7 @@
 @media (max-width: 520px) {
   .coding-runtime-status { order: 3; width: 100%; }
   .coding-status-chip { flex: 1; justify-content: center; }
+  .codex-runtime-version { align-items: stretch; flex-direction: column; }
   .feature-flow { grid-template-columns: 1fr; gap: 0.6rem; }
   .feature-flow b { display: none; }
 }

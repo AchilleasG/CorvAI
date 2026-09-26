@@ -10,6 +10,7 @@ import {
   fetchCodingSessionLogs,
   fetchCodingSessions,
   fetchCodingStatus,
+  fetchCodingUsage,
   fetchCodingDeviceAuth,
   fetchCodingTerminal,
   fetchFiles,
@@ -21,6 +22,8 @@ import {
   stopCodingSession,
   abortCodingDelegation,
   resumeCodingSession,
+  updateCodingCodex,
+  selectCodingModel,
   logoutCodingCodex,
   uploadFile,
 } from "./api";
@@ -122,25 +125,31 @@ export default function CodingPanel() {
   const [rawLogs, setRawLogs] = useState(false);
   const [busy, setBusy] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [runtimeMessage, setRuntimeMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const terminalRef = useRef<HTMLPreElement | null>(null);
   const logsRef = useRef<HTMLDivElement | null>(null);
   const taskRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  // Older running backends can outlive a frontend update.
+  const modelCatalog = cliStatus?.model_catalog;
+  const runtimeUpdate = cliStatus?.runtime_update;
+  const runtimeUpdating = runtimeBusy || !!runtimeUpdate?.active;
 
   const eligibleMachines = useMemo(
     () => machines.filter((machine) => machine.allow_ai_commands),
     [machines],
   );
   const pendingTurn = useMemo(
-    () => selected?.turns.find((turn) => turn.status === "needs_input") || null,
-    [selected?.turns],
+    () => selected?.status === "needs_input" ? selected.turns.find((turn) => turn.status === "needs_input") || null : null,
+    [selected?.status, selected?.turns],
   );
   const pendingQuestion = selected?.pending_question || pendingTurn?.question || "Choose how Codex should continue.";
   const pendingOptions = selected?.pending_options?.length
     ? selected.pending_options
     : pendingTurn?.options || [];
-  const decisionNeeded = selected?.status === "needs_input" || !!pendingTurn;
+  const decisionNeeded = selected?.status === "needs_input";
 
   async function refreshList(preferredId?: string | null) {
     const response = await fetchCodingSessions();
@@ -202,6 +211,52 @@ export default function CodingPanel() {
   }, [selectedId]);
 
   useEffect(() => {
+    const timer = globalThis.setInterval(() => {
+      refreshList().catch(() => undefined);
+    }, 1500);
+    return () => globalThis.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!cliStatus?.authenticated || cliStatus.auth_mode !== "profile") return;
+    let disposed = false;
+    const timer = globalThis.setInterval(() => {
+      fetchCodingUsage()
+        .then((usage) => {
+          if (!disposed) {
+            setCliStatus((current) => current ? { ...current, usage } : current);
+          }
+        })
+        .catch(() => undefined);
+    }, 10000);
+    return () => {
+      disposed = true;
+      globalThis.clearInterval(timer);
+    };
+  }, [cliStatus?.authenticated, cliStatus?.auth_mode]);
+
+  useEffect(() => {
+    if (!runtimeUpdate?.active) return;
+    let disposed = false;
+    const refresh = () => fetchCodingStatus()
+      .then((status) => {
+        if (disposed) return;
+        setCliStatus(status);
+        const update = status.runtime_update;
+        if (update?.status === "succeeded") {
+          setRuntimeMessage(update.version && update.version !== update.previous_version
+            ? `Codex upgraded from ${update.previous_version} to ${update.version}.`
+            : `Codex ${update.version || status.current_version} is already current.`);
+        } else if (update?.status === "failed") {
+          setError(update.error || "Codex CLI update failed.");
+        }
+      })
+      .catch(() => undefined);
+    const timer = window.setInterval(refresh, 750);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [runtimeUpdate?.id, runtimeUpdate?.active]);
+
+  useEffect(() => {
     if (!showLogs || !selectedId) return;
     let disposed = false;
     const refresh = () => fetchCodingSessionLogs(selectedId)
@@ -217,7 +272,6 @@ export default function CodingPanel() {
     const delay = selected?.direct_terminal_running ? 700 : selected?.status === "running" ? 1500 : 4000;
     const timer = window.setInterval(() => {
       refreshSelected(selectedId).catch(() => undefined);
-      refreshList().catch(() => undefined);
     }, delay);
     return () => window.clearInterval(timer);
   }, [selectedId, selected?.status, selected?.direct_terminal_running]);
@@ -338,6 +392,39 @@ export default function CodingPanel() {
       setError(errorText(err));
     } finally {
       setAuthBusy(false);
+    }
+  }
+
+  async function upgradeCodex() {
+    if (!window.confirm(`Upgrade Codex CLI from ${cliStatus?.current_version || "the installed version"} to ${cliStatus?.latest_version || "the latest release"}? Active coding work must be stopped first.`)) return;
+    setRuntimeBusy(true);
+    setRuntimeMessage("");
+    setError(null);
+    try {
+      const status = await updateCodingCodex();
+      setCliStatus(status);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setRuntimeBusy(false);
+    }
+  }
+
+  async function chooseCodexModel(model: string) {
+    setRuntimeBusy(true);
+    setRuntimeMessage("");
+    setError(null);
+    try {
+      const status = await selectCodingModel(model);
+      setCliStatus(status);
+      const selected = status.model_catalog?.models.find((item) => item.id === status.selected_model);
+      setRuntimeMessage(selected
+        ? `${selected.display_name} will be used for new Codex work and resumed sessions.`
+        : "Codex will choose the recommended model for the active login.");
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setRuntimeBusy(false);
     }
   }
 
@@ -506,6 +593,54 @@ export default function CodingPanel() {
       </header>
 
       {error && <div className="alert">{error}</div>}
+      {cliStatus?.installed && (
+        <section className="card codex-runtime-card" aria-label="Codex runtime and model">
+          <div className="codex-runtime-heading">
+            <div><p className="eyebrow">Coding runtime</p><h3>Codex CLI</h3></div>
+            <span className={`coding-status-chip ${cliStatus.update_available ? "update" : "ready"}`}>
+              {cliStatus.current_version ? `v${cliStatus.current_version}` : cliStatus.version}
+            </span>
+          </div>
+          <div className="codex-runtime-grid">
+            <div className="codex-runtime-version">
+              <div>
+                <strong>{cliStatus.update_available ? `Version ${cliStatus.latest_version} is available` : cliStatus.latest_version ? "Codex is up to date" : "Update information unavailable"}</strong>
+                <span>{cliStatus.update_available ? "Update safely when no coding or QA jobs are running." : `Latest checked release: ${cliStatus.latest_version || "unavailable"}`}</span>
+              </div>
+              {runtimeUpdate?.active
+                ? <span className="codex-update-state">{runtimeUpdate.status === "queued" ? "Queued…" : "Updating…"}</span>
+                : cliStatus.update_available && <button type="button" className="primary" onClick={upgradeCodex} disabled={runtimeUpdating}>Upgrade Codex</button>}
+            </div>
+            <label className="codex-model-picker">
+              <span>Model for coding work</span>
+              <select
+                value={cliStatus.selected_model || ""}
+                onChange={(event) => chooseCodexModel(event.target.value)}
+                disabled={runtimeUpdating || !cliStatus.authenticated || !modelCatalog?.available}
+              >
+                <option value="">Automatic — Codex recommended</option>
+                {modelCatalog?.models.map((model) => (
+                  <option key={model.id} value={model.id}>{model.display_name}{model.is_default ? " — default" : ""}</option>
+                ))}
+              </select>
+              <small>{modelCatalog?.available
+                ? "The list comes from this Codex version and your active login. Selection applies to managed tasks, feature QA, and the direct CLI."
+                : modelCatalog?.reason || "Model selection is unavailable. The backend may need to be restarted to load the latest update."}</small>
+            </label>
+          </div>
+          {cliStatus.update_error && <p className="codex-runtime-note">Update check: {cliStatus.update_error}</p>}
+          {runtimeUpdate && (runtimeUpdate.active || runtimeUpdate.status === "failed") && (
+            <div className={`codex-update-progress ${runtimeUpdate.status}`}>
+              <div>
+                <strong>{runtimeUpdate.active ? "Codex CLI update in progress" : "Codex CLI update failed"}</strong>
+                <span>{runtimeUpdate.error || "This status is saved, so reloading the page will not lose it."}</span>
+              </div>
+              {runtimeUpdate.log && <pre>{runtimeUpdate.log}</pre>}
+            </div>
+          )}
+          {runtimeMessage && <p className="codex-runtime-success" role="status">{runtimeMessage}</p>}
+        </section>
+      )}
       {cliStatus?.authenticated && cliStatus.auth_mode === "profile" && cliStatus.usage && (
         <section className="card codex-usage-card" aria-label="Codex profile usage">
           <div className="codex-usage-heading">
@@ -532,7 +667,7 @@ export default function CodingPanel() {
           <span>{cliStatus.auth_message}</span>
         </div>
       )}
-      {cliStatus?.installed && !cliStatus.authenticated && cliStatus.auth_mode === "api_key" && (
+      {cliStatus?.installed && !runtimeUpdate?.active && !cliStatus.authenticated && cliStatus.auth_mode === "api_key" && (
         <div className="card coding-auth-card">
           <div>
             <p className="eyebrow">Codex authentication</p>
@@ -541,7 +676,7 @@ export default function CodingPanel() {
           </div>
         </div>
       )}
-      {cliStatus?.installed && !cliStatus.authenticated && cliStatus.auth_mode !== "api_key" && (
+      {cliStatus?.installed && !runtimeUpdate?.active && !cliStatus.authenticated && cliStatus.auth_mode !== "api_key" && (
         <div className="card coding-auth-card">
           <div>
             <p className="eyebrow">Codex authentication</p>

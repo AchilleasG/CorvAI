@@ -142,3 +142,60 @@ class ProviderErrorReplyTests(TestCase):
         reply = ChatService.get_chat_next_message(chat.id)
 
         self.assertEqual(reply, ChatService._PROVIDER_QUOTA_REPLY)
+
+
+class FrontmanDecisionTests(TestCase):
+    def test_parses_schema_shaped_direct_reply(self):
+        decision = ChatService._parse_decision(
+            '{"handoff":false,"reply":"Hello","reason":null,"module_hint":null}'
+        )
+        self.assertEqual(
+            decision,
+            {"handoff": False, "reply": "Hello", "reason": None, "module_hint": None},
+        )
+
+    def test_concatenated_output_prefers_final_handoff_decision(self):
+        raw = (
+            '{"query":"Animus server system specs","top_k":5}'
+            '{"handoff":true,"reason":"Fetch fresh specs",'
+            '"module_hint":"ssh","reply":null}'
+        )
+        self.assertEqual(
+            ChatService._parse_decision(raw),
+            {
+                "handoff": True,
+                "reply": None,
+                "reason": "Fetch fresh specs",
+                "module_hint": "ssh",
+            },
+        )
+
+    def test_rejects_wrong_types_and_non_decision_json(self):
+        self.assertIsNone(ChatService._parse_decision('{"handoff":"yes"}'))
+        self.assertIsNone(ChatService._parse_decision('{"query":"server specs"}'))
+
+    @patch(
+        "chat.services.ChatAIService.frontman_decision",
+        side_effect=[
+            '{"query":"server specs"}',
+            '{"handoff":false,"reply":"Recovered",'
+            '"reason":null,"module_hint":null}',
+        ],
+    )
+    def test_invalid_decision_is_retried_once(self, frontman):
+        chat = Chat.objects.create()
+        ChatMessage.objects.create(chat=chat, role="user", text="Hello")
+
+        self.assertEqual(ChatService.get_chat_next_message(chat.id), "Recovered")
+        self.assertEqual(frontman.call_count, 2)
+
+    @patch("chat.services.ChatAIService.frontman_decision", return_value="not json")
+    def test_invalid_decision_never_leaks_raw_output(self, frontman):
+        chat = Chat.objects.create()
+        ChatMessage.objects.create(chat=chat, role="user", text="Hello")
+
+        reply = ChatService.get_chat_next_message(chat.id)
+
+        self.assertEqual(reply, ChatService._FRONTMAN_ROUTING_FAILURE_REPLY)
+        self.assertNotIn("not json", reply)
+        self.assertEqual(frontman.call_count, 2)

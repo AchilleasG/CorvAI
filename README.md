@@ -105,6 +105,7 @@ Corv's action catalog is registered at startup and persisted as modules/function
 - Browser QA with bounded interaction specifications and screenshots
 - File artifacts uploaded during or after delegation, scoped to their coding session and visible in Files
 - Codex API-key or account-login profiles, with usage visibility where supported
+- Coding-UI Codex updates and a live model picker populated from the installed CLI and active login
 
 ### Dedicated workspaces
 
@@ -178,6 +179,8 @@ Open **Coding** in the web UI and choose API-key or account-login mode. Complete
 5. Connect once to pin and verify the host key.
 
 Corv can now create a coding session against that machine and delegate tasks or complete feature cycles.
+
+The Coding page also reports the installed and latest Codex CLI versions. When no Codex task, direct terminal, feature cycle, or QA run is active, an available update can be installed there. Its model picker is queried from Codex itself, so it reflects the models available to the selected login rather than a hard-coded list; the choice applies to managed work, feature QA, resumed sessions, and the direct CLI.
 
 ## Configuration
 

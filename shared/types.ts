@@ -601,13 +601,50 @@ export type CodexProfileUsage = {
   credits?: { has_credits: boolean; unlimited: boolean; balance?: string | null } | null;
 };
 
+export type CodexModel = {
+  id: string;
+  display_name: string;
+  default_reasoning_effort: string;
+  supported_reasoning_efforts: Array<{ reasoning_effort: string; description: string }>;
+  input_modalities: string[];
+  supports_personality: boolean;
+  is_default: boolean;
+  upgrade: string;
+};
+
+export type CodexModelCatalog = {
+  available: boolean;
+  reason: string;
+  models: CodexModel[];
+};
+
+export type CodexRuntimeUpdate = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  active: boolean;
+  previous_version: string;
+  version: string;
+  log: string;
+  error: string;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
 export type CodingCliStatus = {
   installed: boolean;
   authenticated: boolean;
   version: string;
+  current_version?: string;
+  latest_version?: string;
+  update_available?: boolean;
+  update_error?: string;
   auth_message: string;
   auth_mode: "profile" | "api_key";
   usage?: CodexProfileUsage | null;
+  model_catalog?: CodexModelCatalog;
+  selected_model?: string;
+  runtime_update?: CodexRuntimeUpdate | null;
   tmux_available: boolean;
   ssh_available: boolean;
   password_ssh_available: boolean;
@@ -658,6 +695,7 @@ export type CodingSession = {
   turns: CodingTurn[];
   created_at: string;
   updated_at: string;
+  last_activity_at: string;
   stopped_at?: string | null;
 };
 
@@ -716,11 +754,13 @@ export type FeatureDelegation = {
 };
 
 
-export type WorkoutExercise = { id:string; name:string; aliases:string[]; category:string; muscle_group:string; equipment:string; instructions:string; metadata:Record<string,unknown> };
-export type WorkoutExerciseSpec = { name:string; sets?:number|null; reps?:number|string|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rest_seconds?:number|null; rpe?:number|null; notes?:string; category?:string; muscle_group?:string; equipment?:string; metadata?:Record<string,unknown> };
-export type WorkoutPlanExercise = { id:string; exercise:WorkoutExercise; order_index:number; sets?:number|null; reps:string; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rest_seconds?:number|null; notes:string; metadata:Record<string,unknown> };
-export type WorkoutPlan = { id:string; title:string; description:string; goal:string; source:"manual"|"import"|"corv"; schedule:Record<string,unknown>; active:boolean; metadata:Record<string,unknown>; created_at:string; updated_at:string; exercises:WorkoutPlanExercise[]; created_exercises?:string[] };
-export type WorkoutExerciseLog = { id:string; exercise:WorkoutExercise; order_index:number; sets?:number|null; reps?:number|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rpe?:number|null; notes:string; metadata:Record<string,unknown>; completed:boolean; completed_at?:string|null };
-export type WorkoutSession = { id:string; plan_id?:string|null; plan_title?:string|null; title:string; status:"active"|"completed"; started_at:string; ended_at?:string|null; duration_seconds:number; notes:string; metadata:Record<string,unknown>; exercises:WorkoutExerciseLog[]; created_exercises?:string[] };
+export type WorkoutExercise = { id:string; name:string; aliases:string[]; category:string; muscle_group:string; equipment:string; instructions:string; metadata:Record<string,unknown>; external_provider:string; external_id:string; enrichment_data:Record<string,unknown> & {force?:string;level?:string;mechanic?:string;primary_muscles?:string[];secondary_muscles?:string[];instructions?:string[];source_name?:string;source_url?:string;license?:string}; demo_media_url:string; enriched_at?:string|null; enrichment_error:string };
+export type WorkoutExerciseSpec = { name:string; sets?:number|null; reps?:number|string|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rest_seconds?:number|null; rpe?:number|null; notes?:string; category?:string; muscle_group?:string; equipment?:string; metadata?:Record<string,unknown>; phase_type?:"reps"|"timed"; set_targets?:Array<Record<string,unknown>>; block_key?:string; block_name?:string; cycle_count?:number };
+export type WorkoutPlanExercise = WorkoutExerciseSpec & { id:string; exercise:WorkoutExercise; order_index:number; reps:string; notes:string; metadata:Record<string,unknown> };
+export type WorkoutPlannedSession = { id:string; name:string; order_index:number; description:string; guidance_mode:"checklist"|"guided"; guidance_level:"minimal"|"full"; auto_start_phases:boolean; settings:Record<string,unknown>; exercises:WorkoutPlanExercise[] };
+export type WorkoutPlan = { id:string; title:string; description:string; goal:string; source:"manual"|"import"|"corv"; schedule:Record<string,unknown>; active:boolean; metadata:Record<string,unknown>; created_at:string; updated_at:string; exercises:WorkoutPlanExercise[]; sessions:WorkoutPlannedSession[]; created_exercises?:string[] };
+export type WorkoutSetLog = { id:string; set_index:number; target:Record<string,unknown>; actual:Record<string,unknown>; status:"pending"|"active"|"completed"|"skipped"; started_at?:string|null; completed_at?:string|null; notes:string };
+export type WorkoutExerciseLog = { id:string; exercise:WorkoutExercise; order_index:number; sets?:number|null; reps?:number|null; weight_kg?:number|null; duration_seconds?:number|null; distance_km?:number|null; rpe?:number|null; notes:string; metadata:Record<string,unknown>; completed:boolean; completed_at?:string|null; phase_type:"reps"|"timed"; set_targets:Array<Record<string,unknown>>; block_key:string; block_name:string; cycle_index:number; set_logs:WorkoutSetLog[] };
+export type WorkoutSession = { id:string; plan_id?:string|null; plan_title?:string|null; planned_session_id?:string|null; planned_session_name?:string|null; title:string; status:"active"|"paused"|"draft"|"completed"|"abandoned"; mode:"checklist"|"guided"; guidance_level:"minimal"|"full"; started_at:string; ended_at?:string|null; paused_at?:string|null; accumulated_pause_seconds:number; duration_seconds:number; notes:string; metadata:Record<string,unknown>; exercises:WorkoutExerciseLog[]; created_exercises?:string[] };
 export type WorkoutGoal = { id:string; title:string; metric:"sessions_per_week"|"minutes_per_week"|"exercise_weight_kg"; target_value:number; unit:string; exercise_id?:string|null; exercise_name?:string|null; start_date?:string|null; end_date?:string|null; active:boolean; metadata:Record<string,unknown>; current_value:number; progress_percent:number };
 export type WorkoutDashboard = { days:number; session_count:number; current_streak_days:number; trained_days:number; current_week_sessions:number; daily:Array<{date:string;sessions:number;duration_minutes:number;volume_kg:number}>; weekly:Array<{week_start:string;sessions:number}>; exercise_trend:Array<{date:string;exercise:string;weight_kg?:number|null;volume_kg:number;reps?:number|null;sets?:number|null}>; goals:WorkoutGoal[] };

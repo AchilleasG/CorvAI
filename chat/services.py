@@ -34,6 +34,9 @@ class ChatService:
         "Corv couldn't authenticate with the configured AI provider. Check the API key and "
         "provider settings, then try again."
     )
+    _FRONTMAN_ROUTING_FAILURE_REPLY = (
+        "I couldn't route that request cleanly. Please try again."
+    )
 
     @staticmethod
     def get_chat_by_id(chat_id: int):
@@ -338,8 +341,20 @@ class ChatService:
 
         decision = ChatService._parse_decision(response)
         if not decision:
-            # Fallback: treat as plain assistant reply
-            return response
+            logger.warning(
+                "Frontman returned an invalid decision for chat %s; retrying once", chat_id
+            )
+            try:
+                response = ChatAIService.frontman_decision(chat_context)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                logger.exception("Frontman decision retry failed for chat %s", chat_id)
+                return ChatService._safe_assistant_reply(exc)
+            decision = ChatService._parse_decision(response)
+            if not decision:
+                logger.error(
+                    "Frontman returned an invalid decision twice for chat %s", chat_id
+                )
+                return ChatService._FRONTMAN_ROUTING_FAILURE_REPLY
 
         if not decision.get("handoff"):
             return decision.get("reply", "")
@@ -566,7 +581,51 @@ class ChatService:
 
     @staticmethod
     def _parse_decision(raw: str) -> Optional[Dict[str, Any]]:
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+        """Parse one validated Frontman decision, tolerating legacy noisy output."""
+
+        def validate(value: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(value, dict) or not isinstance(value.get("handoff"), bool):
+                return None
+            handoff = value["handoff"]
+            reply = value.get("reply")
+            reason = value.get("reason")
+            module_hint = value.get("module_hint")
+            if reply is not None and not isinstance(reply, str):
+                return None
+            if reason is not None and not isinstance(reason, str):
+                return None
+            if module_hint is not None and not isinstance(module_hint, str):
+                return None
+            if not handoff and not isinstance(reply, str):
+                return None
+            return {
+                "handoff": handoff, "reply": reply, "reason": reason,
+                "module_hint": module_hint,
+            }
+
+        if not isinstance(raw, str) or not raw.strip():
             return None
+        try:
+            return validate(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+
+        # Legacy output can contain commentary and final-answer JSON objects
+        # concatenated together. Prefer the last actual decision object.
+        decoder = json.JSONDecoder()
+        decisions: List[Dict[str, Any]] = []
+        cursor = 0
+        while cursor < len(raw):
+            start = raw.find("{", cursor)
+            if start < 0:
+                break
+            try:
+                value, end = decoder.raw_decode(raw, start)
+            except json.JSONDecodeError:
+                cursor = start + 1
+                continue
+            decision = validate(value)
+            if decision:
+                decisions.append(decision)
+            cursor = max(end, start + 1)
+        return decisions[-1] if decisions else None

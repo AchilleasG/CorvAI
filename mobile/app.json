@@ -7,34 +7,17 @@
     "icon": "../corv-logo-v2.png",
     "userInterfaceStyle": "dark",
     "newArchEnabled": false,
-    "splash": {
-      "image": "../corv-logo-v2.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#09111f"
-    },
-    "ios": {
-      "supportsTablet": true
-    },
+    "splash": { "image": "../corv-logo-v2.png", "resizeMode": "contain", "backgroundColor": "#09111f" },
+    "ios": { "supportsTablet": true, "infoPlist": { "UIBackgroundModes": ["audio", "remote-notification"] } },
     "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "../corv-logo-v2.png",
-        "backgroundColor": "#09111f"
-      },
+      "adaptiveIcon": { "foregroundImage": "../corv-logo-v2.png", "backgroundColor": "#09111f" },
       "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.corvlabs.ai"
+      "package": "com.corvlabs.ai",
+      "permissions": ["android.permission.FOREGROUND_SERVICE", "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK", "android.permission.POST_NOTIFICATIONS"]
     },
-    "web": {
-      "favicon": "../corv-logo-v2.png"
-    "plugins": [
-      [
-        "expo-location",
-        {
-          "locationWhenInUsePermission": "Allow Corv to use your location for location-aware answers without asking where you are."
-        }
-      ]
-    ],
-    }
+    "web": { "favicon": "../corv-logo-v2.png" },
+    "plugins": [["expo-location", { "locationWhenInUsePermission": "Allow Corv to use your location for location-aware answers without asking where you are." }]]
   }
 }

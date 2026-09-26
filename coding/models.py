@@ -229,3 +229,32 @@ class CodingDelegationWatch(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["active", "session"], name="coding_watch_active_session")]
+
+
+class CodexRuntimeUpdate(models.Model):
+    STATUS_QUEUED = "queued"
+    STATUS_RUNNING = "running"
+    STATUS_SUCCEEDED = "succeeded"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = [
+        (STATUS_QUEUED, "Queued"),
+        (STATUS_RUNNING, "Running"),
+        (STATUS_SUCCEEDED, "Succeeded"),
+        (STATUS_FAILED, "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_QUEUED)
+    previous_version = models.CharField(max_length=64, blank=True, default="")
+    version = models.CharField(max_length=64, blank=True, default="")
+    log = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Codex update {self.id} ({self.status})"

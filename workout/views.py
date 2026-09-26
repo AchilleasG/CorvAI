@@ -1,14 +1,28 @@
+import base64
+import httpx
 from uuid import UUID
+from CorvAI import settings as corv_settings
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from ninja import Router
 from ninja.errors import HttpError
 
 from workout.models import Exercise, WorkoutGoal, WorkoutPlan
-from workout.schemas import ExerciseIn, FinishSessionIn, GoalIn, PlanIn, SessionIn, SessionItemUpdateIn, StartSessionIn
-from workout.services import active_sessions, dashboard, delete_exercise, delete_plan, delete_session, exercise_payload, finish_session, goal_payload, history, log_session, normalize_exercise_name, plan_payload, resolve_exercise, save_plan, start_session, update_session_item
+from workout.schemas import ExerciseIn, ExerciseUpdateIn, FinishSessionIn, GoalIn, PlanIn, PlanUpdateIn, SessionActionIn, SessionIn, SessionItemUpdateIn, SetLogUpdateIn, StartSessionIn, WorkoutSessionUpdateIn, WorkoutSpeechIn
+from workout.services import active_sessions, dashboard, delete_exercise, delete_plan, delete_session, enrich_exercise, exercise_payload, finish_session, goal_payload, history, log_session, normalize_exercise_name, plan_payload, resolve_exercise, save_plan, set_session_status, start_session, update_session_item, update_set_log
 
 router=Router(tags=["Workout"])
+
+@router.post("/guidance/speech")
+def workout_speech(request, payload: WorkoutSpeechIn):
+    text = " ".join(payload.text.split()).strip()[:600]
+    if not text: raise HttpError(400, "Speech text is required")
+    if not corv_settings.openai_key: raise HttpError(503, "Cloud voice is not configured")
+    try:
+        response = httpx.post("https://api.openai.com/v1/audio/speech", headers={"Authorization":f"Bearer {corv_settings.openai_key}"}, json={"model":"gpt-4o-mini-tts","voice":"alloy","input":text,"response_format":"mp3"}, timeout=30.0)
+        response.raise_for_status()
+    except httpx.HTTPError as exc: raise HttpError(502, f"Cloud voice failed: {exc}")
+    return {"content_type":"audio/mpeg","audio_base64":base64.b64encode(response.content).decode("ascii")}
 
 @router.get("/exercises")
 def list_exercises(request, query: str=""):
@@ -21,6 +35,24 @@ def create_exercise(request, payload: ExerciseIn):
     item, created=resolve_exercise(payload.name,defaults=payload.dict())
     return {**exercise_payload(item),"created":created}
 
+@router.get("/exercises/{exercise_id}/details")
+def get_exercise_details(request, exercise_id: UUID, refresh: bool=False):
+    try: return enrich_exercise(exercise_id, force=refresh)
+    except ValueError as exc: raise HttpError(404, str(exc))
+
+@router.patch("/exercises/{exercise_id}")
+def edit_exercise(request, exercise_id: UUID, payload: ExerciseUpdateIn):
+    item=get_object_or_404(Exercise,id=exercise_id)
+    changes=payload.dict(exclude_none=True)
+    if "name" in changes:
+        clean=" ".join(changes["name"].split()).strip()
+        if not clean: raise HttpError(400,"Exercise name is required")
+        normalized=normalize_exercise_name(clean)
+        if Exercise.objects.exclude(id=item.id).filter(normalized_name=normalized).exists(): raise HttpError(409,"An exercise with that name already exists")
+        changes["name"],changes["normalized_name"]=clean,normalized
+    for key,value in changes.items(): setattr(item,key,value)
+    item.save(); return exercise_payload(item)
+
 @router.delete("/exercises/{exercise_id}")
 def remove_exercise(request, exercise_id: UUID, force: bool=False):
     try: return delete_exercise(exercise_id, force=force)
@@ -31,6 +63,13 @@ def list_plans(request): return {"plans":[plan_payload(x) for x in WorkoutPlan.o
 
 @router.get("/plans/{plan_id}")
 def get_plan(request, plan_id: UUID): return plan_payload(get_object_or_404(WorkoutPlan,id=plan_id))
+
+@router.patch("/plans/{plan_id}")
+def edit_plan(request, plan_id: UUID, payload: PlanUpdateIn):
+    item=get_object_or_404(WorkoutPlan,id=plan_id); changes=payload.dict(exclude_none=True)
+    if "title" in changes and not changes["title"].strip(): raise HttpError(400,"Plan title is required")
+    for key,value in changes.items(): setattr(item,key,value)
+    item.save(); return plan_payload(item)
 
 @router.delete("/plans/{plan_id}")
 def remove_plan(request, plan_id: UUID):
@@ -51,6 +90,16 @@ def create_session(request, payload: SessionIn):
     try: return log_session(**payload.dict())
     except ValueError as exc: raise HttpError(400,str(exc))
 
+@router.patch("/sessions/{session_id}/details")
+def edit_session(request, session_id: UUID, payload: WorkoutSessionUpdateIn):
+    from workout.models import WorkoutSession
+    from workout.services import _parse_dt, session_payload
+    item=get_object_or_404(WorkoutSession,id=session_id); changes=payload.dict(exclude_none=True)
+    if "started_at" in changes: changes["started_at"]=_parse_dt(changes["started_at"])
+    if "ended_at" in changes: changes["ended_at"]=_parse_dt(changes["ended_at"])
+    for key,value in changes.items(): setattr(item,key,value)
+    item.save(); return session_payload(item)
+
 @router.get("/sessions/active")
 def get_active_sessions(request): return {"sessions": active_sessions()}
 
@@ -64,10 +113,20 @@ def change_session_item(request, log_id: UUID, payload: SessionItemUpdateIn):
     try: return update_session_item(log_id, **payload.dict())
     except ValueError as exc: raise HttpError(400,str(exc))
 
+@router.patch("/sessions/sets/{set_id}")
+def change_session_set(request, set_id: UUID, payload: SetLogUpdateIn):
+    try: return update_set_log(set_id, **payload.dict())
+    except ValueError as exc: raise HttpError(400, str(exc))
+
 @router.post("/sessions/{session_id}/finish")
 def complete_session(request, session_id: UUID, payload: FinishSessionIn):
     try: return finish_session(session_id, **payload.dict())
     except ValueError as exc: raise HttpError(400,str(exc))
+
+@router.post("/sessions/{session_id}/state")
+def change_session_state(request, session_id: UUID, payload: SessionActionIn):
+    try: return set_session_status(session_id, payload.action)
+    except ValueError as exc: raise HttpError(400, str(exc))
 
 @router.delete("/sessions/{session_id}")
 def remove_session(request, session_id: UUID):

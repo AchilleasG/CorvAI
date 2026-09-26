@@ -1,6 +1,7 @@
 import importlib
 import io
 import json
+from datetime import timedelta
 import tempfile
 import uuid
 from pathlib import Path
@@ -9,11 +10,12 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from coding.models import CodingDelegationWatch, CodingSession, CodingTurn, FeatureDelegation, FeatureQaRun
-from coding.auth import CodexAuthService, CodexDeviceAuthService
+from coding.models import CodexRuntimeUpdate, CodingDelegationWatch, CodingSession, CodingTurn, FeatureDelegation, FeatureQaRun
+from coding.auth import CodexAuthService, CodexDeviceAuthService, CodexRuntimeService
 from coding.browser_runner import InteractiveBrowserSession, _start_tunnel
 from coding.delegations import FeatureDelegationService
 from coding.services import CodingSessionService
+from coding.views import coding_usage, list_sessions
 from coding.ssh_broker import CodingSshBroker
 from coding.ssh_bridge import run_command as run_brokered_command
 from chat.models import ChatMessage
@@ -170,6 +172,55 @@ class CodingToolLookupTests(TestCase):
         self.assertEqual(payload["pending_question"], "Choose how Codex should continue.")
         self.assertEqual(payload["pending_options"], ["Continue", "Stop"])
 
+    @patch("coding.services.threading.Thread.start")
+    @patch("coding.services.CodingSessionService.tmux_alive", return_value=False)
+    @patch("coding.auth.CodexAuthService.is_authenticated", return_value=True)
+    def test_starting_next_turn_retires_prior_decision(self, _auth, _tmux, _start):
+        waiting = CodingTurn.objects.create(
+            session=self.session, prompt="Need a choice", status=CodingTurn.STATUS_NEEDS_INPUT,
+            question="Which path?", options=["A", "B"],
+        )
+        self.session.status = CodingSession.STATUS_NEEDS_INPUT
+        self.session.pending_question = waiting.question
+        self.session.pending_options = waiting.options
+        self.session.save(update_fields=["status", "pending_question", "pending_options"])
+
+        CodingSessionService.start_turn(
+            self.session, "Continue with different work", source=CodingTurn.SOURCE_FEATURE,
+        )
+
+        waiting.refresh_from_db()
+        self.session.refresh_from_db()
+        self.assertEqual(waiting.status, CodingTurn.STATUS_COMPLETED)
+        self.assertEqual(waiting.question, "")
+        self.assertEqual(waiting.options, [])
+        self.assertEqual(self.session.pending_question, "")
+
+    @patch.object(FeatureDelegationService, "_spawn")
+    @patch("coding.delegations.CodingSessionService.tmux_alive", return_value=False)
+    @patch("coding.delegations.CodexDeviceAuthService._is_authenticated", return_value=True)
+    def test_new_feature_retires_unanswered_simple_decision(self, _auth, _tmux, _spawn):
+        self.delegation.status = FeatureDelegation.STATUS_COMPLETED
+        self.delegation.save(update_fields=["status"])
+        waiting = CodingTurn.objects.create(
+            session=self.session, prompt="Need a choice", status=CodingTurn.STATUS_NEEDS_INPUT,
+            question="Which path?", options=["A", "B"],
+        )
+        self.session.pending_question = waiting.question
+        self.session.pending_options = waiting.options
+        self.session.save(update_fields=["pending_question", "pending_options"])
+
+        FeatureDelegationService.create(
+            self.session, title="New work", description="Move on",
+            acceptance_criteria=["It works"],
+        )
+
+        waiting.refresh_from_db()
+        self.session.refresh_from_db()
+        self.assertEqual(waiting.status, CodingTurn.STATUS_COMPLETED)
+        self.assertEqual(waiting.question, "")
+        self.assertEqual(self.session.pending_question, "")
+
     @patch("orchestration.notifications.send_fcm")
     @patch("orchestration.notifications.send_push")
     def test_coding_notifications_fan_out_to_expo_and_firebase(self, send_push, send_fcm):
@@ -190,6 +241,77 @@ class CodingToolLookupTests(TestCase):
         self.assertEqual(fcm_kwargs["channel_id"], "corv_coding")
         self.assertEqual(fcm_kwargs["data"]["type"], "coding_session")
         self.assertEqual(fcm_kwargs["data"]["event"], "completed")
+
+
+class CodingSessionActivityOrderingTests(TestCase):
+    def setUp(self):
+        self.machine = SshMachine.objects.create(
+            name="Activity Server",
+            host="activity.example",
+            username="developer",
+            auth_type=SshMachine.AUTH_AGENT,
+            allow_ai_commands=True,
+        )
+
+    def create_session(self, name, updated_at):
+        session = CodingSession.objects.create(name=name, machine=self.machine)
+        CodingSession.objects.filter(pk=session.pk).update(updated_at=updated_at)
+        session.refresh_from_db()
+        return session
+
+    @patch("coding.services.CodingSessionService.tmux_alive", return_value=False)
+    def test_sessions_are_ordered_by_latest_turn_or_delegation_activity(self, _tmux):
+        now = timezone.now()
+        quiet = self.create_session("Quiet", now - timedelta(days=1))
+        active_turn = self.create_session("Active turn", now - timedelta(days=3))
+        active_delegation = self.create_session("Active delegation", now - timedelta(days=4))
+
+        turn = CodingTurn.objects.create(session=active_turn, prompt="Recent user request")
+        CodingTurn.objects.filter(pk=turn.pk).update(
+            completed_at=now + timedelta(minutes=1)
+        )
+        delegation = FeatureDelegation.objects.create(
+            session=active_delegation,
+            title="Progressing feature",
+            description="Work is progressing",
+            acceptance_criteria=["Done"],
+        )
+        FeatureDelegation.objects.filter(pk=delegation.pk).update(
+            updated_at=now + timedelta(minutes=2)
+        )
+
+        payload = list_sessions(None)
+
+        self.assertEqual(
+            [item["id"] for item in payload["sessions"]],
+            [str(active_delegation.pk), str(active_turn.pk), str(quiet.pk)],
+        )
+        self.assertGreater(
+            payload["sessions"][0]["last_activity_at"],
+            payload["sessions"][1]["last_activity_at"],
+        )
+
+    @patch("coding.services.CodingSessionService.terminal_payload", return_value={})
+    @patch("coding.services.CodingSessionService.tmux_alive", return_value=True)
+    def test_terminal_input_refreshes_session_activity(self, _alive, _payload):
+        session = self.create_session("Direct", timezone.now() - timedelta(days=2))
+        session.tmux_session_name = "test-direct"
+        before = session.updated_at
+
+        with patch("coding.services.subprocess.run"):
+            CodingSessionService.terminal_input(session, key="Enter")
+
+        session.refresh_from_db()
+        self.assertGreater(session.updated_at, before)
+
+    @patch("coding.views.CodexAuthService.profile_usage")
+    def test_live_usage_endpoint_bypasses_the_usage_cache(self, profile_usage):
+        profile_usage.return_value = {"available": True, "primary": None}
+
+        payload = coding_usage(None)
+
+        self.assertTrue(payload["available"])
+        profile_usage.assert_called_once_with(refresh=True)
 
 
 class DelegationRestartTests(TestCase):
@@ -417,6 +539,91 @@ class CodexAuthSettingsTests(SimpleTestCase):
         self.assertNotIn("OPENAI_API_KEY", run.call_args.kwargs["env"])
         self.assertTrue(run.call_args.kwargs["env"]["CODEX_HOME"].endswith(".codex-api-key"))
 
+    @patch.object(CodexAuthService, "selected_status", return_value=(True, "ready"))
+    @patch.object(CodexAuthService, "_app_server_request")
+    def test_available_models_come_from_codex_and_selection_is_validated(self, app_server, _status):
+        CodexAuthService._models_cache = {}
+        app_server.return_value = {
+            "id": 2,
+            "result": {
+                "data": [
+                    {
+                        "id": "gpt-5.6-sol",
+                        "displayName": "GPT-5.6 Sol",
+                        "isDefault": True,
+                        "defaultReasoningEffort": "low",
+                        "supportedReasoningEfforts": [
+                            {"reasoningEffort": "low", "description": "Fast"},
+                            {"reasoningEffort": "high", "description": "Deep"},
+                        ],
+                        "inputModalities": ["text", "image"],
+                    }
+                ]
+            },
+        }
+
+        catalog = CodexAuthService.available_models("/usr/bin/codex", refresh=True)
+        selected = CodexAuthService.update_selected_model("gpt-5.6-sol")
+
+        self.assertTrue(catalog["available"])
+        self.assertEqual(catalog["models"][0]["display_name"], "GPT-5.6 Sol")
+        self.assertEqual(catalog["models"][0]["supported_reasoning_efforts"][1]["reasoning_effort"], "high")
+        self.assertEqual(selected["selected_model"], "gpt-5.6-sol")
+        self.assertEqual(self.setting_values["codex_model_profile"], "gpt-5.6-sol")
+        with self.assertRaisesMessage(ValueError, "available to the selected Codex login"):
+            CodexAuthService.update_selected_model("made-up-model")
+
+    def test_model_identifier_rejects_command_injection(self):
+        with self.assertRaisesMessage(ValueError, "Invalid Codex model identifier"):
+            CodexAuthService.update_selected_model("gpt-safe; touch /tmp/nope")
+
+
+class CodexRuntimeTests(TestCase):
+    @patch.object(CodexRuntimeService, "installed_version", return_value="0.146.0")
+    @patch("coding.auth.shutil.which", side_effect=lambda name: f"/usr/bin/{name}")
+    @patch("coding.auth.subprocess.run")
+    def test_release_status_detects_newer_npm_release(self, run, _which, _installed):
+        CodexRuntimeService._release_cache = None
+        run.return_value = MagicMock(returncode=0, stdout="0.154.0\n", stderr="")
+
+        status = CodexRuntimeService.release_status(refresh=True)
+
+        self.assertEqual(status["current_version"], "0.146.0")
+        self.assertEqual(status["latest_version"], "0.154.0")
+        self.assertTrue(status["update_available"])
+
+    @patch.object(CodexRuntimeService, "_busy_reason", return_value="")
+    @patch.object(CodexAuthService, "_codex_path", return_value="/usr/bin/codex")
+    @patch.object(CodexRuntimeService, "installed_version", return_value="0.146.0")
+    @patch("coding.auth.threading.Thread")
+    def test_update_is_persisted_and_started_in_background(self, thread, _version, _path, _busy):
+        result = CodexRuntimeService.start_update()
+
+        update = CodexRuntimeUpdate.objects.get(pk=result["id"])
+        self.assertEqual(update.status, CodexRuntimeUpdate.STATUS_QUEUED)
+        self.assertEqual(update.previous_version, "0.146.0")
+        thread.return_value.start.assert_called_once_with()
+
+    @patch.object(CodexRuntimeService, "installed_version", return_value="0.154.0")
+    @patch("coding.auth.shutil.which", return_value="/usr/bin/codex")
+    @patch("coding.auth.subprocess.Popen")
+    @patch("coding.auth.close_old_connections")
+    def test_background_update_streams_logs_and_persists_completion(self, _close, popen, _which, _version):
+        process = MagicMock()
+        process.stdout = ["Downloading update\n", "Installing update\n"]
+        process.wait.return_value = 0
+        popen.return_value = process
+        update = CodexRuntimeUpdate.objects.create(previous_version="0.146.0")
+
+        CodexRuntimeService._run_update(str(update.id), "/usr/bin/codex")
+
+        update.refresh_from_db()
+        self.assertEqual(update.status, CodexRuntimeUpdate.STATUS_SUCCEEDED)
+        self.assertEqual(update.version, "0.154.0")
+        self.assertIn("Downloading update", update.log)
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/codex", "update"])
+
 
 class CodingWorkspaceTests(SimpleTestCase):
 
@@ -489,8 +696,10 @@ class CodingWorkspaceTests(SimpleTestCase):
         self.assertFalse(ssh_config_exists)
         connect.assert_called_once_with(machine)
         ensure_broker.assert_called_once()
-        command = CodingSessionService.managed_codex_command("codex", Path("/tmp/work"))
+        command = CodingSessionService.managed_codex_command("codex", Path("/tmp/work"), model="gpt-5.6-sol")
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("--model", command)
+        self.assertIn("gpt-5.6-sol", command)
         self.assertNotIn("--ephemeral", command)
 
     def test_workspace_ssh_wrapper_sends_commands_to_corv_broker(self):
@@ -574,16 +783,17 @@ class CodingWorkspaceTests(SimpleTestCase):
 
     def test_qa_codex_uses_independent_resumable_full_access_thread(self):
         fresh = FeatureDelegationService._qa_command(
-            "codex", Path("/tmp/work"), "", ["/tmp/evidence.png"]
+            "codex", Path("/tmp/work"), "", ["/tmp/evidence.png"], "gpt-5.6-sol"
         )
         resumed = FeatureDelegationService._qa_command(
-            "codex", Path("/tmp/work"), "qa-thread-id", ["/tmp/evidence.png"]
+            "codex", Path("/tmp/work"), "qa-thread-id", ["/tmp/evidence.png"], "gpt-5.6-sol"
         )
         self.assertEqual(fresh[:2], ["codex", "exec"])
         self.assertEqual(resumed[:3], ["codex", "exec", "resume"])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", fresh)
         self.assertIn("--output-schema", fresh)
         self.assertIn("--image", resumed)
+        self.assertIn("gpt-5.6-sol", resumed)
         self.assertIn("qa-thread-id", resumed)
 
     def test_qa_prompt_requires_independent_testing_without_code_edits(self):

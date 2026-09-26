@@ -48,6 +48,29 @@
   box-sizing: border-box;
 }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) rgba(255, 255, 255, 0.03);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2)) padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #55e6bd, #ffd78c) padding-box; }
+
+
 html, body, #root {
   min-height: 100dvh;
 }

@@ -102,6 +102,14 @@ export const {
   createFeatureDelegation,
   resumeFeatureDelegation,
   stopFeatureDelegation,
+  fetchWorkoutPlans,
+  fetchWorkoutSpeech,
+  fetchActiveWorkoutSessions,
+  startWorkoutSession,
+  updateWorkoutSessionItem,
+  updateWorkoutSet,
+  finishWorkoutSession,
+  updateWorkoutSessionState,
 } = api;
 
 export async function sendVoice(chat_id: string, uri: string, metadata: Record<string, unknown> = {}) {

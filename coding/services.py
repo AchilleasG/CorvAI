@@ -221,9 +221,11 @@ The local directory containing this file is only a control workspace; do not tre
 
     @staticmethod
     def cli_status() -> dict:
-        from coding.auth import CodexAuthService
+        from coding.auth import CodexAuthService, CodexRuntimeService
 
         codex_path = shutil.which("codex")
+        runtime_update = CodexRuntimeService.latest_update()
+        update_active = bool(runtime_update and runtime_update["active"])
         tmux_path = shutil.which("tmux")
         ssh_path = shutil.which("ssh")
         sshpass_path = shutil.which("sshpass")
@@ -232,19 +234,32 @@ The local directory containing this file is only a control workspace; do not tre
         authenticated = False
         auth_message = "Codex CLI is not installed"
         version = ""
-        if codex_path:
+        models = {"available": False, "reason": "Authenticate Codex to list models.", "models": []}
+        if codex_path and not update_active:
             version_result = subprocess.run(
                 [codex_path, "--version"], capture_output=True, text=True, timeout=10, check=False
             )
             version = (version_result.stdout or version_result.stderr).strip()
             authenticated, auth_message = CodexAuthService.selected_status(codex_path)
+            if authenticated:
+                models = CodexAuthService.available_models(codex_path)
+        release = CodexRuntimeService.release_status(codex_path) if codex_path and not update_active else {
+            "current_version": runtime_update["previous_version"] if update_active and runtime_update else "",
+            "latest_version": "",
+            "update_available": False,
+            "update_error": "",
+        }
         return {
-            "installed": bool(codex_path),
+            "installed": bool(codex_path) or update_active,
             "authenticated": authenticated,
             "version": version,
+            **release,
             "auth_message": auth_message,
             "auth_mode": CodexAuthService.mode(),
             "usage": CodexAuthService.profile_usage(codex_path) if CodexAuthService.mode() == CodexAuthService.MODE_PROFILE and authenticated else None,
+            "model_catalog": models,
+            "selected_model": CodexAuthService.selected_model(),
+            "runtime_update": runtime_update,
             "tmux_available": bool(tmux_path),
             "ssh_available": bool(ssh_path),
             "password_ssh_available": bool(sshpass_path),
@@ -252,7 +267,7 @@ The local directory containing this file is only a control workspace; do not tre
         }
 
     @staticmethod
-    def managed_codex_command(codex: str, workspace: Path, thread_id: str = "") -> list[str]:
+    def managed_codex_command(codex: str, workspace: Path, thread_id: str = "", model: str = "") -> list[str]:
         options = [
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
@@ -260,18 +275,22 @@ The local directory containing this file is only a control workspace; do not tre
             "--output-schema",
             str(workspace / "result-schema.json"),
         ]
+        if model:
+            options[0:0] = ["--model", model]
         if thread_id:
             return [codex, "exec", "resume", *options, thread_id, "-"]
         return [codex, "exec", *options, "-C", str(workspace), "-"]
 
     @staticmethod
-    def interactive_codex_command(codex: str, workspace: Path, thread_id: str = "") -> list[str]:
+    def interactive_codex_command(codex: str, workspace: Path, thread_id: str = "", model: str = "") -> list[str]:
         options = [
             "--dangerously-bypass-approvals-and-sandbox",
             "--no-alt-screen",
             "-C",
             str(workspace),
         ]
+        if model:
+            options[0:0] = ["--model", model]
         if thread_id:
             return [codex, "resume", "--include-non-interactive", *options, thread_id]
         return [codex, *options]
@@ -353,6 +372,9 @@ The local directory containing this file is only a control workspace; do not tre
             "last_error": session.last_error,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
+            "last_activity_at": getattr(
+                session, "last_activity_at", session.updated_at
+            ).isoformat(),
             "stopped_at": session.stopped_at.isoformat() if session.stopped_at else None,
             "turns": [cls.turn_payload(turn) for turn in turns],
         }
@@ -523,6 +545,13 @@ The local directory containing this file is only a control workspace; do not tre
             cls.prepare_workspace(session)
             paths = materialize_inputs(session, file_ids)
             prompt += "\n\nAttached input files (read these as part of the request):\n" + "\n".join(f"- {path}" for path in paths)
+        # A decision belongs only to the turn that requested it. Starting any
+        # later turn means the user answered it or chose to move on.
+        session.turns.filter(status=CodingTurn.STATUS_NEEDS_INPUT).update(
+            status=CodingTurn.STATUS_COMPLETED,
+            question="",
+            options=[],
+        )
         turn = CodingTurn.objects.create(session=session, prompt=prompt, source=source)
         CodingSession.objects.filter(pk=session.pk).update(
             status=CodingSession.STATUS_RUNNING,
@@ -566,7 +595,7 @@ The local directory containing this file is only a control workspace; do not tre
                 "artifacts JSON array as well as linking it in the summary."
             )
             thread_id = session.codex_thread_id or cls.discover_thread_id(session)
-            command = cls.managed_codex_command(codex, workspace, thread_id)
+            command = cls.managed_codex_command(codex, workspace, thread_id, CodexAuthService.selected_model())
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.PIPE,
@@ -707,7 +736,7 @@ The local directory containing this file is only a control workspace; do not tre
             raise RuntimeError("Codex CLI and tmux must be installed in the Corv web container")
         tmux_name = session.tmux_session_name or f"corv-codex-{str(session.pk).replace('-', '')[:20]}"
         thread_id = session.codex_thread_id or cls.discover_thread_id(session)
-        command = cls.interactive_codex_command(codex, workspace, thread_id)
+        command = cls.interactive_codex_command(codex, workspace, thread_id, CodexAuthService.selected_model())
         tmux_command = [
             "tmux", "new-session", "-d", "-s", tmux_name, "-x", "160", "-y", "44",
             "-c", str(workspace),
@@ -767,6 +796,7 @@ The local directory containing this file is only a control workspace; do not tre
             if key not in TERMINAL_KEYS:
                 raise ValueError("Unsupported terminal key")
             subprocess.run(["tmux", "send-keys", "-t", session.tmux_session_name, key], check=True)
+        CodingSession.objects.filter(pk=session.pk).update(updated_at=timezone.now())
         return cls.terminal_payload(session)
 
     @classmethod

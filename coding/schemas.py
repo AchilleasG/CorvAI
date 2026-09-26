@@ -20,6 +20,10 @@ class CodingTerminalInput(Schema):
     key: Optional[Literal["Enter", "Up", "Down", "Left", "Right", "Tab", "Escape", "C-c", "C-d"]] = None
 
 
+class CodexModelIn(Schema):
+    model: str = ""
+
+
 class FeatureDelegationIn(Schema):
     title: str
     description: str

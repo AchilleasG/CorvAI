@@ -86,6 +86,7 @@ import {
 } from "./src/notifications";
 import SshScreen from "./src/SshScreen";
 import CodingScreen from "./src/CodingScreen";
+import WorkoutScreen from "./src/WorkoutScreen";
 import ObjectiveManager from "./src/ObjectiveManager";
 import { consumePendingAnswerSession, fetchCallById } from "./src/call_actions";
 import {
@@ -107,7 +108,7 @@ import {
 import { Audio } from "expo-av";
 import { Ionicons } from "@expo/vector-icons";
 
-type TabKey = "chat" | "settings" | "study" | "calendar" | "scheduler" | "messages" | "calls" | "ssh" | "coding";
+type TabKey = "chat" | "settings" | "study" | "calendar" | "scheduler" | "messages" | "calls" | "ssh" | "coding" | "workout";
 
 type SoftEventDraft = {
   id: string;
@@ -1846,6 +1847,7 @@ function InnerApp() {
           </TouchableOpacity>
           <TouchableOpacity style={[styles.tabButton, activeTab === "ssh" && styles.tabButtonActive]} onPress={() => setActiveTab("ssh")}><Ionicons name="server-outline" size={14} color={activeTab === "ssh" ? "#041316" : "#94a3b8"} /><Text style={[styles.tabButtonText, activeTab === "ssh" && styles.tabButtonTextActive]}>SSH</Text></TouchableOpacity>
           <TouchableOpacity style={[styles.tabButton, activeTab === "coding" && styles.tabButtonActive]} onPress={() => setActiveTab("coding")}><Ionicons name="code-slash-outline" size={14} color={activeTab === "coding" ? "#041316" : "#94a3b8"} /><Text style={[styles.tabButtonText, activeTab === "coding" && styles.tabButtonTextActive]}>Coding</Text></TouchableOpacity>
+          <TouchableOpacity style={[styles.tabButton, activeTab === "workout" && styles.tabButtonActive]} onPress={() => setActiveTab("workout")}><Ionicons name="barbell-outline" size={14} color={activeTab === "workout" ? "#041316" : "#94a3b8"} /><Text style={[styles.tabButtonText, activeTab === "workout" && styles.tabButtonTextActive]}>Workout</Text></TouchableOpacity>
           <TouchableOpacity
             style={[styles.tabButton, activeTab === "calendar" && styles.tabButtonActive]}
             onPress={() => setActiveTab("calendar")}
@@ -2553,6 +2555,8 @@ function InnerApp() {
         <SshScreen />
       ) : activeTab === "coding" ? (
         <CodingScreen requestedSessionId={requestedCodingSessionId} requestedDelegationId={requestedDelegationId} onRequestHandled={() => { setRequestedCodingSessionId(null); setRequestedDelegationId(null); }} />
+      ) : activeTab === "workout" ? (
+        <WorkoutScreen />
       ) : (
         <ScrollView contentContainerStyle={styles.scrollContent}>
           <Text style={styles.sectionTitle}>Calendar</Text>

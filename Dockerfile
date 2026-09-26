@@ -8,7 +8,7 @@ WORKDIR /app
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends chromium chromium-driver espeak-ng git nodejs npm openssh-client sshpass tmux \
-	&& npm install -g @openai/codex@0.146.0 \
+	&& npm install -g @openai/codex@0.154.0 \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

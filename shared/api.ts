@@ -37,6 +37,7 @@ import {
   SshCommandRecord,
   SshTerminalSession,
   CodingCliStatus,
+  CodexProfileUsage,
   CodingDeviceAuth,
   CodingSession,
   CodingTurn,
@@ -925,6 +926,18 @@ export function createApi(config: ApiConfig) {
     fetchCodingStatus() {
       return request<CodingCliStatus>(config, "/coding/status");
     },
+    fetchCodingUsage() {
+      return request<CodexProfileUsage>(config, "/coding/usage");
+    },
+    updateCodingCodex() {
+      return request<CodingCliStatus>(config, "/coding/runtime/update", { method: "POST" });
+    },
+    selectCodingModel(model: string) {
+      return request<CodingCliStatus>(config, "/coding/model", {
+        method: "POST",
+        body: JSON.stringify({ model }),
+      });
+    },
     fetchCodingDeviceAuth() {
       return request<CodingDeviceAuth>(config, "/coding/auth/device");
     },
@@ -1036,14 +1049,18 @@ export function createApi(config: ApiConfig) {
     fetchWorkoutExercises(query = "") {
       return request<{ exercises: WorkoutExercise[] }>(config, `/workout/exercises${query ? `?query=${encodeURIComponent(query)}` : ""}`);
     },
+    fetchWorkoutExerciseDetails(exerciseId:string, refresh=false) { return request<WorkoutExercise>(config, `/workout/exercises/${exerciseId}/details${refresh ? "?refresh=true" : ""}`); },
+    fetchWorkoutSpeech(text:string) { return request<{content_type:string;audio_base64:string}>(config, "/workout/guidance/speech", {method:"POST",body:JSON.stringify({text})}); },
     createWorkoutExercise(payload: Partial<WorkoutExercise> & { name: string }) {
       return request<WorkoutExercise & { created: boolean }>(config, "/workout/exercises", { method: "POST", body: JSON.stringify(payload) });
     },
+    updateWorkoutExercise(exerciseId:string,payload:Partial<WorkoutExercise>) { return request<WorkoutExercise>(config,`/workout/exercises/${exerciseId}`,{method:"PATCH",body:JSON.stringify(payload)}); },
     deleteWorkoutExercise(exerciseId:string, force=false) { return request<{deleted:boolean;exercise:WorkoutExercise;deleted_plan_entries:number;deleted_log_entries:number}>(config, `/workout/exercises/${exerciseId}?force=${force}`, {method:"DELETE"}); },
     fetchWorkoutPlans() { return request<{ plans: WorkoutPlan[] }>(config, "/workout/plans"); },
-    createWorkoutPlan(payload: { title:string; description?:string; goal?:string; source?:"manual"|"import"|"corv"; schedule?:Record<string,unknown>; exercises:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) {
+    createWorkoutPlan(payload: { title:string; description?:string; goal?:string; source?:"manual"|"import"|"corv"; schedule?:Record<string,unknown>; exercises?:WorkoutExerciseSpec[]; sessions?:Array<{name:string;description?:string;guidance_mode?:string;guidance_level?:string;auto_start_phases?:boolean;settings?:Record<string,unknown>;exercises:WorkoutExerciseSpec[]}>; metadata?:Record<string,unknown> }) {
       return request<WorkoutPlan>(config, "/workout/plans", { method: "POST", body: JSON.stringify(payload) });
     },
+    updateWorkoutPlan(planId:string,payload:Partial<Pick<WorkoutPlan,"title"|"description"|"goal"|"active"|"schedule"|"metadata">>) { return request<WorkoutPlan>(config,`/workout/plans/${planId}`,{method:"PATCH",body:JSON.stringify(payload)}); },
     deleteWorkoutPlan(planId:string) { return request<{deleted:boolean;plan:WorkoutPlan;preserved_sessions:number}>(config, `/workout/plans/${planId}`, {method:"DELETE"}); },
     fetchWorkoutSessions(params: { start_date?:string; end_date?:string; exercise?:string; limit?:number } = {}) {
       const query = new URLSearchParams(Object.entries(params).filter(([,value]) => value !== undefined && value !== "").map(([key,value]) => [key,String(value)]));
@@ -1052,11 +1069,14 @@ export function createApi(config: ApiConfig) {
     createWorkoutSession(payload: { title?:string; plan?:string; started_at?:string; ended_at?:string; notes?:string; exercises:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) {
       return request<WorkoutSession>(config, "/workout/sessions", { method: "POST", body: JSON.stringify(payload) });
     },
+    updateWorkoutSession(sessionId:string,payload:{title?:string;notes?:string;started_at?:string;ended_at?:string;metadata?:Record<string,unknown>}) { return request<WorkoutSession>(config,`/workout/sessions/${sessionId}/details`,{method:"PATCH",body:JSON.stringify(payload)}); },
     deleteWorkoutSession(sessionId:string) { return request<{ deleted:boolean; session:WorkoutSession }>(config, `/workout/sessions/${sessionId}`, { method:"DELETE" }); },
     fetchActiveWorkoutSessions() { return request<{ sessions:WorkoutSession[] }>(config, "/workout/sessions/active"); },
-    startWorkoutSession(payload: { title?:string; plan?:string; started_at?:string; notes?:string; exercises?:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) { return request<WorkoutSession>(config, "/workout/sessions/start", { method:"POST", body:JSON.stringify(payload) }); },
+    startWorkoutSession(payload: { title?:string; plan?:string; planned_session?:string; started_at?:string; notes?:string; mode?:"checklist"|"guided"; guidance_level?:"minimal"|"full"; exercises?:WorkoutExerciseSpec[]; metadata?:Record<string,unknown> }) { return request<WorkoutSession>(config, "/workout/sessions/start", { method:"POST", body:JSON.stringify(payload) }); },
     updateWorkoutSessionItem(logId:string, payload: { completed?:boolean; sets?:number; reps?:number; weight_kg?:number; duration_seconds?:number; distance_km?:number; rpe?:number; notes?:string; metadata?:Record<string,unknown> }) { return request<WorkoutExerciseLog>(config, `/workout/sessions/items/${logId}`, { method:"PATCH", body:JSON.stringify(payload) }); },
-    finishWorkoutSession(sessionId:string, payload: { ended_at?:string; notes?:string } = {}) { return request<WorkoutSession>(config, `/workout/sessions/${sessionId}/finish`, { method:"POST", body:JSON.stringify(payload) }); },
+    updateWorkoutSet(setId:string, payload:{status?:"pending"|"active"|"completed"|"skipped";actual?:Record<string,unknown>;notes?:string}) { return request<WorkoutExerciseLog>(config, `/workout/sessions/sets/${setId}`, {method:"PATCH",body:JSON.stringify(payload)}); },
+    finishWorkoutSession(sessionId:string, payload: { ended_at?:string; notes?:string; draft?:boolean } = {}) { return request<WorkoutSession>(config, `/workout/sessions/${sessionId}/finish`, { method:"POST", body:JSON.stringify(payload) }); },
+    updateWorkoutSessionState(sessionId:string, action:"pause"|"resume"|"submit"|"abandon") { return request<WorkoutSession>(config, `/workout/sessions/${sessionId}/state`, {method:"POST",body:JSON.stringify({action})}); },
     fetchWorkoutGoals() { return request<{ goals: WorkoutGoal[] }>(config, "/workout/goals"); },
     createWorkoutGoal(payload: { title:string; metric:string; target_value:number; unit?:string; exercise?:string; start_date?:string; end_date?:string; active?:boolean; metadata?:Record<string,unknown> }) {
       return request<WorkoutGoal>(config, "/workout/goals", { method: "POST", body: JSON.stringify(payload) });

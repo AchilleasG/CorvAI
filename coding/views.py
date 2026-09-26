@@ -1,18 +1,21 @@
 from uuid import UUID
 from pathlib import Path
 
+from django.db.models import Max
+from django.db.models.functions import Coalesce, Greatest
 from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from ninja import Router
 from ninja.errors import HttpError
 
 from coding.models import CodingSession, CodingTurn, FeatureDelegation, FeatureQaRun
-from coding.auth import CodexDeviceAuthService
+from coding.auth import CodexAuthService, CodexDeviceAuthService, CodexRuntimeService
 from coding.delegations import FeatureDelegationService
 from coding.schemas import (
     CodingSessionIn,
     CodingTaskIn,
     CodingTerminalInput,
+    CodexModelIn,
     FeatureDelegationIn,
     FeatureDelegationResumeIn,
 )
@@ -26,6 +29,29 @@ router = Router(tags=["Coding Sessions"])
 @router.get("/status")
 def coding_status(request):
     return CodingSessionService.cli_status()
+
+
+@router.get("/usage")
+def coding_usage(request):
+    return CodexAuthService.profile_usage(refresh=True)
+
+
+@router.post("/runtime/update")
+def update_codex_runtime(request):
+    try:
+        CodexRuntimeService.start_update()
+        return CodingSessionService.cli_status()
+    except Exception as exc:
+        raise HttpError(400, str(exc))
+
+
+@router.post("/model")
+def select_codex_model(request, payload: CodexModelIn):
+    try:
+        CodexAuthService.update_selected_model(payload.model)
+        return CodingSessionService.cli_status()
+    except Exception as exc:
+        raise HttpError(400, str(exc))
 
 
 @router.get("/auth/device")
@@ -56,7 +82,24 @@ def logout_codex(request):
 
 @router.get("/sessions")
 def list_sessions(request):
-    sessions = CodingSession.objects.select_related("machine").all()
+    sessions = (
+        CodingSession.objects.select_related("machine")
+        .annotate(
+            last_turn_completed_at=Max("turns__completed_at"),
+            last_turn_created_at=Max("turns__created_at"),
+            last_delegation_activity_at=Max("delegations__updated_at"),
+            last_file_activity_at=Max("files__updated_at"),
+        )
+        .annotate(
+            last_activity_at=Greatest(
+                "updated_at",
+                Coalesce("last_turn_completed_at", "last_turn_created_at", "created_at"),
+                Coalesce("last_delegation_activity_at", "created_at"),
+                Coalesce("last_file_activity_at", "created_at"),
+            )
+        )
+        .order_by("-last_activity_at", "-created_at")
+    )
     return {"sessions": [CodingSessionService.session_payload(session, include_turns=False) for session in sessions]}
 
 

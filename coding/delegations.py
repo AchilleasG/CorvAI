@@ -81,6 +81,15 @@ class FeatureDelegationService:
         if file_ids:
             from coding.files import resolve_files
             resolve_files(file_ids, session=session)
+        # Creating new work supersedes an unanswered simple-task decision.
+        session.turns.filter(status=CodingTurn.STATUS_NEEDS_INPUT).update(
+            status=CodingTurn.STATUS_COMPLETED,
+            question="",
+            options=[],
+        )
+        CodingSession.objects.filter(pk=session.pk).update(
+            pending_question="", pending_options=[]
+        )
         delegation = FeatureDelegation.objects.create(
             session=session,
             title=title.strip(),
@@ -245,6 +254,7 @@ The current screenshot is attached. Inspect both the screenshot and structured p
         workspace: Path,
         thread_id: str,
         images: list[str] | None = None,
+        model: str = "",
     ) -> list[str]:
         options = [
             "--dangerously-bypass-approvals-and-sandbox",
@@ -255,6 +265,8 @@ The current screenshot is attached. Inspect both the screenshot and structured p
         ]
         for image in images or []:
             options.extend(["--image", image])
+        if model:
+            options[0:0] = ["--model", model]
         if thread_id:
             return [codex, "exec", "resume", *options, thread_id, "-"]
         return [codex, "exec", *options, "-C", str(workspace), "-"]
@@ -274,7 +286,7 @@ The current screenshot is attached. Inspect both the screenshot and structured p
         codex = shutil.which("codex")
         if not codex:
             raise RuntimeError("Codex CLI is not installed")
-        command = cls._qa_command(codex, workspace, delegation.qa_thread_id, images)
+        command = cls._qa_command(codex, workspace, delegation.qa_thread_id, images, CodexAuthService.selected_model())
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,

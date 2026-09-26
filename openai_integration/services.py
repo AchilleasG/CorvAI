@@ -232,13 +232,24 @@ class ChatAIService:
             f"{persona_text}\n\n"
             "Decision rule: If the user only needs conversation or analysis (including discussing data already shown in recent messages), reply directly. "
             "If fresh action/data is needed, do NOT answer; instead emit a JSON handoff object.\n"
-            "Handoff JSON shape:\n"
-            '{\"handoff\":true,\"reason\":\"why\",\"module_hint\":\"optional\"}\n'
-            "If not handing off, return {\"handoff\":false,\"reply\":\"your message\"}.\n"
-            "Keep JSON terse. No extra prose outside the JSON. When replying directly in this text chat, "
+            "Return exactly one decision object. For a handoff set handoff=true, reason and optional "
+            "module_hint; set reply=null. For a direct reply set handoff=false and reply; set reason "
+            "and module_hint to null. Do not emit action parameters, intermediate JSON, commentary, "
+            "or prose outside that one object. When replying directly in this text chat, "
             "the reply value may contain polished GitHub-flavored Markdown: use compact headings, bullets, and "
             "clickable Markdown links when they improve readability. Do not over-format a simple answer."
         )
+        decision_schema = {
+            "type": "object",
+            "properties": {
+                "handoff": {"type": "boolean"},
+                "reply": {"type": ["string", "null"]},
+                "reason": {"type": ["string", "null"]},
+                "module_hint": {"type": ["string", "null"]},
+            },
+            "required": ["handoff", "reply", "reason", "module_hint"],
+            "additionalProperties": False,
+        }
 
         if module_text:
             instructions += f"\nAvailable modules:\n{module_text}"
@@ -255,7 +266,13 @@ class ChatAIService:
             resp_kwargs = {
                 "model": model_name,
                 "input": input_seq,
-                "text": {"format": {"type": "text"}, "verbosity": "low"},
+                "text": {
+                    "format": {
+                        "type": "json_schema", "name": "frontman_decision",
+                        "strict": True, "schema": decision_schema,
+                    },
+                    "verbosity": "low",
+                },
                 "reasoning": {"effort": "low"},
                 "tools": [],
                 "store": True,

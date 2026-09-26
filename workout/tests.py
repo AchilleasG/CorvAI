@@ -1,12 +1,17 @@
 from datetime import timedelta
+from io import BytesIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from PIL import Image
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from ninja.testing import TestClient
 
 from orchestration.registry import FunctionRegistry
-from workout.models import Exercise, WorkoutGoal, WorkoutPlan, WorkoutSession
-from workout.services import active_sessions, dashboard, delete_exercise, delete_plan, finish_session, log_session, resolve_exercise, save_plan, start_session, update_session_item
+from workout.models import Exercise, WorkoutGoal, WorkoutPlan, WorkoutPlanExercise, WorkoutPlanSession, WorkoutSession
+from workout.services import active_sessions, dashboard, delete_exercise, delete_plan, enrich_exercise, finish_session, log_session, resolve_exercise, save_plan, start_session, update_session_item
 from workout.views import router
 
 
@@ -81,6 +86,96 @@ class WorkoutApiAndActionTests(TestCase):
         self.assertEqual(len(history.json()["sessions"]), 1)
         self.assertEqual(progress.json()["session_count"], 1)
         self.assertEqual(progress.json()["exercise_trend"][0]["weight_kg"], 24)
+
+
+class ExerciseEnrichmentTests(TestCase):
+    class Response:
+        def __init__(self, *, data=None, content=b""): self._data=data; self.content=content
+        def raise_for_status(self): return None
+        def json(self): return self._data
+
+    class Client:
+        def __init__(self, catalog, image): self.catalog=catalog; self.image=image; self.calls=[]
+        def get(self, url):
+            self.calls.append(url)
+            return ExerciseEnrichmentTests.Response(data=self.catalog) if url.endswith("exercises.json") else ExerciseEnrichmentTests.Response(content=self.image)
+
+    def setUp(self):
+        from workout import services
+        self.client = TestClient(router)
+        services._catalog_cache = None
+        image=Image.new("RGB",(32,32),"white"); output=BytesIO(); image.save(output,"JPEG")
+        self.catalog=[{"id":"Pushups","name":"Pushups","force":"push","level":"beginner","mechanic":"compound","equipment":"body only","primaryMuscles":["chest"],"secondaryMuscles":["triceps"],"category":"strength","instructions":["Keep a straight body line.","Lower and press."],"images":["Push-Up/0.jpg","Push-Up/1.jpg"]}]
+        self.image=output.getvalue()
+
+    def test_lazy_enrichment_persists_details_and_local_gif(self):
+        exercise,_=resolve_exercise("Push Up")
+        client=self.Client(self.catalog,self.image)
+        with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=media,MEDIA_URL="/media/"):
+            result=enrich_exercise(exercise.id,client=client)
+            self.assertEqual(result["external_provider"],"free-exercise-db")
+            self.assertEqual(result["enrichment_data"]["primary_muscles"],["chest"])
+            self.assertTrue(result["demo_media_url"].endswith(".gif"))
+            self.assertTrue((Path(media)/result["demo_media_url"].removeprefix("/media/")).exists())
+            cached_client=self.Client([],b"")
+            cached=enrich_exercise(exercise.id,client=cached_client)
+            self.assertEqual(cached["external_id"],"Pushups")
+            self.assertEqual(cached_client.calls,[])
+
+    def test_detail_endpoint_and_action_return_enriched_record(self):
+        exercise,_=resolve_exercise("Push Up")
+        client=self.Client(self.catalog,self.image)
+        with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=media,MEDIA_URL="/media/"):
+            enrich_exercise(exercise.id,client=client)
+            response=self.client.get(f"/exercises/{exercise.id}/details")
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json()["external_provider"],"free-exercise-db")
+            import orchestration.tools.workout  # noqa: F401
+            detail=FunctionRegistry.resolve_callable("workout.get_exercise_details")
+            self.assertEqual(detail(str(exercise.id))["external_id"],"Pushups")
+
+    def test_matching_uses_safe_semantic_aliases_and_rejects_unrelated_names(self):
+        from workout.services import _match_catalog_exercise
+        catalog=[{"id":"Dead_Bug","name":"Dead Bug"},{"id":"One_Handed_Hang","name":"One Handed Hang"},{"id":"Split_Squat_with_Dumbbells","name":"Split Squat with Dumbbells"},{"id":"Barbell_Side_Split_Squat","name":"Barbell Side Split Squat"}]
+        self.assertIsNone(_match_catalog_exercise("Dead hang",catalog))
+        self.assertIsNone(_match_catalog_exercise("Bulgarian split squat",catalog))
+        self.assertIsNone(_match_catalog_exercise("Deadlift hangboard hybrid",catalog))
+
+    def test_refresh_clears_a_legacy_wrong_match(self):
+        exercise,_=resolve_exercise("Dead hang",defaults={"instructions":"Dead bug instructions","equipment":"body only"})
+        exercise.external_provider="free-exercise-db"; exercise.external_id="Dead_Bug"
+        exercise.enrichment_data={"source_name":"Dead Bug"}; exercise.demo_media_url="/media/wrong.gif"
+        exercise.enriched_at=timezone.now(); exercise.save()
+        client=self.Client(self.catalog,self.image)
+        result=enrich_exercise(exercise.id,client=client,force=True)
+        self.assertEqual(result["external_provider"],"")
+        self.assertEqual(result["instructions"],"")
+        self.assertEqual(result["demo_media_url"],"")
+        self.assertTrue(result["enrichment_error"])
+
+    def test_refresh_replaces_provider_fields_but_preserves_manual_overrides(self):
+        from workout.services import update_exercise
+        exercise,_=resolve_exercise("Push Up",defaults={"instructions":"stale wrong text","equipment":"wrong"})
+        client=self.Client(self.catalog,self.image)
+        with TemporaryDirectory() as media, override_settings(MEDIA_ROOT=media,MEDIA_URL="/media/"):
+            enriched=enrich_exercise(exercise.id,client=client,force=True)
+            self.assertIn("Keep a straight body line",enriched["instructions"])
+            self.assertEqual(enriched["equipment"],"body only")
+            update_exercise(exercise.id,instructions="My verified cue")
+            refreshed=enrich_exercise(exercise.id,client=client,force=True)
+            self.assertEqual(refreshed["instructions"],"My verified cue")
+            self.assertIn("instructions",refreshed["metadata"]["enrichment_overrides"])
+
+    def test_push_up_uses_standard_not_plyometric_variant(self):
+        from workout.services import _match_catalog_exercise
+        catalog=[{"id":"Plyo","name":"Plyo Push-up"},{"id":"Standard","name":"Pushups"}]
+        self.assertEqual(_match_catalog_exercise("Push-Up",catalog)["id"],"Standard")
+
+    def test_enrichment_issue_action_exposes_missing_entries(self):
+        import orchestration.tools.workout  # noqa: F401
+        exercise,_=resolve_exercise("Uncatalogued movement")
+        issues=FunctionRegistry.resolve_callable("workout.get_enrichment_issues")()
+        self.assertEqual(issues["exercises"][0]["id"],str(exercise.id))
 
     def test_registered_actions_expose_history_and_progress(self):
         import orchestration.tools.workout  # noqa: F401
@@ -211,3 +306,98 @@ class WorkoutPlanAndExerciseDeletionTests(TestCase):
         self.assertTrue(remove_plan(plan["id"])["deleted"])
         exercise=Exercise.objects.get(normalized_name="action movement")
         self.assertTrue(remove_exercise(str(exercise.id))["deleted"])
+
+
+class GuidedWorkoutRevampTests(TestCase):
+    def test_plan_ranges_are_preserved_and_become_set_targets(self):
+        plan=save_plan(title="Ranges",sessions=[{"name":"Day","exercises":[{"name":"Split squat","sets":3,"reps_min":8,"reps_max":12,"per_side":True},{"name":"Dead hang","sets":2,"duration_seconds_min":30,"duration_seconds_max":60}]}])
+        reps=plan["sessions"][0]["exercises"][0]; timed=plan["sessions"][0]["exercises"][1]
+        self.assertEqual(reps["reps"],"8-12"); self.assertTrue(reps["metadata"]["per_side"])
+        self.assertEqual(timed["phase_type"],"timed"); self.assertEqual(timed["duration_seconds"],60)
+        session=start_session(plan=plan["id"],planned_session=plan["sessions"][0]["id"])
+        self.assertEqual(session["exercises"][0]["set_logs"][0]["target"]["reps"],"8-12")
+        self.assertEqual(session["exercises"][1]["set_logs"][0]["target"]["duration_seconds_min"],30)
+
+    def test_named_session_cycles_and_detailed_sets(self):
+        plan = save_plan(title="Intervals", sessions=[{"name":"Run day","guidance_mode":"guided","guidance_level":"full","exercises":[{"name":"Sprint","phase_type":"timed","sets":2,"duration_seconds":30,"rest_seconds":0,"block_name":"Fast loop","cycle_count":2,"set_targets":[{"duration_seconds":20},{"duration_seconds":30}]}]}])
+        self.assertEqual(plan["sessions"][0]["name"], "Run day")
+        session = start_session(plan=plan["id"], planned_session=plan["sessions"][0]["id"], mode="guided", guidance_level="full")
+        self.assertEqual(session["planned_session_name"], "Run day")
+        self.assertEqual(len(session["exercises"]), 2)
+        self.assertEqual(len(session["exercises"][0]["set_logs"]), 2)
+        self.assertEqual(session["exercises"][0]["set_logs"][0]["target"]["duration_seconds"], 20)
+
+    def test_pause_draft_review_and_submit(self):
+        from workout.services import set_session_status, update_set_log
+        session = start_session(exercises=[{"name":"Squat","sets":1,"reps":5}])
+        self.assertEqual(set_session_status(session["id"], "pause")["status"], "paused")
+        self.assertEqual(set_session_status(session["id"], "resume")["status"], "active")
+        set_id = session["exercises"][0]["set_logs"][0]["id"]
+        changed = update_set_log(set_id, status="completed", actual={"reps":6,"weight_kg":80})
+        self.assertTrue(changed["completed"])
+        draft = finish_session(session["id"], draft=True)
+        self.assertEqual(draft["status"], "draft")
+        self.assertEqual(set_session_status(session["id"], "submit")["status"], "completed")
+
+
+class FullWorkoutActionSuiteTests(TestCase):
+    def test_corv_can_crud_directory_plans_history_sets_and_goals(self):
+        import orchestration.tools.workout  # noqa: F401
+        create_exercise=FunctionRegistry.resolve_callable("workout.create_exercise")
+        update_exercise_action=FunctionRegistry.resolve_callable("workout.update_exercise")
+        update_plan_action=FunctionRegistry.resolve_callable("workout.update_plan")
+        edit_session_action=FunctionRegistry.resolve_callable("workout.edit_session")
+        edit_log_action=FunctionRegistry.resolve_callable("workout.edit_exercise_log")
+        edit_set_action=FunctionRegistry.resolve_callable("workout.edit_set_log")
+        list_goals_action=FunctionRegistry.resolve_callable("workout.list_goals")
+        update_goal_action=FunctionRegistry.resolve_callable("workout.update_goal")
+        delete_goal_action=FunctionRegistry.resolve_callable("workout.delete_goal")
+        exercise=create_exercise("Action Squat",muscle_group="Legs")
+        self.assertTrue(exercise["created"])
+        self.assertEqual(update_exercise_action(exercise["id"],equipment="Rack")["equipment"],"Rack")
+        plan=save_plan(title="Action program",sessions=[{"name":"Day A","exercises":[{"name":"Action Squat","sets":1,"reps":5}]}])
+        changed_plan=update_plan_action(plan["id"],goal="Strength")
+        self.assertEqual(changed_plan["goal"],"Strength")
+        session=start_session(plan=plan["id"],planned_session=plan["sessions"][0]["id"])
+        self.assertEqual(edit_session_action(session["id"],title="Corrected title")["title"],"Corrected title")
+        log=session["exercises"][0]
+        self.assertEqual(edit_log_action(log["id"],reps=6)["reps"],6)
+        self.assertEqual(edit_set_action(log["set_logs"][0]["id"],actual={"reps":6})["set_logs"][0]["actual"]["reps"],6)
+        goal=WorkoutGoal.objects.create(title="Old goal",metric="sessions_per_week",target_value=2)
+        self.assertEqual(list_goals_action()["goals"][0]["id"],str(goal.id))
+        self.assertEqual(update_goal_action(str(goal.id),title="New goal")["title"],"New goal")
+        self.assertTrue(delete_goal_action(str(goal.id))["deleted"])
+
+    def test_persisted_module_explains_full_safe_workflow(self):
+        from orchestration.models import ToolModule
+        instructions=ToolModule.objects.get(slug="workout").caller_instructions
+        self.assertIn("full training lifecycle",instructions)
+        self.assertIn("Supplying either replaces the complete programming",instructions)
+        self.assertIn("never guess",instructions)
+
+
+class WorkoutPlanExerciseOrderingTests(TestCase):
+    def setUp(self):
+        self.plan=WorkoutPlan.objects.create(title="Ordered plan")
+        self.first=WorkoutPlanSession.objects.create(plan=self.plan,name="First",order_index=0)
+        self.second=WorkoutPlanSession.objects.create(plan=self.plan,name="Second",order_index=1)
+        self.squat,_=resolve_exercise("Ordering Squat")
+        self.row,_=resolve_exercise("Ordering Row")
+
+    def test_same_position_is_valid_in_different_named_sessions(self):
+        WorkoutPlanExercise.objects.create(plan=self.plan,planned_session=self.first,exercise=self.squat,order_index=0)
+        WorkoutPlanExercise.objects.create(plan=self.plan,planned_session=self.second,exercise=self.squat,order_index=0)
+        self.assertEqual(WorkoutPlanExercise.objects.count(),2)
+
+    def test_position_is_unique_inside_one_named_session(self):
+        WorkoutPlanExercise.objects.create(plan=self.plan,planned_session=self.first,exercise=self.squat,order_index=0)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                WorkoutPlanExercise.objects.create(plan=self.plan,planned_session=self.first,exercise=self.row,order_index=0)
+
+    def test_legacy_plan_level_positions_remain_independent_and_unique(self):
+        WorkoutPlanExercise.objects.create(plan=self.plan,exercise=self.squat,order_index=0)
+        WorkoutPlanExercise.objects.create(plan=self.plan,planned_session=self.first,exercise=self.row,order_index=0)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                WorkoutPlanExercise.objects.create(plan=self.plan,exercise=self.row,order_index=0)
